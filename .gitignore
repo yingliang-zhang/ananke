@@ -1,0 +1,40 @@
+# Build outputs
+bin/
+build/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go
+*.test
+*.out
+go.work.sum
+
+# Node / TypeScript
+node_modules/
+*.tsbuildinfo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+*.pem
+*.key
+
+# Database
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
