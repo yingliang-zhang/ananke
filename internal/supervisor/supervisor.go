@@ -196,7 +196,8 @@ func (s *Supervisor) Run(ctx context.Context) (store.State, error) {
 		s.cancelled = true
 		s.mu.Unlock()
 		_ = s.store.Transition(ctx, s.cfg.RunID, store.StateCancelling, "cancel requested")
-		// Signal the worker to exit.
+		// Signal the worker to exit. M6 mutation: only signal the worker
+		// PID, not any group members that might survive.
 		_ = s.backend.SignalProcess(workerPID, unix.SIGTERM)
 		select {
 		case <-exitCh:
@@ -219,20 +220,36 @@ func (s *Supervisor) Run(ctx context.Context) (store.State, error) {
 		}
 	}
 
-	// 11. Cleanup: check for surviving group members, escalate if needed.
-	if err := s.cleanupGroup(ctx, s.id.SupervisorPGID); err != nil {
-		// cleanup error does not prevent reap; record it
-		fmt.Fprintf(os.Stderr, "supervisor: cleanup group: %v\n", err)
+	// 11-12. Cleanup then reap (correct order per ADR-0002 §2).
+	// M1 mutation: swaps to reap-before-cleanup (unsafe).
+	var exitCode int
+	if mutationHooks.reapBeforeCleanup {
+		exitCode, _ = s.backend.ReapWorker(workerPID)
+		s.mu.Lock()
+		s.exitCode = exitCode
+		s.reaped = true
+		s.mu.Unlock()
+		if err := s.cleanupGroup(ctx, s.id.SupervisorPGID); err != nil {
+			fmt.Fprintf(os.Stderr, "supervisor: cleanup group: %v\n", err)
+		}
+	} else {
+		if err := s.cleanupGroup(ctx, s.id.SupervisorPGID); err != nil {
+			fmt.Fprintf(os.Stderr, "supervisor: cleanup group: %v\n", err)
+		}
+		var reapErr error
+		exitCode, reapErr = s.backend.ReapWorker(workerPID)
+		s.mu.Lock()
+		s.exitCode = exitCode
+		s.reaped = true
+		s.mu.Unlock()
+		if reapErr != nil {
+			fmt.Fprintf(os.Stderr, "supervisor: reap worker: %v\n", reapErr)
+		}
 	}
 
-	// 12. Reap the worker (only after group cleanup).
-	exitCode, reapErr := s.backend.ReapWorker(workerPID)
-	s.mu.Lock()
-	s.exitCode = exitCode
-	s.reaped = true
-	s.mu.Unlock()
-	if reapErr != nil {
-		fmt.Fprintf(os.Stderr, "supervisor: reap worker: %v\n", reapErr)
+	// M3 mutation: signal numeric PGID after reap (unsafe, ADR-0002 §2).
+	if mutationHooks.signalAfterReap {
+		_ = s.backend.SignalProcess(-s.id.SupervisorPGID, unix.SIGTERM)
 	}
 
 	// 13. Commit terminal state + outbox row atomically.
@@ -267,6 +284,11 @@ func (s *Supervisor) Run(ctx context.Context) (store.State, error) {
 // period, then SIGKILLs any remaining members. SIGKILL targets individual PIDs
 // (never kill(-pgid)) to avoid self-kill (ADR-0002 §2 step 2c).
 func (s *Supervisor) cleanupGroup(ctx context.Context, pgid int) error {
+	// M6 mutation: skip group cleanup entirely — only the parent PID was
+	// signalled, leaving resistant descendants alive.
+	if mutationHooks.cancelParentOnly {
+		return nil
+	}
 	members, err := s.backend.GroupMembers(pgid)
 	if err != nil {
 		return fmt.Errorf("group members: %w", err)

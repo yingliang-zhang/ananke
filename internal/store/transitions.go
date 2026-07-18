@@ -80,7 +80,7 @@ func (s *Store) commitTransition(ctx context.Context, runID string, to State, re
 		runID, nextSeq, from, to, reason, now); err != nil {
 		return fmt.Errorf("insert transition: %w", err)
 	}
-	if terminal {
+	if terminal && !mutationHooks.noOutbox {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO finalization_outbox
 			(run_id, terminal_state, supervisor_pid, supervisor_pgid, socket_path, token, acknowledged, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,

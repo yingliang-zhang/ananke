@@ -200,7 +200,13 @@ func (e *Engine) Recover(ctx context.Context) error {
 		}
 		// Start tailing transcripts for active runs that have a transcript path.
 		if r.TranscriptPath != "" && !store.IsTerminal(r.State) {
-			e.startTailing(ctx, r.ID, r.TranscriptPath, r.CommittedOffset)
+			// M5 mutation: reset offset to 0 on reconnect, causing duplicate
+			// events instead of resuming from the committed offset.
+			off := r.CommittedOffset
+			if mutationHooks.resetOffset {
+				off = 0
+			}
+			e.startTailing(ctx, r.ID, r.TranscriptPath, off)
 		}
 	}
 	return nil
@@ -327,8 +333,14 @@ func (e *Engine) tailTranscript(ctx context.Context, runID, path string) {
 					// Complete line but invalid JSON → corruption.
 					r, _ := e.store.GetRun(ctx, runID)
 					if !store.IsTerminal(r.State) && r.State != store.StateCleanupRequired {
-						if store.CanTransition(r.State, store.StateCleanupRequired) {
-							_ = e.store.Transition(ctx, runID, store.StateCleanupRequired, "transcript corruption: invalid JSON line")
+						// M4 mutation: go directly to failed instead of
+						// cleanup_required, bypassing authenticated quiescence.
+						target := store.StateCleanupRequired
+						if mutationHooks.terminalWhileAlive {
+							target = store.StateFailed
+						}
+						if store.CanTransition(r.State, target) {
+							_ = e.store.Transition(ctx, runID, target, "transcript corruption: invalid JSON line")
 						}
 					}
 					t.offset = lineOffset

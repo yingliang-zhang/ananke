@@ -1,0 +1,17 @@
+{
+  "timestamp": "2026-07-18T03:36:34Z",
+  "results": [
+    {
+      "scenario": "success",
+      "ok": true,
+      "state": "completed",
+      "survivors": 0
+    },
+    {
+      "scenario": "cancellation",
+      "ok": true,
+      "state": "cancelled",
+      "survivors": 0
+    }
+  ]
+}

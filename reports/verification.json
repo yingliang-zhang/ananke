@@ -1,0 +1,48 @@
+{
+  "timestamp": "2026-07-18T03:35:54Z",
+  "all_pass": true,
+  "gates": [
+    {
+      "gate": "gofmt",
+      "passed": true,
+      "exit_code": 0,
+      "elapsed_s": 0.0,
+      "stderr_tail": ""
+    },
+    {
+      "gate": "vet",
+      "passed": true,
+      "exit_code": 0,
+      "elapsed_s": 0.4,
+      "stderr_tail": ""
+    },
+    {
+      "gate": "test",
+      "passed": true,
+      "exit_code": 0,
+      "elapsed_s": 57.2,
+      "stderr_tail": ""
+    },
+    {
+      "gate": "test-race",
+      "passed": true,
+      "exit_code": 0,
+      "elapsed_s": 68.1,
+      "stderr_tail": ""
+    },
+    {
+      "gate": "test-nocgo",
+      "passed": true,
+      "exit_code": 0,
+      "elapsed_s": 58.1,
+      "stderr_tail": ""
+    },
+    {
+      "gate": "build-nocgo",
+      "passed": true,
+      "exit_code": 0,
+      "elapsed_s": 0.7,
+      "stderr_tail": ""
+    }
+  ]
+}

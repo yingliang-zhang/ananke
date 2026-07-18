@@ -1,0 +1,74 @@
+{
+  "timestamp": "2026-07-18T03:32:17Z",
+  "all_detected": true,
+  "mutation_count": 6,
+  "detected_count": 6,
+  "results": [
+    {
+      "tag": "mutation_reap_before_cleanup",
+      "test": "TestMutationReapBeforeCleanupOrder",
+      "package": "./internal/supervisor/",
+      "description": "Reap worker before group cleanup \u2014 resistant child not killed before reap",
+      "exit_code": 1,
+      "classification": "behavioral_test_rejection",
+      "detected": true,
+      "stdout_tail": "--- FAIL: TestMutationReapBeforeCleanupOrder (5.71s)\n    mutation_test.go:140: GroupMembers (idx 1) called AFTER ReapWorker (idx 0) \u2014 order violation\nFAIL\nFAIL\tgithub.com/yingliang-zhang/ananke/internal/supervisor\t6.382s\nFAIL\n",
+      "stderr_tail": ""
+    },
+    {
+      "tag": "mutation_no_outbox",
+      "test": "TestCommitTerminalAtomicRollbackOnOutboxFailure",
+      "package": "./internal/store/",
+      "description": "Commit terminal state without outbox row \u2014 atomicity invariant violated",
+      "exit_code": 1,
+      "classification": "behavioral_test_rejection",
+      "detected": true,
+      "stdout_tail": "--- FAIL: TestCommitTerminalAtomicRollbackOnOutboxFailure (0.01s)\n    transitions_test.go:75: CommitTerminal unexpectedly succeeded; atomicity violated\nFAIL\nFAIL\tgithub.com/yingliang-zhang/ananke/internal/store\t1.081s\nFAIL\n",
+      "stderr_tail": ""
+    },
+    {
+      "tag": "mutation_signal_after_reap",
+      "test": "TestMutationNoGroupSignalAfterReap",
+      "package": "./internal/supervisor/",
+      "description": "Signal numeric PGID after identity lost \u2014 post-reap group signal",
+      "exit_code": 1,
+      "classification": "behavioral_test_rejection",
+      "detected": true,
+      "stdout_tail": "--- FAIL: TestMutationNoGroupSignalAfterReap (5.67s)\n    mutation_test.go:222: SignalProcess called with negative PID -9529 (group signal after reap)\nFAIL\nFAIL\tgithub.com/yingliang-zhang/ananke/internal/supervisor\t6.347s\nFAIL\n",
+      "stderr_tail": ""
+    },
+    {
+      "tag": "mutation_terminal_while_alive",
+      "test": "TestEngineTranscriptCorruption",
+      "package": "./internal/lifecycle/",
+      "description": "Enter terminal failed while worker group alive \u2014 bypasses cleanup_required",
+      "exit_code": 1,
+      "classification": "behavioral_test_rejection",
+      "detected": true,
+      "stdout_tail": "--- FAIL: TestEngineTranscriptCorruption (16.17s)\n    engine_test.go:500: run run-1784345508980838000 did not reach cleanup_required within 15s (state=completed)\nFAIL\nFAIL\tgithub.com/yingliang-zhang/ananke/internal/lifecycle\t16.851s\nFAIL\n",
+      "stderr_tail": ""
+    },
+    {
+      "tag": "mutation_reset_offset",
+      "test": "TestMutationResetOffsetNoDup",
+      "package": "./internal/lifecycle/",
+      "description": "Reset transcript offset on restart \u2014 duplicate events on reconnect",
+      "exit_code": 1,
+      "classification": "behavioral_test_rejection",
+      "detected": true,
+      "stdout_tail": "--- FAIL: TestMutationResetOffsetNoDup (10.15s)\n    mutation_test.go:92: event count after restart = 6, want 3 (duplicate events from offset reset)\nFAIL\nFAIL\tgithub.com/yingliang-zhang/ananke/internal/lifecycle\t10.867s\nFAIL\n",
+      "stderr_tail": ""
+    },
+    {
+      "tag": "mutation_cancel_parent_only",
+      "test": "TestSupervisorResistantChildEscalation",
+      "package": "./internal/supervisor/",
+      "description": "Cancel only the parent PID, not the group \u2014 resistant child survives",
+      "exit_code": 1,
+      "classification": "behavioral_test_rejection",
+      "detected": true,
+      "stdout_tail": "--- FAIL: TestSupervisorResistantChildEscalation (0.08s)\n    supervisor_test.go:231: resistant child PID 9986 still alive after supervisor exit\nFAIL\nFAIL\tgithub.com/yingliang-zhang/ananke/internal/supervisor\t0.873s\nFAIL\n",
+      "stderr_tail": ""
+    }
+  ]
+}

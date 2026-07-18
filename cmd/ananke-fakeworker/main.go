@@ -62,10 +62,11 @@ func main() {
 	}
 
 	// Sleep before exit so the supervisor stays alive long enough for
-	// tests to issue socket commands. delayMs is the total pre-exit
-	// sleep, not just inter-event spacing.
-	if delayMs > 0 {
-		time.Sleep(time.Duration(delayMs) * time.Millisecond)
+	// tests to issue socket commands. ANANKE_FW_EXIT_DELAY_MS is the
+	// pre-exit sleep; ANANKE_FW_DELAY_MS is only inter-event spacing.
+	exitDelayMs := envInt("ANANKE_FW_EXIT_DELAY_MS", delayMs)
+	if exitDelayMs > 0 {
+		time.Sleep(time.Duration(exitDelayMs) * time.Millisecond)
 	}
 
 	os.Exit(exitCode)
