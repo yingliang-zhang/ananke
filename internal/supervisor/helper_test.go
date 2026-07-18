@@ -120,7 +120,6 @@ func forkSupervisor(t *testing.T, storePath, runID string, env supEnv) (*exec.Cm
 	cmd.SysProcAttr = nil // inherit process group; supervisor will setpgid(0,0)
 	// Capture stderr for debugging to a stable path.
 	stderrPath := filepath.Join(os.TempDir(), "ananke-sup-stderr-"+runID+".log")
-	_ = os.WriteFile(stderrPath, []byte("marker: forkSupervisor entered\n"), 0o644)
 	f, ferr := os.Create(stderrPath)
 	if ferr == nil {
 		cmd.Stderr = f
@@ -128,7 +127,6 @@ func forkSupervisor(t *testing.T, storePath, runID string, env supEnv) (*exec.Cm
 		t.Cleanup(func() { f.Close() })
 	}
 	if err := cmd.Start(); err != nil {
-		_ = os.WriteFile(stderrPath, []byte("fork supervisor: "+err.Error()+"\n"), 0o644)
 		t.Fatalf("fork supervisor: %v", err)
 	}
 	t.Cleanup(func() {

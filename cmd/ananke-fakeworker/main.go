@@ -61,6 +61,13 @@ func main() {
 		time.Sleep(200 * time.Millisecond)
 	}
 
+	// Sleep before exit so the supervisor stays alive long enough for
+	// tests to issue socket commands. delayMs is the total pre-exit
+	// sleep, not just inter-event spacing.
+	if delayMs > 0 {
+		time.Sleep(time.Duration(delayMs) * time.Millisecond)
+	}
+
 	os.Exit(exitCode)
 }
 

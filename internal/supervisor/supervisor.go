@@ -87,6 +87,14 @@ func New(ctx context.Context, cfg Config) (*Supervisor, error) {
 		st.Close()
 		return nil, fmt.Errorf("supervisor: run state is %q, want %q", run.State, store.StateCreated)
 	}
+	// Inherit WorkerArgs and WorkerEnv from the run spec if not provided
+	// directly (the supervisor binary doesn't pass these via flags).
+	if len(cfg.WorkerArgs) == 0 {
+		cfg.WorkerArgs = run.WorkerArgs
+	}
+	if len(cfg.WorkerEnv) == 0 {
+		cfg.WorkerEnv = run.WorkerEnv
+	}
 	backend := cfg.Backend
 	if backend == nil {
 		backend = lifecycle.NewDarwinBackend()
