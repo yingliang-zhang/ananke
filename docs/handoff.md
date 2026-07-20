@@ -1,30 +1,37 @@
-# Handoff — Ananke first GUI milestone
+# Handoff — Ananke GUI v0.1 accepted
 
 ## Goal
 
-Finish and publish Slice-001 (durable Go lifecycle), then implement the first usable Tauri 2 + Vanilla TypeScript GUI backed by the real Go daemon.
+Deliver the first operator-facing desktop proof over the real Go durable lifecycle path.
 
-## Slice-001 status
+## Completed
 
-- **Independent review:** candidate v11 `VERDICT: ACCEPT` (`019f8099-15bf-7000-a2ac-5014079acaa2`; `artifacts/omp/slice-001-final-review/hard-review-v11-output.md`).
-- **Frozen source candidate:** `93aef9afc7771cb79c35d3c7df0fa6bca6f50e8071619d0fa36473198b82dd7f`, 68 files; manifest `candidate-manifest-v11.json`.
-- **Canonical evidence:** verify, mutation 6/6, stress, blackbox, Python 26/26, gofmt/diff, and post-gate process scans at 0/1/4 seconds all passed.
-- **Repair I:** fixes unsealed valid-EOF transcript publication and PID-reuse cleanup risk with a paused worker-group trampoline. Supervisor stays outside the worker group; durable authority is published before release; cleanup is atomic negative-PGID signalling before reaping.
-- **P2 hardening:** token entropy errors fail closed; watcher terminal errors wake cleanup; identity file and parent directory are synced; daemon does not print auth tokens.
-- **Residual accepted risk:** supervisor crash while resistant descendants remain enters ADR-0002 fail-closed `recovery_unknown`; it does not signal a possibly reused PGID.
+- Slice-001 durable lifecycle is on `main` as `df72fe9`.
+- GUI v0.1 is implemented on `feat/gui-v0.1`: Tauri 2 + Vanilla TypeScript → Rust bridge → Go daemon sidecar → supervisor/worker → SQLite journal → activity UI.
+- Go daemon added authenticated `list-runs` with project/workstream filtering; no secret fields are projected.
+- Bridge uses a private owned `0700` per-user `/tmp` runtime directory, a `0600` app-data token, narrow stale-socket classification, safe Go socket removal, release-safe project root, and no renderer token/socket path.
+- Rust public `Backend` E2E covers bootstrap → list → launch → events → durable cancel → reconnect.
+- Independent final B1 review: `artifacts/omp/gui-v0.1/b1-final-review-output.md` — `VERDICT: ACCEPT`.
 
-## Changed areas
+## Verification
 
-- Lifecycle/store/supervisor contracts and tests: `internal/{lifecycle,store,supervisor}`
-- Entry points: `cmd/ananke*`
-- Harness/reports: `scripts/`, `reports/`
-- Architecture/ledger: `ARCHITECTURE.md`, `docs/adr/0002-supervisor-lifecycle-identity-model.md`, `docs/experiment-ledger.md`
-- GUI research: `docs/gui-v0.1-design.md`, `docs/ui-reference-audit.md`
+- `cargo test --manifest-path gui/src-tauri/Cargo.toml`: 9 tests PASS.
+- `npm --prefix gui run test:state`, typecheck, Vite build: PASS.
+- `go test ./internal/store ./internal/supervisor ./internal/lifecycle -count=1 -timeout 300s`: PASS.
+- `CI=true npm run tauri:build` from `gui/`: `Ananke.app` PASS, with `ananke`, `ananke-supervisor`, `ananke-fakeworker` resources.
 
-## GUI v0.1 next step
+## Current state / known boundary
 
-No Tauri scaffold exists yet. Use Node `v22.22.3` at `/Users/yingliangzhang/.hermes/node/bin`; Rust/Cargo are installed at `$HOME/.cargo/bin` but are not on PATH. Implement only the documented v0.1: backend-authoritative project/workstream/run views, launch real Go worker runs, stream status/events, and durable cancel. Do not build an IDE/chat/terminal clone.
+- The deliverable is a macOS `.app` proof. Tauri DMG creation is excluded because macOS 27 rejects the version of `hdiutil create` used by Tauri's create-dmg script. This is packaging compatibility work, not a GUI authority/runtime defect.
+- Native screenshot capture is unavailable in this no-display agent session; no visual screenshot claim was made.
+- The GUI source must now be staged/committed/pushed as a feature-branch commit, then manually reviewed/launched by the user.
 
-## Authorization
+## Changed paths
 
-User has authorized autonomous development, verification, commit, and push through GUI v0.1 completion.
+- `.gitignore`, `internal/lifecycle/engine.go`, `internal/lifecycle/engine_test.go`, `internal/lifecycle/engine_shutdown_test.go`
+- `gui/` (Tauri/Vite/Rust bridge/UI/tests/config/icon)
+- `docs/experiment-ledger.md`, `docs/handoff.md`
+
+## Next step
+
+Commit and push `feat/gui-v0.1`; optionally open/merge after user acceptance of the native UI.

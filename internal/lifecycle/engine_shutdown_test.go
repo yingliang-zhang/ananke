@@ -32,6 +32,114 @@ func newShutdownTestEngine(t *testing.T) *Engine {
 	return engine
 }
 
+func newSocketPathTestEngine(t *testing.T, socketPath string) *Engine {
+	t.Helper()
+	dir := t.TempDir()
+	engine, err := NewEngine(EngineConfig{
+		StorePath:     filepath.Join(dir, "store.sqlite"),
+		SocketPath:    socketPath,
+		SupervisorBin: "/bin/true",
+		DataDir:       filepath.Join(dir, "data"),
+		Token:         "socket-path-test-token",
+		TickInterval:  time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	t.Cleanup(func() { _ = engine.Close() })
+	return engine
+}
+
+func runEngineExpectSocketPathRejection(t *testing.T, engine *Engine) error {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- engine.Run(ctx) }()
+	select {
+	case err := <-runDone:
+		return err
+	case <-time.After(time.Second):
+		cancel()
+		<-runDone
+		t.Fatal("Engine.Run did not reject the configured socket path")
+		return nil
+	}
+}
+
+func TestEngineRunRejectsAndPreservesRegularSocketPath(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	contents := []byte("do not remove")
+	if err := os.WriteFile(socketPath, contents, 0o600); err != nil {
+		t.Fatalf("write regular socket path: %v", err)
+	}
+
+	err := runEngineExpectSocketPathRejection(t, newSocketPathTestEngine(t, socketPath))
+	if err == nil {
+		t.Fatal("Engine.Run succeeded with a regular socket path")
+	}
+	got, err := os.ReadFile(socketPath)
+	if err != nil {
+		t.Fatalf("read preserved regular socket path: %v", err)
+	}
+	if string(got) != string(contents) {
+		t.Fatalf("regular socket path contents = %q, want %q", got, contents)
+	}
+}
+
+func TestEngineRunRejectsAndPreservesDirectorySocketPath(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	if err := os.Mkdir(socketPath, 0o700); err != nil {
+		t.Fatalf("make directory socket path: %v", err)
+	}
+
+	err := runEngineExpectSocketPathRejection(t, newSocketPathTestEngine(t, socketPath))
+	if err == nil {
+		t.Fatal("Engine.Run succeeded with a directory socket path")
+	}
+	info, err := os.Lstat(socketPath)
+	if err != nil {
+		t.Fatalf("stat preserved directory socket path: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("socket path mode = %v, want directory", info.Mode())
+	}
+}
+
+func TestEngineRunReplacesStaleUnixSocket(t *testing.T) {
+	socketPath := filepath.Join("/tmp", "ananke-stale-"+strconv.FormatInt(time.Now().UnixNano(), 10)+".sock")
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+	stale, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen stale socket: %v", err)
+	}
+	if err := stale.Close(); err != nil {
+		t.Fatalf("close stale socket: %v", err)
+	}
+
+	engine := newSocketPathTestEngine(t, socketPath)
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- engine.Run(ctx) }()
+	waitForEngineSocket(t, socketPath, time.Second)
+	info, err := os.Lstat(socketPath)
+	if err != nil {
+		t.Fatalf("stat replacement socket: %v", err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("socket path mode = %v, want Unix socket", info.Mode())
+	}
+	cancel()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Engine.Run: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Engine.Run did not stop after cancellation")
+	}
+}
+
 func requireStoreClosed(t *testing.T, engine *Engine) {
 	t.Helper()
 	if _, err := engine.store.SchemaVersion(context.Background()); err == nil {

@@ -1,0 +1,1089 @@
+use serde::{Deserialize, Serialize};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::os::unix::fs::symlink;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::Mutex;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Manager, State};
+
+const DEFAULT_PROJECT_ID: &str = "ananke";
+const DEFAULT_PROJECT_NAME: &str = "Ananke";
+const DEFAULT_WORKSTREAM_ID: &str = "main";
+const DEFAULT_WORKSTREAM_NAME: &str = "main";
+const PRIVATE_RUNTIME_PREFIX: &str = "ananke-gui-";
+const DAEMON_SOCKET_NAME: &str = "daemon.sock";
+const DATA_SOCKET_ALIAS_NAME: &str = "data";
+const TOKEN_FILE_NAME: &str = "daemon-token";
+const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(5);
+const API_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug)]
+enum BridgeError {
+    Io(std::io::Error),
+    SocketConnect(std::io::Error),
+    Json(serde_json::Error),
+    InvalidToken,
+    UnsafeRuntimeDirectory,
+    UnexpectedSocketEndpoint,
+    DataAliasMismatch,
+    MissingBinary,
+    DaemonRejected(String),
+    Protocol,
+    DaemonUnavailable,
+}
+
+impl From<std::io::Error> for BridgeError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<serde_json::Error> for BridgeError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
+    }
+}
+
+impl std::fmt::Display for BridgeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Ananke daemon bridge error")
+    }
+}
+
+impl std::error::Error for BridgeError {}
+
+impl BridgeError {
+    fn public_message(&self) -> String {
+        match self {
+            Self::DaemonRejected(_) => "The daemon rejected this request.".into(),
+            Self::Io(error) | Self::SocketConnect(error) => {
+                let _ = error.kind();
+                "The Ananke daemon is unavailable. Check the local backend installation and retry."
+                    .into()
+            }
+            Self::Json(error) => {
+                let _ = error.classify();
+                "The Ananke daemon is unavailable. Check the local backend installation and retry."
+                    .into()
+            }
+            Self::InvalidToken
+            | Self::UnsafeRuntimeDirectory
+            | Self::UnexpectedSocketEndpoint
+            | Self::DataAliasMismatch
+            | Self::MissingBinary
+            | Self::DaemonUnavailable
+            | Self::Protocol => {
+                "The Ananke daemon is unavailable. Check the local backend installation and retry."
+                    .into()
+            }
+        }
+    }
+}
+
+fn is_credible_stale_socket_failure(error: &BridgeError) -> bool {
+    matches!(
+        error,
+        BridgeError::SocketConnect(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            )
+    )
+}
+
+#[derive(Clone)]
+struct DaemonPaths {
+    app_data_dir: PathBuf,
+    runtime_dir: PathBuf,
+    data_socket_alias: PathBuf,
+    socket: PathBuf,
+    daemon_binary: PathBuf,
+    supervisor_binary: PathBuf,
+    fakeworker_binary: PathBuf,
+    repository_root: PathBuf,
+}
+
+impl DaemonPaths {
+    fn from_app(app: &AppHandle) -> Result<Self, BridgeError> {
+        let app_data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|_| BridgeError::DaemonUnavailable)?;
+        let repository_root = current_project_root(&app_data_dir)?;
+        #[cfg(debug_assertions)]
+        let binaries_dir = development_repository_root().join(".ananke/bin");
+        #[cfg(not(debug_assertions))]
+        let binaries_dir = app
+            .path()
+            .resource_dir()
+            .map_err(|_| BridgeError::DaemonUnavailable)?
+            .join("ananke-bin");
+        Self::from_parts(
+            app_data_dir,
+            repository_root,
+            binaries_dir,
+            private_runtime_directory(),
+        )
+    }
+
+    fn from_parts(
+        app_data_dir: PathBuf,
+        repository_root: PathBuf,
+        binaries_dir: PathBuf,
+        runtime_dir: PathBuf,
+    ) -> Result<Self, BridgeError> {
+        ensure_owned_private_directory(&app_data_dir)?;
+        let data_dir = app_data_dir.join("runs");
+        ensure_owned_private_directory(&data_dir)?;
+        ensure_private_runtime_dir(&runtime_dir)?;
+        let data_socket_alias = runtime_dir.join(DATA_SOCKET_ALIAS_NAME);
+        ensure_data_alias(&data_dir, &data_socket_alias)?;
+        let socket = runtime_dir.join(DAEMON_SOCKET_NAME);
+        Ok(Self {
+            app_data_dir,
+            runtime_dir,
+            data_socket_alias,
+            socket,
+            daemon_binary: binaries_dir.join("ananke"),
+            supervisor_binary: binaries_dir.join("ananke-supervisor"),
+            fakeworker_binary: binaries_dir.join("ananke-fakeworker"),
+            repository_root,
+        })
+    }
+
+    fn store_path(&self) -> PathBuf {
+        self.app_data_dir.join("journal.sqlite")
+    }
+
+    fn token_path(&self) -> PathBuf {
+        self.app_data_dir.join(TOKEN_FILE_NAME)
+    }
+}
+
+fn effective_uid() -> u32 {
+    // SAFETY: geteuid has no preconditions and does not access Rust-managed memory.
+    unsafe { libc::geteuid() }
+}
+
+fn private_runtime_directory() -> PathBuf {
+    PathBuf::from("/tmp").join(format!("{PRIVATE_RUNTIME_PREFIX}{}", effective_uid()))
+}
+
+fn ensure_private_runtime_dir(path: &Path) -> Result<(), BridgeError> {
+    ensure_owned_private_directory(path)
+}
+
+fn ensure_owned_private_directory(path: &Path) -> Result<(), BridgeError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir_all(path)?,
+        Err(error) => return Err(error.into()),
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    validate_owned_private_directory(&metadata)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    let metadata = fs::symlink_metadata(path)?;
+    validate_owned_private_directory(&metadata)?;
+    if metadata.permissions().mode() & 0o777 != 0o700 {
+        return Err(BridgeError::UnsafeRuntimeDirectory);
+    }
+    Ok(())
+}
+
+fn validate_owned_private_directory(metadata: &fs::Metadata) -> Result<(), BridgeError> {
+    if metadata.file_type().is_symlink()
+        || !metadata.file_type().is_dir()
+        || metadata.uid() != effective_uid()
+    {
+        return Err(BridgeError::UnsafeRuntimeDirectory);
+    }
+    Ok(())
+}
+
+fn select_project_root(
+    app_data_dir: &Path,
+    development_root: &Path,
+    debug_build: bool,
+) -> Result<PathBuf, BridgeError> {
+    ensure_owned_private_directory(app_data_dir)?;
+    if debug_build {
+        return Ok(development_root.to_path_buf());
+    }
+    let project_root = app_data_dir.join("project-root");
+    ensure_owned_private_directory(&project_root)?;
+    Ok(project_root)
+}
+
+#[cfg(debug_assertions)]
+fn development_repository_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("GUI crate is nested under the repository root")
+        .to_path_buf()
+}
+
+fn current_project_root(app_data_dir: &Path) -> Result<PathBuf, BridgeError> {
+    #[cfg(debug_assertions)]
+    {
+        return select_project_root(app_data_dir, &development_repository_root(), true);
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        select_project_root(app_data_dir, Path::new(""), false)
+    }
+}
+
+// The actual run data lives in the app-data directory. The short, verified
+// symlink is passed to Go so per-run supervisor socket paths remain below the
+// Darwin Unix-domain socket limit.
+fn ensure_data_alias(data_dir: &Path, alias: &Path) -> Result<(), BridgeError> {
+    match fs::symlink_metadata(alias) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            let destination = fs::canonicalize(alias)?;
+            if destination != fs::canonicalize(data_dir)? {
+                return Err(BridgeError::DataAliasMismatch);
+            }
+        }
+        Ok(_) => return Err(BridgeError::DataAliasMismatch),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => symlink(data_dir, alias)?,
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+fn load_or_create_token(path: &Path) -> Result<String, BridgeError> {
+    match fs::read_to_string(path) {
+        Ok(token) => {
+            let token = token.trim().to_owned();
+            if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(BridgeError::InvalidToken);
+            }
+            let mode = fs::metadata(path)?.permissions().mode() & 0o777;
+            if mode != 0o600 {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+            }
+            Ok(token)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => create_token(path),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn create_token(path: &Path) -> Result<String, BridgeError> {
+    let mut entropy = [0_u8; 32];
+    File::open("/dev/urandom")?.read_exact(&mut entropy)?;
+    let mut token = String::with_capacity(entropy.len() * 2);
+    for byte in entropy {
+        use std::fmt::Write as _;
+        write!(&mut token, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    let mut token_file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return load_or_create_token(path);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    token_file.write_all(token.as_bytes())?;
+    token_file.write_all(b"\n")?;
+    token_file.sync_all()?;
+    Ok(token)
+}
+
+#[derive(Serialize)]
+struct GoRequest<'a> {
+    cmd: &'a str,
+    token: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    root: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workstream_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worker_path: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worker_args: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worker_env: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    after_seq: Option<i64>,
+}
+
+impl<'a> GoRequest<'a> {
+    fn new(cmd: &'a str, token: &'a str) -> Self {
+        Self {
+            cmd,
+            token,
+            id: None,
+            name: None,
+            root: None,
+            project_id: None,
+            workstream_id: None,
+            worker_path: None,
+            worker_args: None,
+            worker_env: None,
+            after_seq: None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GoResponse {
+    ok: bool,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    run: Option<JsonRun>,
+    #[serde(default)]
+    runs: Vec<JsonRun>,
+    #[serde(default)]
+    events: Vec<EventDto>,
+    #[serde(default)]
+    accepted: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct JsonRun {
+    id: String,
+    project_id: String,
+    workstream_id: String,
+    state: String,
+    worker_pid: i32,
+    supervisor_pid: i32,
+    committed_offset: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RunDiagnosticsDto {
+    pub project_id: String,
+    pub workstream_id: String,
+    pub worker_pid: i32,
+    pub supervisor_pid: i32,
+    pub committed_offset: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RunDto {
+    pub id: String,
+    pub state: String,
+    pub diagnostics: RunDiagnosticsDto,
+}
+
+impl From<JsonRun> for RunDto {
+    fn from(run: JsonRun) -> Self {
+        Self {
+            id: run.id,
+            state: run.state,
+            diagnostics: RunDiagnosticsDto {
+                project_id: run.project_id,
+                workstream_id: run.workstream_id,
+                worker_pid: run.worker_pid,
+                supervisor_pid: run.supervisor_pid,
+                committed_offset: run.committed_offset,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct EventDto {
+    pub seq: i64,
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProjectDto {
+    pub id: String,
+    pub name: String,
+    pub root: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WorkstreamDto {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BootstrapDto {
+    pub project: ProjectDto,
+    pub workstream: WorkstreamDto,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CancelDto {
+    pub accepted: bool,
+    pub state: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct HealthDto {
+    pub online: bool,
+}
+
+struct BridgeState {
+    backend: Mutex<Backend>,
+}
+
+struct Backend {
+    paths: DaemonPaths,
+    token: String,
+    spawned_daemon: Option<std::process::Child>,
+}
+
+impl Backend {
+    fn new(paths: DaemonPaths) -> Result<Self, BridgeError> {
+        let token = load_or_create_token(&paths.token_path())?;
+        Ok(Self {
+            paths,
+            token,
+            spawned_daemon: None,
+        })
+    }
+
+    fn request<'a>(&self, request: GoRequest<'a>) -> Result<GoResponse, BridgeError> {
+        let mut stream =
+            UnixStream::connect(&self.paths.socket).map_err(BridgeError::SocketConnect)?;
+        stream.set_read_timeout(Some(API_TIMEOUT))?;
+        stream.set_write_timeout(Some(API_TIMEOUT))?;
+        serde_json::to_writer(&mut stream, &request)?;
+        stream.write_all(b"\n")?;
+        stream.flush()?;
+        let response: GoResponse = serde_json::from_reader(stream)?;
+        if !response.ok {
+            return Err(BridgeError::DaemonRejected(
+                response.error.unwrap_or_default(),
+            ));
+        }
+        Ok(response)
+    }
+
+    fn ping(&self) -> Result<(), BridgeError> {
+        self.request(GoRequest::new("ping", &self.token))
+            .map(|_| ())
+    }
+
+    fn ensure_daemon(&mut self) -> Result<(), BridgeError> {
+        match self.ping() {
+            Ok(()) => return Ok(()),
+            Err(error) if is_credible_stale_socket_failure(&error) => {}
+            Err(error) => return Err(error),
+        }
+        remove_known_stale_socket(&self.paths.runtime_dir, &self.paths.socket)?;
+        self.spawn_daemon()?;
+        let deadline = Instant::now() + DAEMON_START_TIMEOUT;
+        while Instant::now() < deadline {
+            if self.ping().is_ok() {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        Err(BridgeError::DaemonUnavailable)
+    }
+
+    fn spawn_daemon(&mut self) -> Result<(), BridgeError> {
+        for binary in [
+            &self.paths.daemon_binary,
+            &self.paths.supervisor_binary,
+            &self.paths.fakeworker_binary,
+        ] {
+            if !binary.is_file() {
+                return Err(BridgeError::MissingBinary);
+            }
+        }
+        let child = Command::new(&self.paths.daemon_binary)
+            .arg("-store")
+            .arg(self.paths.store_path())
+            .arg("-socket")
+            .arg(&self.paths.socket)
+            .arg("-supervisor-bin")
+            .arg(&self.paths.supervisor_binary)
+            .arg("-data-dir")
+            .arg(&self.paths.data_socket_alias)
+            .arg("-token")
+            .arg(&self.token)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        self.spawned_daemon = Some(child);
+        Ok(())
+    }
+
+    fn bootstrap(&mut self) -> Result<BootstrapDto, BridgeError> {
+        self.ensure_daemon()?;
+        let root = self.paths.repository_root.to_string_lossy();
+        let mut create_project = GoRequest::new("create-project", &self.token);
+        create_project.id = Some(DEFAULT_PROJECT_ID);
+        create_project.name = Some(DEFAULT_PROJECT_NAME);
+        create_project.root = Some(root.as_ref());
+        self.accept_existing(create_project)?;
+
+        let mut create_workstream = GoRequest::new("create-workstream", &self.token);
+        create_workstream.id = Some(DEFAULT_WORKSTREAM_ID);
+        create_workstream.project_id = Some(DEFAULT_PROJECT_ID);
+        create_workstream.name = Some(DEFAULT_WORKSTREAM_NAME);
+        self.accept_existing(create_workstream)?;
+
+        Ok(BootstrapDto {
+            project: ProjectDto {
+                id: DEFAULT_PROJECT_ID.into(),
+                name: DEFAULT_PROJECT_NAME.into(),
+                root: root.into_owned(),
+            },
+            workstream: WorkstreamDto {
+                id: DEFAULT_WORKSTREAM_ID.into(),
+                project_id: DEFAULT_PROJECT_ID.into(),
+                name: DEFAULT_WORKSTREAM_NAME.into(),
+            },
+        })
+    }
+
+    fn accept_existing<'a>(&self, request: GoRequest<'a>) -> Result<(), BridgeError> {
+        accept_existing_response(self.request(request))
+    }
+
+    fn list_runs(&mut self) -> Result<Vec<RunDto>, BridgeError> {
+        self.ensure_daemon()?;
+        let mut request = GoRequest::new("list-runs", &self.token);
+        request.project_id = Some(DEFAULT_PROJECT_ID);
+        request.workstream_id = Some(DEFAULT_WORKSTREAM_ID);
+        Ok(self
+            .request(request)?
+            .runs
+            .into_iter()
+            .map(RunDto::from)
+            .collect())
+    }
+
+    fn launch_fixture(&mut self) -> Result<RunDto, BridgeError> {
+        self.ensure_daemon()?;
+        let run_id = fixture_run_id();
+        let worker_env = vec![
+            "ANANKE_FW_EVENTS=6".to_owned(),
+            "ANANKE_FW_DELAY_MS=250".to_owned(),
+            "ANANKE_FW_EXIT_DELAY_MS=750".to_owned(),
+        ];
+        let worker_args = Vec::new();
+        let worker_path = self.paths.fakeworker_binary.to_string_lossy();
+        let mut request = GoRequest::new("launch-run", &self.token);
+        request.id = Some(&run_id);
+        request.project_id = Some(DEFAULT_PROJECT_ID);
+        request.workstream_id = Some(DEFAULT_WORKSTREAM_ID);
+        request.worker_path = Some(worker_path.as_ref());
+        request.worker_args = Some(&worker_args);
+        request.worker_env = Some(&worker_env);
+        self.request(request)?
+            .run
+            .map(RunDto::from)
+            .ok_or(BridgeError::Protocol)
+    }
+
+    fn get_run(&mut self, run_id: &str) -> Result<RunDto, BridgeError> {
+        self.ensure_daemon()?;
+        let mut request = GoRequest::new("get-run", &self.token);
+        request.id = Some(run_id);
+        self.request(request)?
+            .run
+            .map(RunDto::from)
+            .ok_or(BridgeError::Protocol)
+    }
+
+    fn list_events(&mut self, run_id: &str, after_seq: i64) -> Result<Vec<EventDto>, BridgeError> {
+        self.ensure_daemon()?;
+        let mut request = GoRequest::new("list-events", &self.token);
+        request.id = Some(run_id);
+        request.after_seq = Some(after_seq);
+        Ok(self.request(request)?.events)
+    }
+
+    fn cancel_run(&mut self, run_id: &str) -> Result<CancelDto, BridgeError> {
+        self.ensure_daemon()?;
+        let mut request = GoRequest::new("cancel-run", &self.token);
+        request.id = Some(run_id);
+        let response = self.request(request)?;
+        Ok(CancelDto {
+            accepted: response.accepted,
+            state: response.state.ok_or(BridgeError::Protocol)?,
+        })
+    }
+
+    #[cfg(test)]
+    fn shutdown_for_test(&mut self) {
+        if let Some(mut child) = self.spawned_daemon.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let _ = remove_known_stale_socket(&self.paths.runtime_dir, &self.paths.socket);
+    }
+}
+
+fn accept_existing_response(response: Result<GoResponse, BridgeError>) -> Result<(), BridgeError> {
+    match response {
+        Ok(_) => Ok(()),
+        Err(BridgeError::DaemonRejected(error)) if is_bootstrap_duplicate_error(&error) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn is_bootstrap_duplicate_error(error: &str) -> bool {
+    error.contains("UNIQUE constraint failed: projects.id")
+        || error.contains("UNIQUE constraint failed: workstreams.id")
+}
+
+fn remove_known_stale_socket(runtime_dir: &Path, socket: &Path) -> Result<(), BridgeError> {
+    if socket.parent() != Some(runtime_dir) {
+        return Err(BridgeError::UnexpectedSocketEndpoint);
+    }
+    ensure_private_runtime_dir(runtime_dir)?;
+    match fs::symlink_metadata(socket) {
+        Ok(metadata) if metadata.file_type().is_socket() => {
+            fs::remove_file(socket)?;
+            Ok(())
+        }
+        Ok(_) => Err(BridgeError::UnexpectedSocketEndpoint),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn fixture_run_id() -> String {
+    let milliseconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("fixture-{milliseconds}")
+}
+
+fn use_backend<T>(
+    state: State<'_, BridgeState>,
+    operation: impl FnOnce(&mut Backend) -> Result<T, BridgeError>,
+) -> Result<T, String> {
+    let mut backend = state
+        .backend
+        .lock()
+        .map_err(|_| "The Ananke desktop bridge is unavailable.".to_owned())?;
+    operation(&mut backend).map_err(|error| error.public_message())
+}
+
+#[tauri::command]
+fn bootstrap(state: State<'_, BridgeState>) -> Result<BootstrapDto, String> {
+    use_backend(state, Backend::bootstrap)
+}
+
+#[tauri::command]
+fn daemon_health(state: State<'_, BridgeState>) -> Result<HealthDto, String> {
+    use_backend(state, |backend| {
+        backend.ensure_daemon()?;
+        Ok(HealthDto { online: true })
+    })
+}
+
+#[tauri::command]
+fn list_runs(state: State<'_, BridgeState>) -> Result<Vec<RunDto>, String> {
+    use_backend(state, Backend::list_runs)
+}
+
+#[tauri::command]
+fn launch_fixture(state: State<'_, BridgeState>) -> Result<RunDto, String> {
+    use_backend(state, Backend::launch_fixture)
+}
+
+#[tauri::command]
+fn get_run(state: State<'_, BridgeState>, run_id: String) -> Result<RunDto, String> {
+    use_backend(state, |backend| backend.get_run(&run_id))
+}
+
+#[tauri::command]
+fn list_events(
+    state: State<'_, BridgeState>,
+    run_id: String,
+    after_seq: i64,
+) -> Result<Vec<EventDto>, String> {
+    use_backend(state, |backend| backend.list_events(&run_id, after_seq))
+}
+
+#[tauri::command]
+fn cancel_run(state: State<'_, BridgeState>, run_id: String) -> Result<CancelDto, String> {
+    use_backend(state, |backend| backend.cancel_run(&run_id))
+}
+
+pub fn run() {
+    tauri::Builder::default()
+        .setup(|app| {
+            let paths = DaemonPaths::from_app(app.handle())?;
+            let backend = Backend::new(paths)?;
+            app.manage(BridgeState {
+                backend: Mutex::new(backend),
+            });
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            bootstrap,
+            daemon_health,
+            list_runs,
+            launch_fixture,
+            get_run,
+            list_events,
+            cancel_run
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running Ananke desktop application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::net::UnixListener;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn test_nonce() -> String {
+        let counter = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("{}-{counter}", std::process::id())
+    }
+
+    struct TestEnvironment {
+        root: PathBuf,
+    }
+
+    impl Drop for TestEnvironment {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn new_test_environment(label: &str) -> TestEnvironment {
+        let root = PathBuf::from(format!("/tmp/ananke-gui-{label}-{}", test_nonce()));
+        ensure_private_runtime_dir(&root).expect("create private test runtime directory");
+        TestEnvironment { root }
+    }
+
+    #[test]
+    fn creates_and_validates_private_runtime_directory() {
+        let environment = new_test_environment("runtime");
+        let metadata =
+            fs::symlink_metadata(&environment.root).expect("read private runtime metadata");
+        assert!(metadata.file_type().is_dir());
+        assert!(!metadata.file_type().is_symlink());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        assert_eq!(metadata.uid(), effective_uid());
+        ensure_private_runtime_dir(&environment.root)
+            .expect("revalidate private runtime directory");
+    }
+
+    #[test]
+    fn private_runtime_directory_rejects_symlink_and_untrusted_stale_endpoint() {
+        let environment = new_test_environment("runtime-reject");
+        let target = environment.root.join("target");
+        fs::create_dir(&target).expect("create symlink target");
+        let link = environment.root.join("link");
+        symlink(&target, &link).expect("create runtime symlink");
+        assert!(matches!(
+            ensure_private_runtime_dir(&link),
+            Err(BridgeError::UnsafeRuntimeDirectory)
+        ));
+
+        let outside = PathBuf::from(format!("/tmp/ananke-gui-untrusted-{}.sock", test_nonce()));
+        let listener = UnixListener::bind(&outside).expect("create untrusted socket");
+        drop(listener);
+        let err = remove_known_stale_socket(&environment.root, &outside)
+            .expect_err("must reject a socket outside the private runtime directory");
+        assert!(matches!(err, BridgeError::UnexpectedSocketEndpoint));
+        assert!(outside.exists(), "must not unlink an untrusted endpoint");
+        fs::remove_file(outside).expect("remove untrusted test socket");
+    }
+
+    #[test]
+    fn removes_only_socket_endpoints_in_private_runtime_directory() {
+        let environment = new_test_environment("stale");
+        let socket = environment.root.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("create stale daemon socket");
+        drop(listener);
+        remove_known_stale_socket(&environment.root, &socket)
+            .expect("remove validated stale socket");
+        assert!(!socket.exists());
+
+        let file = environment.root.join("not-a-socket");
+        fs::write(&file, "not a socket").expect("create non-socket endpoint");
+        assert!(matches!(
+            remove_known_stale_socket(&environment.root, &file),
+            Err(BridgeError::UnexpectedSocketEndpoint)
+        ));
+        assert!(file.exists(), "must not unlink a non-socket endpoint");
+    }
+
+    #[test]
+    fn ensure_daemon_preserves_live_rejecting_socket() {
+        let environment = new_test_environment("live-rejection");
+        let paths = DaemonPaths::from_parts(
+            environment.root.join("app-data"),
+            environment.root.join("project-root"),
+            environment.root.join("missing-sidecars"),
+            environment.root.clone(),
+        )
+        .expect("construct controlled bridge paths");
+        let mut backend = Backend::new(paths.clone()).expect("construct bridge backend");
+        let listener = UnixListener::bind(&paths.socket).expect("bind rejecting live daemon");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept bridge ping");
+            loop {
+                let mut byte = [0_u8; 1];
+                stream.read_exact(&mut byte).expect("read bridge ping");
+                if byte == [b'\n'] {
+                    break;
+                }
+            }
+            stream
+                .write_all(b"{\"ok\":false,\"error\":\"rejected\"}\n")
+                .expect("reject bridge ping");
+        });
+
+        let error = backend
+            .ensure_daemon()
+            .expect_err("live daemon rejection must not trigger stale recovery");
+        server.join().expect("join rejecting live daemon");
+
+        assert!(matches!(error, BridgeError::DaemonRejected(_)));
+        assert!(
+            paths.socket.exists(),
+            "must not unlink a live daemon socket"
+        );
+        assert!(
+            backend.spawned_daemon.is_none(),
+            "must not spawn a second daemon"
+        );
+    }
+
+    #[test]
+    fn decodes_canonical_api_response_without_secret_fields() {
+        let response: GoResponse = serde_json::from_str(
+            r#"{"ok":true,"runs":[{"id":"run-a","project_id":"ananke","workstream_id":"main","state":"running","worker_pid":12,"supervisor_pid":11,"committed_offset":42}],"events":[{"seq":1,"type":"message","payload":{"text":"event 1"}}]}"#,
+        )
+        .expect("decode canonical daemon response");
+        assert!(response.ok);
+        assert_eq!(response.error, None);
+        assert_eq!(response.runs[0].id, "run-a");
+        assert_eq!(response.runs[0].state, "running");
+        assert_eq!(response.events[0].event_type, "message");
+        assert_eq!(response.events[0].payload["text"], "event 1");
+    }
+
+    #[test]
+    fn bootstrap_duplicate_rejection_is_idempotent_but_storage_rejection_fails() {
+        let duplicate = BridgeError::DaemonRejected(
+            "constraint failed: UNIQUE constraint failed: projects.id (1555)".into(),
+        );
+        accept_existing_response(Err(duplicate))
+            .expect("accept SQLite duplicate bootstrap response");
+
+        let rejection: GoResponse =
+            serde_json::from_str(r#"{"ok":false,"error":"database is locked"}"#)
+                .expect("decode daemon storage rejection");
+        let error = accept_existing_response(Err(BridgeError::DaemonRejected(
+            rejection.error.expect("retain daemon rejection detail"),
+        )))
+        .expect_err("surface non-duplicate daemon rejection");
+        assert_eq!(error.public_message(), "The daemon rejected this request.");
+        assert!(matches!(
+            error,
+            BridgeError::DaemonRejected(message) if message == "database is locked"
+        ));
+    }
+
+    #[test]
+    fn release_project_root_is_private_runtime_data_not_builder_checkout() {
+        let environment = new_test_environment("release-root");
+        let app_data = environment.root.join("app-data");
+        let builder_checkout = PathBuf::from("/Users/builder/checkout/ananke");
+        let root = select_project_root(&app_data, &builder_checkout, false)
+            .expect("select release project root");
+        assert_eq!(root, app_data.join("project-root"));
+        assert_ne!(root, builder_checkout);
+        let metadata = fs::metadata(root).expect("read release project root metadata");
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+    }
+
+    #[test]
+    fn serializes_authenticated_launch_request() {
+        let token = "a".repeat(64);
+        let run_id = "fixture-test".to_owned();
+        let worker_path = "/tmp/ananke-fakeworker".to_owned();
+        let worker_env = vec!["ANANKE_FW_EVENTS=2".to_owned()];
+        let worker_args = Vec::new();
+        let mut request = GoRequest::new("launch-run", &token);
+        request.id = Some(&run_id);
+        request.project_id = Some(DEFAULT_PROJECT_ID);
+        request.workstream_id = Some(DEFAULT_WORKSTREAM_ID);
+        request.worker_path = Some(&worker_path);
+        request.worker_args = Some(&worker_args);
+        request.worker_env = Some(&worker_env);
+        let value = serde_json::to_value(request).expect("serialize launch request");
+        assert_eq!(value["cmd"], "launch-run");
+        assert_eq!(value["project_id"], DEFAULT_PROJECT_ID);
+        assert_eq!(value["worker_env"][0], "ANANKE_FW_EVENTS=2");
+        assert_eq!(value["token"].as_str().map(str::len), Some(64));
+    }
+
+    struct TestBackend {
+        backend: Backend,
+        environment: TestEnvironment,
+    }
+
+    impl Drop for TestBackend {
+        fn drop(&mut self) {
+            self.backend.shutdown_for_test();
+            let _ = fs::remove_dir_all(&self.environment.root);
+        }
+    }
+
+    fn new_test_backend() -> TestBackend {
+        let environment = new_test_environment("bridge");
+        let repository_root = development_repository_root();
+        let source_binaries = repository_root.join(".ananke/bin");
+        let sidecars = environment.root.join("sidecars");
+        fs::create_dir(&sidecars).expect("create controlled sidecar directory");
+        for binary in ["ananke", "ananke-supervisor", "ananke-fakeworker"] {
+            let source = source_binaries.join(binary);
+            assert!(
+                source.is_file(),
+                "test setup requires built GUI sidecar {binary}; run npm run build:go"
+            );
+            let destination = sidecars.join(binary);
+            fs::copy(&source, &destination).expect("copy required test sidecar");
+            fs::set_permissions(
+                &destination,
+                fs::metadata(&source)
+                    .expect("read sidecar metadata")
+                    .permissions(),
+            )
+            .expect("preserve sidecar executable mode");
+        }
+        let paths = DaemonPaths::from_parts(
+            environment.root.join("app-data"),
+            environment.root.join("project-root"),
+            sidecars,
+            environment.root.clone(),
+        )
+        .expect("construct bridge paths");
+        let backend = Backend::new(paths).expect("construct bridge backend");
+        TestBackend {
+            backend,
+            environment,
+        }
+    }
+
+    fn wait_for_events(backend: &mut Backend, run_id: &str) -> Vec<EventDto> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            let events = backend
+                .list_events(run_id, 0)
+                .expect("list canonical events through bridge");
+            if !events.is_empty() {
+                return events;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        panic!("run {run_id} did not produce canonical events");
+    }
+
+    fn wait_for_state(backend: &mut Backend, run_id: &str, wanted: &str) -> RunDto {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            let run = backend.get_run(run_id).expect("get run through bridge");
+            if run.state == wanted {
+                return run;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        panic!("run {run_id} did not reach {wanted}");
+    }
+
+    #[test]
+    fn bridge_bootstrap_launches_lists_events_cancels_and_reconnects() {
+        let mut first = new_test_backend();
+        let bootstrap = first
+            .backend
+            .bootstrap()
+            .expect("bootstrap through public bridge method");
+        assert_eq!(bootstrap.project.id, DEFAULT_PROJECT_ID);
+        assert_eq!(bootstrap.workstream.id, DEFAULT_WORKSTREAM_ID);
+        assert!(
+            first
+                .backend
+                .list_runs()
+                .expect("list initial runs through bridge")
+                .is_empty()
+        );
+
+        let launched = first
+            .backend
+            .launch_fixture()
+            .expect("launch fixture through bridge");
+        let supervisor_socket = first
+            .backend
+            .paths
+            .data_socket_alias
+            .join(&launched.id)
+            .join("supervisor.sock");
+        assert!(
+            supervisor_socket.as_os_str().as_bytes().len() < 104,
+            "fixture supervisor socket must fit Darwin's Unix-domain socket limit"
+        );
+        let events = wait_for_events(&mut first.backend, &launched.id);
+        assert!(events.iter().all(|event| !event.payload.is_null()));
+        let cancellation = first
+            .backend
+            .cancel_run(&launched.id)
+            .expect("cancel fixture through bridge");
+        assert!(cancellation.accepted);
+        let cancelled = wait_for_state(&mut first.backend, &launched.id, "cancelled");
+        assert_eq!(cancelled.state, "cancelled");
+
+        let mut second = Backend::new(first.backend.paths.clone())
+            .expect("reconnect with persisted token and runtime endpoint");
+        let runs = second
+            .list_runs()
+            .expect("list persisted runs through reconnecting bridge");
+        assert!(
+            runs.iter()
+                .any(|run| run.id == launched.id && run.state == "cancelled")
+        );
+        let token_mode = fs::metadata(first.backend.paths.token_path())
+            .expect("read persisted token")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(token_mode, 0o600);
+        let app_data_mode = fs::metadata(&first.backend.paths.app_data_dir)
+            .expect("read private app-data directory")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(app_data_mode, 0o700);
+    }
+}

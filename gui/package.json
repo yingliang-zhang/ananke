@@ -1,0 +1,29 @@
+{
+  "name": "ananke-gui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build:go": "node scripts/build-go.mjs",
+    "web:dev": "vite",
+    "web:build": "tsc -b && vite build",
+    "dev": "npm run build:go && npm run web:dev",
+    "build": "npm run build:go && npm run web:build",
+    "typecheck": "tsc -b --pretty false",
+    "test:state": "node scripts/test-run-state.mjs",
+    "tauri": "npm run build:go && tauri",
+    "tauri:dev": "npm run build:go && tauri dev",
+    "tauri:build": "npm run build:go && tauri build --bundles app --ci"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.9.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "typescript": "^5.8.3",
+    "vite": "^7.1.0"
+  }
+}

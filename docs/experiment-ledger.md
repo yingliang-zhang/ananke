@@ -276,3 +276,25 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 #### Decision
 
 - Repair I source and focused contracts are complete. Canonical candidate v11 is frozen by `artifacts/omp/slice-001-final-review/candidate-manifest-v11.json`: aggregate `93aef9afc7771cb79c35d3c7df0fa6bca6f50e8071619d0fa36473198b82dd7f`, 68 files. Verify, mutation (6/6), stress, blackbox, Python 26/26, gofmt/diff, and 0/1/4 process scans all passed. Independent hard review session `019f8099-15bf-7000-a2ac-5014079acaa2` returned `VERDICT: ACCEPT`; report `artifacts/omp/slice-001-final-review/hard-review-v11-output.md`. Residual risk is the documented ADR-0002 fail-closed `recovery_unknown` path after supervisor crash with resistant descendants; it is not a commit blocker.
+
+### 2026-07-21 — GUI v0.1: Tauri shell over real Go lifecycle authority
+
+#### Evidence
+
+- Implemented `gui/` as Tauri 2 + Vanilla TypeScript/Vite. Renderer calls Rust `invoke` commands only; the daemon credential is created and retained only by Rust in restricted app-data storage.
+- Added authenticated Go `list-runs` API with project/workstream filtering and focused coverage (`TestEngineListRunsByProject`).
+- Rust integration tests build real Go sidecars, start the daemon, bootstrap the durable project/workstream, launch a real fakeworker event stream, and verify durable cancellation (`cargo test`: 3 passed).
+- Production app build passed as `Ananke.app`; its bundle contains `ananke`, `ananke-supervisor`, and `ananke-fakeworker`. Runtime launch proved the bundle executable starts the bundle-contained daemon and creates its local socket.
+- Frontend `typecheck` and Vite production build passed. Native screenshot capture was unavailable because this session has no usable display (`screencapture: could not create image from display`), so no visual-screenshot claim is made.
+- Tauri's default DMG step failed only at macOS 27 `hdiutil` compatibility (`bundle_dmg.sh` uses the older `hdiutil create -srcfolder` invocation). Current proof build is explicitly scoped to the successfully generated macOS `.app` bundle.
+
+#### Decision
+
+- GUI v0.1 source is ready for independent review as a macOS `.app` proof, pending candidate freeze and review verdict. The window-close/daemon-persistence behavior is structurally designed (Rust does not kill the daemon) and covered by the bridge integration path; it was not separately observed by killing the Hermes-managed GUI process because that tool terminates the entire process group and is not a valid window-close simulation.
+
+#### Final review and decision
+
+- First hard review returned `CHANGES REQUESTED`: a predictable shared `/tmp` socket could disclose the daemon credential, bootstrap masked storage failures, the E2E bypassed the Rust bridge, release embedded the builder checkout, and `created`/`recovery_unknown` were not cancellable. All were repaired under TDD.
+- Final B1 re-review (`artifacts/omp/gui-v0.1/b1-final-review-output.md`) returned `VERDICT: ACCEPT`; it verified the private `0700` runtime socket directory, auth/protocol-aware stale classification, safe Go socket removal, internal-only error detail, public Backend E2E, release-safe root, and nonterminal cancellation state.
+- Final verified evidence: Rust `cargo test` 9 passed; frontend state test/typecheck/Vite production build passed; Go store/supervisor/lifecycle packages passed; `CI=true npm run tauri:build` produced `Ananke.app` with all Go sidecars.
+- GUI v0.1 is accepted as a first macOS `.app` lifecycle proof. DMG generation remains deliberately outside this acceptance because the host's macOS 27 `hdiutil` command rejects Tauri's current create-dmg invocation; this is a packaging compatibility follow-up, not a runtime authority workaround.

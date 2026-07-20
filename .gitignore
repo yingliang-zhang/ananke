@@ -2,6 +2,12 @@
 bin/
 build/
 dist/
+/.ananke/
+/gui/node_modules/
+/gui/dist/
+/gui/src-tauri/target/
+/gui/src-tauri/gen/
+/scripts/__pycache__/
 *.exe
 *.dll
 *.so

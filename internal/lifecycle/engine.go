@@ -327,12 +327,14 @@ func (e *Engine) Run(ctx context.Context) error {
 		return nil
 	}
 
-	_ = os.Remove(e.cfg.SocketPath)
+	if err := removeExistingUnixSocket(e.cfg.SocketPath); err != nil {
+		return err
+	}
 	listener, err := net.Listen("unix", e.cfg.SocketPath)
 	if err != nil {
 		return fmt.Errorf("engine: listen %s: %w", e.cfg.SocketPath, err)
 	}
-	defer os.Remove(e.cfg.SocketPath)
+	defer func() { _ = removeExistingUnixSocket(e.cfg.SocketPath) }()
 
 	e.mu.Lock()
 	if e.closing || workCtx.Err() != nil {
@@ -351,6 +353,23 @@ func (e *Engine) Run(ctx context.Context) error {
 
 	<-workCtx.Done()
 	_ = listener.Close()
+	return nil
+}
+
+func removeExistingUnixSocket(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("engine: inspect socket path %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("engine: socket path %s is not a Unix socket", path)
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("engine: remove stale socket %s: %w", path, err)
+	}
 	return nil
 }
 
@@ -1574,6 +1593,7 @@ type apiResponse struct {
 	Error    string      `json:"error,omitempty"`
 	State    string      `json:"state,omitempty"`
 	Run      *jsonRun    `json:"run,omitempty"`
+	Runs     []jsonRun   `json:"runs,omitempty"`
 	Events   []jsonEvent `json:"events,omitempty"`
 	Accepted bool        `json:"accepted,omitempty"`
 }
@@ -1630,6 +1650,8 @@ func (e *Engine) handleCmd(ctx context.Context, req *apiRequest) apiResponse {
 		return e.handleLaunchRun(ctx, req)
 	case "get-run":
 		return e.handleGetRun(ctx, req)
+	case "list-runs":
+		return e.handleListRuns(ctx, req)
 	case "list-events":
 		return e.handleListEvents(ctx, req)
 	case "cancel-run":
@@ -1732,6 +1754,24 @@ func (e *Engine) handleGetRun(ctx context.Context, req *apiRequest) apiResponse 
 		return apiResponse{OK: false, Error: err.Error()}
 	}
 	return apiResponse{OK: true, Run: runToJSON(r), State: string(r.State)}
+}
+
+func (e *Engine) handleListRuns(ctx context.Context, req *apiRequest) apiResponse {
+	if req.ProjectID == "" {
+		return apiResponse{OK: false, Error: "project_id required"}
+	}
+	runs, err := e.store.ListRunsByProject(ctx, req.ProjectID)
+	if err != nil {
+		return apiResponse{OK: false, Error: err.Error()}
+	}
+	jsonRuns := make([]jsonRun, 0, len(runs))
+	for _, run := range runs {
+		if req.WorkstreamID != "" && run.WorkstreamID != req.WorkstreamID {
+			continue
+		}
+		jsonRuns = append(jsonRuns, *runToJSON(run))
+	}
+	return apiResponse{OK: true, Runs: jsonRuns}
 }
 
 func (e *Engine) handleListEvents(ctx context.Context, req *apiRequest) apiResponse {

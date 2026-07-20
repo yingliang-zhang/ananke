@@ -398,6 +398,73 @@ func TestEngineGetRunState(t *testing.T) {
 	}
 }
 
+func TestEngineListRunsByProject(t *testing.T) {
+	env := newEngineEnv(t)
+	projectID, workstreamID := setupProject(t, env)
+	secondaryWorkstreamID := "secondary-" + projectID
+	if response := engineAPI(t, env, "create-workstream", map[string]any{
+		"id":         secondaryWorkstreamID,
+		"project_id": projectID,
+		"name":       "secondary",
+	}); response["ok"] != true {
+		t.Fatalf("create secondary workstream: %v", response)
+	}
+	for _, testRun := range []struct {
+		id           string
+		workstreamID string
+	}{
+		{id: "first-" + projectID, workstreamID: workstreamID},
+		{id: "second-" + projectID, workstreamID: secondaryWorkstreamID},
+	} {
+		if err := env.store.CreateRun(context.Background(), testRun.id, projectID, testRun.workstreamID, store.RunSpec{WorkerPath: "/bin/true"}); err != nil {
+			t.Fatalf("create run %s: %v", testRun.id, err)
+		}
+	}
+	otherProjectID, otherWorkstreamID := setupProject(t, env)
+	if err := env.store.CreateRun(context.Background(), "other-"+otherProjectID, otherProjectID, otherWorkstreamID, store.RunSpec{WorkerPath: "/bin/true"}); err != nil {
+		t.Fatalf("create unrelated run: %v", err)
+	}
+
+	expected, err := env.store.ListRunsByProject(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("ListRunsByProject: %v", err)
+	}
+	response := engineAPI(t, env, "list-runs", map[string]any{"project_id": projectID})
+	if response["ok"] != true {
+		t.Fatalf("list-runs: %v", response)
+	}
+	runs, ok := response["runs"].([]any)
+	if !ok || len(runs) != len(expected) {
+		t.Fatalf("list-runs = %#v, want %d canonical runs", response["runs"], len(expected))
+	}
+	for index, rawRun := range runs {
+		run, ok := rawRun.(map[string]any)
+		if !ok {
+			t.Fatalf("run %d = %#v, want object", index, rawRun)
+		}
+		if run["id"] != expected[index].ID || run["state"] != string(expected[index].State) {
+			t.Errorf("run %d = %#v, want id=%q state=%q", index, run, expected[index].ID, expected[index].State)
+		}
+		if _, hasSecret := run["token"]; hasSecret {
+			t.Errorf("run %d exposes token: %#v", index, run)
+		}
+	}
+
+	response = engineAPI(t, env, "list-runs", map[string]any{"project_id": projectID, "workstream_id": secondaryWorkstreamID})
+	if response["ok"] != true {
+		t.Fatalf("list-runs workstream filter: %v", response)
+	}
+	filteredRuns, ok := response["runs"].([]any)
+	if !ok || len(filteredRuns) != 1 || filteredRuns[0].(map[string]any)["id"] != expected[1].ID {
+		t.Fatalf("workstream-filtered runs = %#v, want only %q", response["runs"], expected[1].ID)
+	}
+
+	response = engineAPI(t, env, "list-runs", nil)
+	if response["ok"] != false || response["error"] != "project_id required" {
+		t.Fatalf("missing project list-runs = %v, want project_id rejection", response)
+	}
+}
+
 // TestEngineListEvents verifies events can be listed by sequence.
 func TestEngineListEvents(t *testing.T) {
 	env := newEngineEnv(t)
