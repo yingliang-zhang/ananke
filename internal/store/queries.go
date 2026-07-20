@@ -22,9 +22,10 @@ func (s *Store) ListActiveRuns(ctx context.Context) ([]Run, error) {
 	q := `SELECT
 		id, project_id, workstream_id, state,
 		worker_path, worker_args, worker_env,
-		transcript_path, socket_path, token, identity_path,
+		transcript_path, transcript_device, transcript_inode,
+		socket_path, token, identity_path, transcript_required, cancel_requested,
 		supervisor_pid, supervisor_pgid, worker_pid, committed_offset,
-		created_at, updated_at
+		transcript_consumed_offset, transcript_final_size, created_at, updated_at
 	FROM runs r
 	WHERE r.state NOT IN ('completed','failed','cancelled')
 	   OR EXISTS (
@@ -53,9 +54,10 @@ func (s *Store) ListRunsByProject(ctx context.Context, projectID string) ([]Run,
 	q := `SELECT
 		id, project_id, workstream_id, state,
 		worker_path, worker_args, worker_env,
-		transcript_path, socket_path, token, identity_path,
+		transcript_path, transcript_device, transcript_inode,
+		socket_path, token, identity_path, transcript_required, cancel_requested,
 		supervisor_pid, supervisor_pgid, worker_pid, committed_offset,
-		created_at, updated_at
+		transcript_consumed_offset, transcript_final_size, created_at, updated_at
 	FROM runs WHERE project_id = ? ORDER BY created_at ASC`
 	rows, err := s.db.QueryContext(ctx, q, projectID)
 	if err != nil {

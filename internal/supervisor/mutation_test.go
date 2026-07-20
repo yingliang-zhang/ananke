@@ -10,22 +10,33 @@ import (
 
 	"github.com/yingliang-zhang/ananke/internal/lifecycle"
 	"github.com/yingliang-zhang/ananke/internal/store"
+	"golang.org/x/sys/unix"
 )
 
-// recordingBackend wraps a LifecycleBackend and records the order of
-// ReapWorker and GroupMembers calls.
+// recordingBackend wraps a LifecycleBackend and records both method order and
+// whether the exact worker PID is still this process's child when group
+// cleanup begins.
 type recordingBackend struct {
-	inner   lifecycle.LifecycleBackend
-	mu      sync.Mutex
-	callLog []string
-	sigPIDs []int // PIDs passed to SignalProcess (negative = group signal)
+	inner                  lifecycle.LifecycleBackend
+	mu                     sync.Mutex
+	callLog                []string
+	sigPGIDs               []int
+	workerPID              int
+	workerPresentAtCleanup []bool
+	workerProbeErr         []error
 }
 
-func (r *recordingBackend) BecomeGroupLeader() (int, error) {
-	return r.inner.BecomeGroupLeader()
-}
 func (r *recordingBackend) LaunchWorker(path string, args []string, env []string) (int, error) {
-	return r.inner.LaunchWorker(path, args, env)
+	pid, err := r.inner.LaunchWorker(path, args, env)
+	if err == nil {
+		r.mu.Lock()
+		r.workerPID = pid
+		r.mu.Unlock()
+	}
+	return pid, err
+}
+func (r *recordingBackend) ReleaseWorker(pid int) error {
+	return r.inner.ReleaseWorker(pid)
 }
 func (r *recordingBackend) WorkerExited(pid int) (<-chan struct{}, error) {
 	return r.inner.WorkerExited(pid)
@@ -38,24 +49,31 @@ func (r *recordingBackend) ReapWorker(pid int) (int, error) {
 }
 func (r *recordingBackend) GroupMembers(pgid int) ([]int, error) {
 	r.mu.Lock()
+	pid := r.workerPID
+	r.mu.Unlock()
+	proc, probeErr := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	present := probeErr == nil && int(proc.Proc.P_pid) == pid && int(proc.Eproc.Ppid) == os.Getpid()
+	r.mu.Lock()
 	r.callLog = append(r.callLog, "group_members")
+	r.workerPresentAtCleanup = append(r.workerPresentAtCleanup, present)
+	r.workerProbeErr = append(r.workerProbeErr, probeErr)
 	r.mu.Unlock()
 	return r.inner.GroupMembers(pgid)
 }
-func (r *recordingBackend) SignalProcess(pid int, sig lifecycle.Signal) error {
+func (r *recordingBackend) SignalGroup(pgid int, sig lifecycle.Signal) error {
 	r.mu.Lock()
-	r.callLog = append(r.callLog, "signal")
-	r.sigPIDs = append(r.sigPIDs, pid)
+	r.callLog = append(r.callLog, "signal_group")
+	r.sigPGIDs = append(r.sigPGIDs, pgid)
 	r.mu.Unlock()
-	return r.inner.SignalProcess(pid, sig)
+	return r.inner.SignalGroup(pgid, sig)
 }
 func (r *recordingBackend) ProcessAlive(pid int) bool {
 	return r.inner.ProcessAlive(pid)
 }
 
-// TestMutationReapBeforeCleanupOrder verifies that cleanupGroup (GroupMembers)
-// is called BEFORE ReapWorker. With the mutation_reap_before_cleanup tag,
-// the order is reversed and this test fails.
+// TestMutationReapBeforeCleanupOrder verifies the real kernel safety property:
+// the exact exited worker remains our reapable child when group cleanup begins.
+// The mutation performs Wait4 first, so the PID is absent at that observation.
 func TestMutationReapBeforeCleanupOrder(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "test.sqlite")
 	st, err := store.Open(storePath)
@@ -73,6 +91,22 @@ func TestMutationReapBeforeCleanupOrder(t *testing.T) {
 
 	dir := t.TempDir()
 	identityPath := filepath.Join(dir, "identity.json")
+	childPIDPath := filepath.Join(dir, "child.pid")
+	var childPID int
+	t.Cleanup(func() {
+		// A mutation intentionally violates production cleanup. Keep its exact
+		// known fixture child from escaping into subsequent mutation/gate runs.
+		if childPID > 0 && processAlive(childPID) {
+			_ = unix.Kill(childPID, unix.SIGKILL)
+			deadline := time.Now().Add(2 * time.Second)
+			for processAlive(childPID) && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if processAlive(childPID) {
+				t.Errorf("mutation fixture child PID %d survived cleanup", childPID)
+			}
+		}
+	})
 	socketPath := filepath.Join("/tmp", "ananke-mut-test.sock")
 	defer os.Remove(socketPath)
 
@@ -84,7 +118,7 @@ func TestMutationReapBeforeCleanupOrder(t *testing.T) {
 		StorePath:    storePath,
 		RunID:        "run-mut-1",
 		WorkerPath:   os.Args[0],
-		WorkerEnv:    []string{"ANANKE_FW_HELPER=fakeworker", "ANANKE_FW_EVENTS=1", "ANANKE_FW_EXIT=0", "ANANKE_FW_DELAY_MS=100", "ANANKE_FW_SPAWN_CHILD=1", "ANANKE_FW_CHILD_MODE=resistant"},
+		WorkerEnv:    []string{"ANANKE_FW_HELPER=fakeworker", "ANANKE_FW_EVENTS=1", "ANANKE_FW_EXIT=0", "ANANKE_FW_DELAY_MS=100", "ANANKE_FW_SPAWN_CHILD=1", "ANANKE_FW_CHILD_MODE=resistant", "ANANKE_FW_CHILD_PID_FILE=" + childPIDPath},
 		IdentityPath: identityPath,
 		SocketPath:   socketPath,
 		Token:        "test-token",
@@ -112,13 +146,25 @@ func TestMutationReapBeforeCleanupOrder(t *testing.T) {
 	if terminal != store.StateCompleted {
 		t.Fatalf("terminal = %q, want completed", terminal)
 	}
+	if data, err := os.ReadFile(childPIDPath); err == nil {
+		childPID, _ = atoi(string(data))
+	}
 
-	// Verify call order: group_members must appear BEFORE reap.
-	// With the mutation, reap appears first.
+	// The first group enumeration is cleanup's first OS-facing operation. The
+	// exited worker must still exist as this process's exact child at that point.
 	rec.mu.Lock()
-	log := rec.callLog
+	log := append([]string(nil), rec.callLog...)
+	workerPID := rec.workerPID
+	presentAtCleanup := append([]bool(nil), rec.workerPresentAtCleanup...)
+	probeErrs := append([]error(nil), rec.workerProbeErr...)
 	rec.mu.Unlock()
-
+	if len(presentAtCleanup) == 0 {
+		t.Fatalf("group cleanup never observed worker PID %d (log: %v)", workerPID, log)
+	}
+	if probeErrs[0] != nil || !presentAtCleanup[0] {
+		t.Fatalf("worker PID %d was reaped before group cleanup (present=%v, probe_err=%v, log=%v)",
+			workerPID, presentAtCleanup[0], probeErrs[0], log)
+	}
 	reapIdx := -1
 	groupIdx := -1
 	for i, call := range log {
@@ -210,16 +256,16 @@ func TestMutationNoGroupSignalAfterReap(t *testing.T) {
 		t.Fatalf("terminal = %q, want completed", terminal)
 	}
 
-	// Check that no SignalProcess call used a negative PID (group signal).
-	// With the mutation, a group SIGTERM is sent after reap via
-	// SignalProcess(-pgid, SIGTERM).
 	rec.mu.Lock()
-	sigPIDs := rec.sigPIDs
+	log := append([]string(nil), rec.callLog...)
 	rec.mu.Unlock()
-
-	for _, pid := range sigPIDs {
-		if pid < 0 {
-			t.Errorf("SignalProcess called with negative PID %d (group signal after reap)", pid)
+	reaped := false
+	for _, call := range log {
+		if call == "reap" {
+			reaped = true
+		}
+		if call == "signal_group" && reaped {
+			t.Fatalf("SignalGroup called after exact worker reap: %v", log)
 		}
 	}
 }

@@ -18,36 +18,69 @@ var ErrProjectNotFound = errors.New("project not found")
 // ErrWorkstreamNotFound is returned when a workstream id does not exist.
 var ErrWorkstreamNotFound = errors.New("workstream not found")
 
+var (
+	// ErrTranscriptIdentityUnknown reports the explicit v5 migration value.
+	ErrTranscriptIdentityUnknown = errors.New("transcript file identity is unknown")
+	// ErrTranscriptIdentityInvalid reports a partial or non-positive identity.
+	ErrTranscriptIdentityInvalid = errors.New("transcript file identity is invalid")
+	// ErrTranscriptIdentityConflict prevents replacing immutable transcript authority.
+	ErrTranscriptIdentityConflict = errors.New("transcript file identity conflicts with durable authority")
+)
+
+// TranscriptFileIdentity is the durable device/inode identity of a transcript.
+// Zero/zero is the explicit unknown value assigned to rows migrated from v5.
+type TranscriptFileIdentity struct {
+	Device int64 `json:"device"`
+	Inode  int64 `json:"inode"`
+}
+
+// Validate rejects unknown, partial, negative, or otherwise non-positive identities.
+func (id TranscriptFileIdentity) Validate() error {
+	if id.Device == 0 && id.Inode == 0 {
+		return ErrTranscriptIdentityUnknown
+	}
+	if id.Device <= 0 || id.Inode <= 0 {
+		return fmt.Errorf("%w: device=%d inode=%d", ErrTranscriptIdentityInvalid, id.Device, id.Inode)
+	}
+	return nil
+}
+
 // RunSpec is the immutable launch configuration recorded at run creation.
 type RunSpec struct {
-	WorkerPath     string
-	WorkerArgs     []string
-	WorkerEnv      []string
-	TranscriptPath string
-	SocketPath     string
-	Token          string
-	IdentityPath   string
+	WorkerPath         string
+	WorkerArgs         []string
+	WorkerEnv          []string
+	TranscriptPath     string
+	SocketPath         string
+	Token              string
+	IdentityPath       string
+	TranscriptRequired bool
 }
 
 // Run is a run row projected from the journal.
 type Run struct {
-	ID              string
-	ProjectID       string
-	WorkstreamID    string
-	State           State
-	WorkerPath      string
-	WorkerArgs      []string
-	WorkerEnv       []string
-	TranscriptPath  string
-	SocketPath      string
-	Token           string
-	IdentityPath    string
-	SupervisorPID   int
-	SupervisorPGID  int
-	WorkerPID       int
-	CommittedOffset int64
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID                       string
+	ProjectID                string
+	WorkstreamID             string
+	State                    State
+	WorkerPath               string
+	WorkerArgs               []string
+	WorkerEnv                []string
+	TranscriptPath           string
+	SocketPath               string
+	Token                    string
+	IdentityPath             string
+	TranscriptIdentity       TranscriptFileIdentity
+	SupervisorPID            int
+	SupervisorPGID           int
+	WorkerPID                int
+	CommittedOffset          int64
+	TranscriptRequired       bool
+	CancelRequested          bool
+	TranscriptConsumedOffset int64
+	TranscriptFinalSize      int64
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
 }
 
 // CreateProject inserts a project row.
@@ -96,13 +129,14 @@ func (s *Store) CreateRun(ctx context.Context, id, projectID, workstreamID strin
 	if _, err := tx.ExecContext(ctx, `INSERT INTO runs (
 		id, project_id, workstream_id, state,
 		worker_path, worker_args, worker_env,
-		transcript_path, socket_path, token, identity_path,
+		transcript_path, transcript_device, transcript_inode,
+		socket_path, token, identity_path, transcript_required,
 		supervisor_pid, supervisor_pgid, worker_pid, committed_offset,
 		created_at, updated_at
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		id, projectID, workstreamID, StateCreated,
 		spec.WorkerPath, string(args), string(env),
-		spec.TranscriptPath, spec.SocketPath, spec.Token, spec.IdentityPath,
+		spec.TranscriptPath, 0, 0, spec.SocketPath, spec.Token, spec.IdentityPath, spec.TranscriptRequired,
 		0, 0, 0, 0, now, now,
 	); err != nil {
 		return fmt.Errorf("insert run: %w", err)
@@ -121,9 +155,10 @@ func (s *Store) GetRun(ctx context.Context, id string) (Run, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT
 		id, project_id, workstream_id, state,
 		worker_path, worker_args, worker_env,
-		transcript_path, socket_path, token, identity_path,
+		transcript_path, transcript_device, transcript_inode,
+		socket_path, token, identity_path, transcript_required, cancel_requested,
 		supervisor_pid, supervisor_pgid, worker_pid, committed_offset,
-		created_at, updated_at
+		transcript_consumed_offset, transcript_final_size, created_at, updated_at
 	FROM runs WHERE id = ?`, id)
 	r, err := scanRun(row)
 	if err != nil {
@@ -140,22 +175,27 @@ func scanRun(row interface {
 	Scan(dest ...any) error
 }) (Run, error) {
 	var (
-		r         Run
-		argsJSON  string
-		envJSON   string
-		createdAt string
-		updatedAt string
+		r                  Run
+		argsJSON           string
+		envJSON            string
+		createdAt          string
+		updatedAt          string
+		transcriptRequired int
+		cancelRequested    int
 	)
 	err := row.Scan(
 		&r.ID, &r.ProjectID, &r.WorkstreamID, &r.State,
 		&r.WorkerPath, &argsJSON, &envJSON,
-		&r.TranscriptPath, &r.SocketPath, &r.Token, &r.IdentityPath,
+		&r.TranscriptPath, &r.TranscriptIdentity.Device, &r.TranscriptIdentity.Inode,
+		&r.SocketPath, &r.Token, &r.IdentityPath, &transcriptRequired, &cancelRequested,
 		&r.SupervisorPID, &r.SupervisorPGID, &r.WorkerPID, &r.CommittedOffset,
-		&createdAt, &updatedAt,
+		&r.TranscriptConsumedOffset, &r.TranscriptFinalSize, &createdAt, &updatedAt,
 	)
 	if err != nil {
 		return Run{}, err
 	}
+	r.TranscriptRequired = transcriptRequired != 0
+	r.CancelRequested = cancelRequested != 0
 	if err := json.Unmarshal([]byte(argsJSON), &r.WorkerArgs); err != nil {
 		return Run{}, fmt.Errorf("unmarshal worker args: %w", err)
 	}
@@ -169,4 +209,38 @@ func scanRun(row interface {
 		return Run{}, fmt.Errorf("parse updated_at: %w", err)
 	}
 	return r, nil
+}
+
+// SetTranscriptIdentity publishes immutable transcript authority before worker launch.
+func (s *Store) SetTranscriptIdentity(ctx context.Context, runID string, identity TranscriptFileIdentity) error {
+	if err := identity.Validate(); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var current TranscriptFileIdentity
+	if err := tx.QueryRowContext(ctx, `SELECT transcript_device, transcript_inode FROM runs WHERE id = ?`, runID).
+		Scan(&current.Device, &current.Inode); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrRunNotFound
+		}
+		return fmt.Errorf("read transcript identity: %w", err)
+	}
+	if current == identity {
+		return nil
+	}
+	if current != (TranscriptFileIdentity{}) {
+		return fmt.Errorf("%w: have device=%d inode=%d, got device=%d inode=%d",
+			ErrTranscriptIdentityConflict, current.Device, current.Inode, identity.Device, identity.Inode)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE runs
+		SET transcript_device = ?, transcript_inode = ?, updated_at = ? WHERE id = ?`,
+		identity.Device, identity.Inode, nowStamp(), runID); err != nil {
+		return fmt.Errorf("set transcript identity: %w", err)
+	}
+	return tx.Commit()
 }

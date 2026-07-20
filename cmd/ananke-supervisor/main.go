@@ -1,10 +1,7 @@
-// Command ananke-supervisor is the process-group anchor for a single Ananke run.
-//
-// It is launched by the daemon (ananke) with flags pointing at the store, run
-// id, worker binary, and identity/socket paths. It becomes a process-group
-// leader, launches the worker, monitors for exit or cancellation, cleans up
-// resistant descendants, reaps the worker, and commits a terminal transition
-// with a finalization outbox row.
+// Command ananke-supervisor owns one Ananke run while remaining outside the
+// worker process group. It launches a paused group-leading trampoline,
+// publishes authority, releases the real worker, performs group cleanup before
+// exact reap, and commits terminal finalization.
 package main
 
 import (
@@ -14,10 +11,18 @@ import (
 	"os"
 	"strings"
 
+	"github.com/yingliang-zhang/ananke/internal/lifecycle"
 	"github.com/yingliang-zhang/ananke/internal/supervisor"
 )
 
 func main() {
+	if lifecycle.WorkerTrampolineRequested() {
+		if err := lifecycle.RunWorkerTrampoline(); err != nil {
+			fmt.Fprintf(os.Stderr, "worker trampoline: %v\n", err)
+			os.Exit(125)
+		}
+		return
+	}
 	var (
 		storePath      = flag.String("store", "", "path to the SQLite store")
 		runID          = flag.String("run", "", "run id")

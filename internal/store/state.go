@@ -45,10 +45,15 @@ func IsTerminal(s State) bool {
 }
 
 // allowedTransitions is the adjacency table of the cleanup state machine.
-// Terminal states have no outgoing edges. `created` may only advance to
-// `running`. Self-loops are forbidden.
+// Terminal states have no outgoing edges. `created` may advance to `running`,
+// retain a post-fork cleanup obligation, or fail closed into
+// `recovery_unknown`. Self-loops are forbidden.
 var allowedTransitions = map[State]map[State]struct{}{
-	StateCreated: {StateRunning: {}},
+	StateCreated: {
+		StateRunning:         {},
+		StateCleanupRequired: {},
+		StateRecoveryUnknown: {},
+	},
 
 	StateRunning: {
 		StateCancelling:      {},
@@ -68,10 +73,8 @@ var allowedTransitions = map[State]map[State]struct{}{
 
 	StateCleanupRequired: {
 		StateFailed:          {},
-		StateCompleted:       {},
 		StateCancelled:       {},
 		StateRecoveryUnknown: {},
-		StateRunning:         {},
 	},
 
 	StateRecoveryUnknown: {

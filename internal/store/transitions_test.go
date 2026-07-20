@@ -161,3 +161,34 @@ func TestAcknowledgeOutbox(t *testing.T) {
 		t.Errorf("re-acknowledge returned nil; want not-found/error")
 	}
 }
+
+func TestAbandonOutboxPersistsDiagnostic(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedRun(t, s, "run-abandoned")
+	if err := s.Transition(ctx, "run-abandoned", StateRunning, "launch"); err != nil {
+		t.Fatalf("Transition: %v", err)
+	}
+	if err := s.CommitTerminal(ctx, "run-abandoned", StateFailed, "failed", OutboxRow{SupervisorPID: 99}); err != nil {
+		t.Fatalf("CommitTerminal: %v", err)
+	}
+	if err := s.AbandonOutbox(ctx, "run-abandoned", "  "); err == nil {
+		t.Fatal("AbandonOutbox accepted an empty diagnostic")
+	}
+	if err := s.AbandonOutbox(ctx, "run-abandoned", "validated identity; supervisor dead; worker and group quiescent"); err != nil {
+		t.Fatalf("AbandonOutbox: %v", err)
+	}
+	row, err := s.GetOutbox(ctx, "run-abandoned")
+	if err != nil {
+		t.Fatalf("GetOutbox: %v", err)
+	}
+	if row.Acknowledged != -1 {
+		t.Fatalf("Acknowledged = %d, want -1", row.Acknowledged)
+	}
+	if row.Diagnostic != "validated identity; supervisor dead; worker and group quiescent" {
+		t.Fatalf("Diagnostic = %q", row.Diagnostic)
+	}
+	if row.AcknowledgedAt.IsZero() {
+		t.Fatal("AcknowledgedAt is zero after abandonment")
+	}
+}

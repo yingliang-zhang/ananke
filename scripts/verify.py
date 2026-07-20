@@ -2,6 +2,7 @@
 """Verification gate: gofmt, vet, test, race, no-CGO test, no-CGO build."""
 import json, os, subprocess, sys, time
 from pathlib import Path
+from harness_support import build_source_manifest, write_bound_json_report
 
 REPO = Path(__file__).resolve().parent.parent
 REPORTS = REPO / "reports"
@@ -29,6 +30,7 @@ gates = [
 ]
 
 def main():
+    candidate = build_source_manifest(REPO)
     results = []
     all_pass = True
     for g in gates:
@@ -63,11 +65,12 @@ def main():
             all_pass = False
         print(f"{'PASS' if passed else 'FAIL'} {g['name']} ({elapsed:.1f}s)")
         if not passed:
+            print(f"  stdout: {out[-300:]}")
             print(f"  stderr: {err[-300:]}")
-        results.append({"gate": g["name"], "passed": passed, "exit_code": code, "elapsed_s": round(elapsed,1), "stderr_tail": err[-500:] if err else ""})
+        results.append({"gate": g["name"], "passed": passed, "exit_code": code, "elapsed_s": round(elapsed,1), "stdout_tail": out[-500:] if out else "", "stderr_tail": err[-500:] if err else ""})
 
     report = {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "all_pass": all_pass, "gates": results}
-    (REPORTS / "verification.json").write_text(json.dumps(report, indent=2))
+    write_bound_json_report(REPORTS / "verification.json", report, REPO, candidate)
     print(f"\n{'ALL GATES PASS' if all_pass else 'SOME GATES FAILED'}")
     sys.exit(0 if all_pass else 1)
 

@@ -5,7 +5,7 @@
 ```
 ┌─────────────────────────────────────────────┐
 │              ananke-desktop                  │
-│  Tauri 2 thin shell + React/TS/Vite UI      │
+│  Tauri 2 thin shell + Vanilla TS/Vite UI    │
 │  (Rust = shell only, not durable authority)  │
 ├─────────────────────────────────────────────┤
 │                local IPC                     │
@@ -73,7 +73,7 @@
 |---|---|---|
 | `ananke-core` | Go | Durable authority; small agent-edit surface |
 | `ananke-bootstrap` | Go | Host supervisor; OS-specific lifecycle backends |
-| `ananke-desktop` | Tauri 2 (Rust shell) + React/TS | WebView-first UI; Rust = shell glue only |
+| `ananke-desktop` | Tauri 2 (Rust shell) + Vanilla TS/Vite | WebView-first UI; Rust = shell glue only |
 | Capability packs | Polyglot | Each worker adapter uses its native toolchain |
 
 ## References

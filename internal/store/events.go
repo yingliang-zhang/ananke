@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+var (
+	ErrTranscriptFinalSizeChanged = errors.New("transcript final size already sealed with a different value")
+	ErrTranscriptOffsetBeyondEnd  = errors.New("transcript consumed offset exceeds sealed final size")
+)
+
 // Event is a single journaled transcript event for a run.
 type Event struct {
 	RunID            string
@@ -51,13 +56,15 @@ func (s *Store) AppendEvent(ctx context.Context, runID, typ string, payload []by
 	// Atomic offset commit: the durable high-water mark advances with the
 	// event row in this transaction and never moves backwards.
 	res, err := tx.ExecContext(ctx,
-		`UPDATE runs SET committed_offset = MAX(committed_offset, ?), updated_at = ? WHERE id = ?`,
-		transcriptOffset, now, runID)
+		`UPDATE runs SET committed_offset = MAX(committed_offset, ?),
+		 transcript_consumed_offset = MAX(transcript_consumed_offset, ?), updated_at = ?
+		 WHERE id = ? AND (transcript_final_size < 0 OR ? <= transcript_final_size)`,
+		transcriptOffset, transcriptOffset, now, runID, transcriptOffset)
 	if err != nil {
 		return Event{}, fmt.Errorf("update committed offset: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return Event{}, ErrRunNotFound
+		return Event{}, ErrTranscriptOffsetBeyondEnd
 	}
 	if err := tx.Commit(); err != nil {
 		return Event{}, err
@@ -85,6 +92,87 @@ func (s *Store) CommittedOffset(ctx context.Context, runID string) (int64, error
 		return 0, err
 	}
 	return off, nil
+}
+
+// TranscriptProgress is the durable daemon/supervisor handoff. FinalSize is
+// -1 until the supervisor proves the worker exited and seals the transcript.
+type TranscriptProgress struct {
+	Required       bool
+	ConsumedOffset int64
+	FinalSize      int64
+}
+
+// GetTranscriptProgress loads the durable transcript handoff for a run.
+func (s *Store) GetTranscriptProgress(ctx context.Context, runID string) (TranscriptProgress, error) {
+	var (
+		progress TranscriptProgress
+		required int
+	)
+	err := s.db.QueryRowContext(ctx, `SELECT transcript_required,
+		transcript_consumed_offset, transcript_final_size FROM runs WHERE id = ?`, runID).
+		Scan(&required, &progress.ConsumedOffset, &progress.FinalSize)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return TranscriptProgress{}, ErrRunNotFound
+		}
+		return TranscriptProgress{}, err
+	}
+	progress.Required = required != 0
+	return progress, nil
+}
+
+// SealTranscript durably records the final byte size after exact worker exit.
+// Repeating the same seal is safe; changing it is rejected.
+func (s *Store) SealTranscript(ctx context.Context, runID string, finalSize int64) error {
+	if finalSize < 0 {
+		return errors.New("transcript final size must be nonnegative")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var current int64
+	if err := tx.QueryRowContext(ctx, `SELECT transcript_final_size FROM runs WHERE id = ?`, runID).Scan(&current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrRunNotFound
+		}
+		return err
+	}
+	if current >= 0 {
+		if current != finalSize {
+			return fmt.Errorf("%w: have %d, got %d", ErrTranscriptFinalSizeChanged, current, finalSize)
+		}
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE runs SET transcript_final_size = ?, updated_at = ? WHERE id = ?`,
+		finalSize, nowStamp(), runID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// AdvanceTranscriptConsumed durably advances non-event bytes such as blank
+// lines. Event bytes advance in the same transaction as AppendEvent.
+func (s *Store) AdvanceTranscriptConsumed(ctx context.Context, runID string, offset int64) error {
+	if offset < 0 {
+		return errors.New("transcript consumed offset must be nonnegative")
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE runs
+		SET transcript_consumed_offset = MAX(transcript_consumed_offset, ?), updated_at = ?
+		WHERE id = ? AND (transcript_final_size < 0 OR ? <= transcript_final_size)`,
+		offset, nowStamp(), runID, offset)
+	if err != nil {
+		return err
+	}
+	if affected, _ := res.RowsAffected(); affected != 0 {
+		return nil
+	}
+	if _, lookupErr := s.GetRun(ctx, runID); errors.Is(lookupErr, ErrRunNotFound) {
+		return ErrRunNotFound
+	}
+	return ErrTranscriptOffsetBeyondEnd
 }
 
 // ListEvents returns all events for a run with sequence strictly greater than

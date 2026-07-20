@@ -114,8 +114,7 @@ func runFWHelper(mode string) {
 }
 
 // fakeworkerHelper mirrors cmd/ananke-fakeworker's behaviour: writes NDJSON
-// transcript events, can spawn children, and exits with a configured code. It
-// does NOT call setpgid (inherits the supervisor's process group).
+// transcript events, can spawn children, and preserves the trampoline's group.
 func fakeworkerHelper() {
 	transcriptPath := os.Getenv("ANANKE_FW_TRANSCRIPT")
 	nEvents := envIntDef("ANANKE_FW_EVENTS", 3)
@@ -155,6 +154,17 @@ func fakeworkerHelper() {
 	os.Exit(exitCode)
 }
 
+type fwTranscriptRecord struct {
+	Type    string              `json:"type"`
+	Payload fwTranscriptPayload `json:"payload"`
+}
+
+type fwTranscriptPayload struct {
+	SourceSequence int    `json:"source_seq"`
+	Text           string `json:"text"`
+	Timestamp      string `json:"timestamp"`
+}
+
 func fwWriteTranscript(path string, nEvents, delayMs int, partial, noFinalNL bool) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
@@ -162,11 +172,13 @@ func fwWriteTranscript(path string, nEvents, delayMs int, partial, noFinalNL boo
 	}
 	defer f.Close()
 	for i := 1; i <= nEvents; i++ {
-		ev := map[string]any{
-			"seq":  i,
-			"type": "message",
-			"text": fmt.Sprintf("event %d", i),
-			"ts":   time.Now().UTC().Format(time.RFC3339Nano),
+		ev := fwTranscriptRecord{
+			Type: "message",
+			Payload: fwTranscriptPayload{
+				SourceSequence: i,
+				Text:           fmt.Sprintf("event %d", i),
+				Timestamp:      time.Now().UTC().Format(time.RFC3339Nano),
+			},
 		}
 		data, _ := json.Marshal(ev)
 		suffix := "\n"

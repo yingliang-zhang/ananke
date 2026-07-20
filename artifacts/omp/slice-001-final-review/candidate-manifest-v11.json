@@ -1,0 +1,43 @@
+{
+  "schema": "ananke-review-candidate-v2",
+  "slice": "slice-001-supervisor-lifecycle",
+  "frozen_at": "2026-07-20T17:30:19Z",
+  "base_commit": "b8e21eac0b808a9ad35b90e59e1eacd925753d28",
+  "source_candidate": {
+    "aggregate_sha256": "93aef9afc7771cb79c35d3c7df0fa6bca6f50e8071619d0fa36473198b82dd7f",
+    "file_count": 68
+  },
+  "reports": {
+    "verification": {
+      "path": "reports/verification.json",
+      "sha256": "b9b091de2b5826ba1f5b32587eeeee8e01d556fe6a23f192d2a842b2bb508d75"
+    },
+    "mutation_proof": {
+      "path": "reports/mutation-proof.json",
+      "sha256": "ce5beb9aebdbcc87f3210f3ae67383f18d7836ce2cda5dd9bf6aacd358be797a"
+    },
+    "stress_lifecycle": {
+      "path": "reports/stress-lifecycle.json",
+      "sha256": "5f10cde5139c7275aaa755c1d7bd21f7ac4ad9eb02c7b007c6c839039939c834"
+    },
+    "blackbox_lifecycle": {
+      "path": "reports/blackbox-lifecycle.json",
+      "sha256": "2751d191235ea076101decbb88883fde003ca7b19d5771bf5496b40e7218d6b0"
+    }
+  },
+  "gate_evidence": {
+    "ordinary_race_no_cgo": "PASS via scripts/verify.py",
+    "mutation_detection": "6/6 PASS via scripts/mutation_proof.py",
+    "stress": "PASS via scripts/stress_lifecycle.py",
+    "blackbox": "PASS via scripts/blackbox_lifecycle.py",
+    "python_tests": "PASS (26 tests)",
+    "process_scans": "PASS at 0s, 1s, and 4s"
+  },
+  "review_requirements": [
+    "recompute the source aggregate and each report hash",
+    "verify candidate equality across all reports",
+    "challenge NDJSON EOF framing and sealed-final behavior",
+    "challenge paused trampoline authority-before-release and group cleanup",
+    "verify mutation fixture cleanup does not mask production failures"
+  ]
+}

@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,30 +10,20 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestBecomeGroupLeaderReturnsNonzeroPGID(t *testing.T) {
-	cmd, resultPath := forkHelper(t, "groupleader", nil)
-	t.Cleanup(func() {
-		// groupleader exits on its own after reporting; ensure reaped.
-		_, _ = cmd.Process.Wait()
-	})
-	var r struct {
-		PID  int    `json:"pid"`
-		PGID int    `json:"pgid"`
-		Err  string `json:"err"`
+func TestProcessExitWatcherTerminalErrorClosesReadiness(t *testing.T) {
+	kq, err := unix.Kqueue()
+	if err != nil {
+		t.Fatalf("Kqueue: %v", err)
 	}
-	readResultFile(t, resultPath, 5*time.Second, &r)
-	if r.Err != "" {
-		t.Fatalf("helper BecomeGroupLeader error: %s", r.Err)
+	w := &processExitWatcher{exited: make(chan struct{})}
+	if err := unix.Close(kq); err != nil {
+		t.Fatalf("close kqueue: %v", err)
 	}
-	if r.PGID == 0 {
-		t.Fatalf("PGID = 0, want nonzero")
-	}
-	// A process-group leader's PGID equals its own PID.
-	if r.PGID != r.PID {
-		t.Errorf("PGID %d != PID %d (group leader must have pgid==pid)", r.PGID, r.PID)
-	}
-	if r.PID != cmd.Process.Pid {
-		t.Errorf("reported PID %d != forked PID %d", r.PID, cmd.Process.Pid)
+	go w.observe(kq)
+	select {
+	case <-w.exited:
+	case <-time.After(time.Second):
+		t.Fatal("watcher readiness remained open after terminal kevent error")
 	}
 }
 
@@ -51,6 +42,9 @@ func TestLaunchWorkerReturnsNonzeroPID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LaunchWorker: %v", err)
 	}
+	if err := b.ReleaseWorker(pid); err != nil {
+		t.Fatalf("ReleaseWorker: %v", err)
+	}
 	if pid <= 0 {
 		t.Fatalf("pid = %d, want > 0", pid)
 	}
@@ -68,6 +62,60 @@ func TestLaunchWorkerReturnsNonzeroPID(t *testing.T) {
 	}
 }
 
+func TestLaunchWorkerStartsPausedDistinctGroupLeader(t *testing.T) {
+	b := NewDarwinBackend()
+	resultPath := filepath.Join(t.TempDir(), "paused-worker.json")
+	pid, err := b.LaunchWorker(os.Args[0], nil, []string{
+		helperEnv + "=worker",
+		resultEnv + "=" + resultPath,
+		"ANANKE_SLEEP_MS=50",
+		"ANANKE_EXIT=0",
+	})
+	if err != nil {
+		t.Fatalf("LaunchWorker: %v", err)
+	}
+	reaped := false
+	t.Cleanup(func() {
+		if !reaped {
+			_ = unix.Kill(pid, unix.SIGKILL)
+			_, _ = b.ReapWorker(pid)
+		}
+	})
+	workerPGID, err := unix.Getpgid(pid)
+	if err != nil {
+		t.Fatalf("Getpgid(%d): %v", pid, err)
+	}
+	if workerPGID != pid {
+		t.Fatalf("worker PGID = %d, want group-leading PID %d", workerPGID, pid)
+	}
+	if workerPGID == unix.Getpgrp() {
+		t.Fatalf("worker PGID %d equals supervisor/test group %d", workerPGID, unix.Getpgrp())
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := os.Stat(resultPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("worker executed before release: stat error %v", err)
+	}
+	releaser, ok := any(b).(interface{ ReleaseWorker(int) error })
+	if !ok {
+		t.Fatal("backend has no ReleaseWorker barrier")
+	}
+	if err := releaser.ReleaseWorker(pid); err != nil {
+		t.Fatalf("ReleaseWorker: %v", err)
+	}
+	var result struct {
+		PID  int `json:"pid"`
+		PGID int `json:"pgid"`
+	}
+	readResultFile(t, resultPath, 5*time.Second, &result)
+	if result.PID != pid || result.PGID != pid {
+		t.Fatalf("released worker identity = pid %d pgid %d, want %d/%d", result.PID, result.PGID, pid, pid)
+	}
+	if _, err := b.ReapWorker(pid); err != nil {
+		t.Fatalf("ReapWorker: %v", err)
+	}
+	reaped = true
+}
+
 // TestWorkerExitedChannelCloses verifies the channel returned by WorkerExited
 // closes when the worker process exits.
 func TestWorkerExitedChannelCloses(t *testing.T) {
@@ -80,6 +128,9 @@ func TestWorkerExitedChannelCloses(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("LaunchWorker: %v", err)
+	}
+	if err := b.ReleaseWorker(pid); err != nil {
+		t.Fatalf("ReleaseWorker: %v", err)
 	}
 	t.Cleanup(func() {
 		_, _ = b.ReapWorker(pid)
@@ -96,6 +147,62 @@ func TestWorkerExitedChannelCloses(t *testing.T) {
 	}
 }
 
+// TestWorkerExitedDeferredReap proves exit observation does not consume the
+// child's wait status. The exited PID must remain our child until ReapWorker
+// performs the sole wait and returns the real exit code.
+func TestWorkerExitedDeferredReap(t *testing.T) {
+	b := NewDarwinBackend()
+	pid, err := b.LaunchWorker(os.Args[0], nil, []string{
+		helperEnv + "=worker",
+		resultEnv + "=" + filepath.Join(t.TempDir(), "worker.json"),
+		"ANANKE_SLEEP_MS=50",
+		"ANANKE_EXIT=42",
+	})
+	if err != nil {
+		t.Fatalf("LaunchWorker: %v", err)
+	}
+	if err := b.ReleaseWorker(pid); err != nil {
+		t.Fatalf("ReleaseWorker: %v", err)
+	}
+	reaped := false
+	t.Cleanup(func() {
+		if !reaped {
+			_ = unix.Kill(pid, unix.SIGKILL)
+			_, _ = b.ReapWorker(pid)
+		}
+	})
+
+	exited, err := b.WorkerExited(pid)
+	if err != nil {
+		t.Fatalf("WorkerExited: %v", err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("WorkerExited channel did not close within 5s")
+	}
+
+	proc, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil {
+		t.Fatalf("worker PID %d disappeared before ReapWorker: %v", pid, err)
+	}
+	if got := int(proc.Proc.P_pid); got != pid {
+		t.Fatalf("observed PID = %d, want exact worker PID %d", got, pid)
+	}
+	if got := int(proc.Eproc.Ppid); got != os.Getpid() {
+		t.Fatalf("worker PID %d parent = %d, want test process %d", pid, got, os.Getpid())
+	}
+
+	exitCode, err := b.ReapWorker(pid)
+	if err != nil {
+		t.Fatalf("ReapWorker: %v", err)
+	}
+	reaped = true
+	if exitCode != 42 {
+		t.Fatalf("exitCode = %d, want 42", exitCode)
+	}
+}
+
 // TestReapWorkerExitCode verifies ReapWorker returns the process exit code.
 func TestReapWorkerExitCode(t *testing.T) {
 	b := NewDarwinBackend()
@@ -107,6 +214,9 @@ func TestReapWorkerExitCode(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("LaunchWorker: %v", err)
+	}
+	if err := b.ReleaseWorker(pid); err != nil {
+		t.Fatalf("ReleaseWorker: %v", err)
 	}
 	exitCode, err := b.ReapWorker(pid)
 	if err != nil {
@@ -130,8 +240,8 @@ func TestReapWorkerSignaled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LaunchWorker: %v", err)
 	}
-	if err := b.SignalProcess(pid, unix.SIGKILL); err != nil {
-		t.Fatalf("SignalProcess: %v", err)
+	if err := b.SignalGroup(pid, unix.SIGKILL); err != nil {
+		t.Fatalf("SignalGroup: %v", err)
 	}
 	exitCode, err := b.ReapWorker(pid)
 	if err != nil {
@@ -160,6 +270,9 @@ func TestProcessAliveSelfAndDead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LaunchWorker: %v", err)
 	}
+	if err := b.ReleaseWorker(pid); err != nil {
+		t.Fatalf("ReleaseWorker: %v", err)
+	}
 	if _, err := b.ReapWorker(pid); err != nil {
 		t.Fatalf("ReapWorker: %v", err)
 	}
@@ -168,47 +281,64 @@ func TestProcessAliveSelfAndDead(t *testing.T) {
 	}
 }
 
-// TestLaunchWorkerInheritsSupervisorPGID uses the "groupeval" helper which
-// becomes a group leader, launches a worker, and reports both PGIDs. The
-// worker must inherit the supervisor's PGID (ADR-0002 §1).
-func TestLaunchWorkerInheritsSupervisorPGID(t *testing.T) {
-	cmd, resultPath := forkHelper(t, "groupeval", nil)
-	t.Cleanup(func() {
-		_, _ = cmd.Process.Wait()
+func TestLaunchWorkerWatcherFailureRetainsPositiveOwnedPID(t *testing.T) {
+	b := NewDarwinBackend()
+	b.newExitWatcher = func(int) (*processExitWatcher, error) {
+		return nil, errors.New("injected watcher construction failure")
+	}
+	pid, err := b.LaunchWorker(os.Args[0], nil, []string{
+		helperEnv + "=worker",
+		resultEnv + "=" + filepath.Join(t.TempDir(), "worker.json"),
+		"ANANKE_SLEEP_MS=10000",
+		"ANANKE_EXIT=0",
 	})
-	var r struct {
-		SupervisorPID  int    `json:"supervisor_pid"`
-		SupervisorPGID int    `json:"supervisor_pgid"`
-		WorkerPID      int    `json:"worker_pid"`
-		WorkerPGID     int    `json:"worker_pgid"`
-		ExitCode       int    `json:"exit_code"`
-		GroupMembers   []int  `json:"group_members"`
-		Err            string `json:"err"`
+	if err == nil {
+		t.Fatal("LaunchWorker error = nil, want watcher failure")
 	}
-	readResultFile(t, resultPath, 10*time.Second, &r)
-	if r.Err != "" {
-		t.Fatalf("groupeval error: %s", r.Err)
+	if pid <= 0 {
+		t.Fatalf("pid = %d, want positive owned child despite watcher failure", pid)
 	}
-	if r.SupervisorPGID != r.SupervisorPID {
-		t.Errorf("supervisor PGID %d != PID %d", r.SupervisorPGID, r.SupervisorPID)
+	if err := b.SignalGroup(pid, unix.SIGKILL); err != nil {
+		t.Fatalf("SignalGroup: %v", err)
 	}
-	if r.WorkerPGID != r.SupervisorPGID {
-		t.Errorf("worker PGID %d != supervisor PGID %d (worker must inherit group)", r.WorkerPGID, r.SupervisorPGID)
+	if _, err := b.ReapWorker(pid); err != nil {
+		t.Fatalf("ReapWorker after watcher failure: %v", err)
 	}
-	if r.WorkerPID == r.SupervisorPID {
-		t.Errorf("worker PID == supervisor PID %d", r.WorkerPID)
+	if b.ProcessAlive(pid) {
+		t.Fatalf("worker %d alive after explicit cleanup and reap", pid)
 	}
-	if r.ExitCode != 0 {
-		t.Errorf("exit code = %d, want 0", r.ExitCode)
-	}
-	// GroupMembers must include the worker PID but not the supervisor.
-	found := false
-	for _, m := range r.GroupMembers {
-		if m == r.WorkerPID {
-			found = true
+}
+
+func TestReapWorkerRetriesWait4EINTR(t *testing.T) {
+	b := NewDarwinBackend()
+	waitCalls := 0
+	b.wait4 = func(pid int, status *unix.WaitStatus, options int, rusage *unix.Rusage) (int, error) {
+		waitCalls++
+		if waitCalls == 1 {
+			return 0, unix.EINTR
 		}
+		return unix.Wait4(pid, status, options, rusage)
 	}
-	if !found {
-		t.Errorf("worker PID %d not found in group members %v", r.WorkerPID, r.GroupMembers)
+	pid, err := b.LaunchWorker(os.Args[0], nil, []string{
+		helperEnv + "=worker",
+		resultEnv + "=" + filepath.Join(t.TempDir(), "worker.json"),
+		"ANANKE_SLEEP_MS=25",
+		"ANANKE_EXIT=42",
+	})
+	if err != nil {
+		t.Fatalf("LaunchWorker: %v", err)
+	}
+	if err := b.ReleaseWorker(pid); err != nil {
+		t.Fatalf("ReleaseWorker: %v", err)
+	}
+	exitCode, err := b.ReapWorker(pid)
+	if err != nil {
+		t.Fatalf("ReapWorker: %v", err)
+	}
+	if waitCalls != 2 {
+		t.Fatalf("Wait4 calls = %d, want EINTR retry", waitCalls)
+	}
+	if exitCode != 42 {
+		t.Fatalf("exitCode = %d, want 42", exitCode)
 	}
 }

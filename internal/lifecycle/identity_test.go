@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/yingliang-zhang/ananke/internal/store"
 )
 
 // TestIdentityFileRoundTrip verifies an identity file can be written atomically
@@ -15,14 +17,16 @@ func TestIdentityFileRoundTrip(t *testing.T) {
 	path := filepath.Join(dir, "identity.json")
 
 	id := Identity{
-		SupervisorPID:  12345,
-		SupervisorPGID: 12345,
-		WorkerPID:      67890,
-		WorkerArgs:     []string{"--foo", "bar"},
-		SocketPath:     filepath.Join(dir, "sock"),
-		Token:          "test-token-abc",
-		TranscriptPath: filepath.Join(dir, "transcript.ndjson"),
-		LaunchTime:     time.Now().UTC().Truncate(time.Millisecond),
+		RunID:              "run-identity-round-trip",
+		SupervisorPID:      12345,
+		SupervisorPGID:     12345,
+		WorkerPID:          67890,
+		WorkerArgs:         []string{"--foo", "bar"},
+		SocketPath:         filepath.Join(dir, "sock"),
+		Token:              "test-token-abc",
+		TranscriptPath:     filepath.Join(dir, "transcript.ndjson"),
+		TranscriptIdentity: store.TranscriptFileIdentity{Device: 123, Inode: 456},
+		LaunchTime:         time.Now().UTC().Truncate(time.Millisecond),
 	}
 
 	if err := WriteIdentity(path, id); err != nil {
@@ -48,6 +52,9 @@ func TestIdentityFileRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadIdentity: %v", err)
 	}
+	if got.RunID != id.RunID {
+		t.Errorf("RunID = %q, want %q", got.RunID, id.RunID)
+	}
 	if got.SupervisorPID != id.SupervisorPID {
 		t.Errorf("SupervisorPID = %d, want %d", got.SupervisorPID, id.SupervisorPID)
 	}
@@ -68,6 +75,9 @@ func TestIdentityFileRoundTrip(t *testing.T) {
 	}
 	if got.TranscriptPath != id.TranscriptPath {
 		t.Errorf("TranscriptPath = %q, want %q", got.TranscriptPath, id.TranscriptPath)
+	}
+	if got.TranscriptIdentity != id.TranscriptIdentity {
+		t.Errorf("TranscriptIdentity = %+v, want %+v", got.TranscriptIdentity, id.TranscriptIdentity)
 	}
 	if !got.LaunchTime.Equal(id.LaunchTime) {
 		t.Errorf("LaunchTime = %v, want %v", got.LaunchTime, id.LaunchTime)
@@ -129,5 +139,55 @@ func TestIdentityFileCorruptJSON(t *testing.T) {
 	}
 	if _, ok := err.(*json.SyntaxError); !ok && err.Error() == "" {
 		t.Errorf("err = %v, want non-empty", err)
+	}
+}
+
+func TestTranscriptIdentityFromOpenFileRejectsNamedReplacement(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "transcript.ndjson")
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatalf("create transcript: %v", err)
+	}
+	defer file.Close()
+
+	identity, err := TranscriptIdentityFromFile(file)
+	if err != nil {
+		t.Fatalf("TranscriptIdentityFromFile: %v", err)
+	}
+	if err := identity.Validate(); err != nil {
+		t.Fatalf("derived identity invalid: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat transcript: %v", err)
+	}
+	if err := ValidateTranscriptIdentity(info, identity); err != nil {
+		t.Fatalf("ValidateTranscriptIdentity(original): %v", err)
+	}
+	if err := ValidateTranscriptIdentity(info, store.TranscriptFileIdentity{}); err == nil {
+		t.Fatal("ValidateTranscriptIdentity accepted unknown expected identity")
+	}
+
+	replacement := filepath.Join(dir, "replacement.ndjson")
+	if err := os.WriteFile(replacement, nil, 0o600); err != nil {
+		t.Fatalf("write replacement: %v", err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatalf("replace transcript: %v", err)
+	}
+	replacementInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat replacement: %v", err)
+	}
+	if err := ValidateTranscriptIdentity(replacementInfo, identity); err == nil {
+		t.Fatal("ValidateTranscriptIdentity accepted replacement inode")
+	}
+	openInfo, err := file.Stat()
+	if err != nil {
+		t.Fatalf("stat open original: %v", err)
+	}
+	if err := ValidateTranscriptIdentity(openInfo, identity); err != nil {
+		t.Fatalf("open original lost identity: %v", err)
 	}
 }

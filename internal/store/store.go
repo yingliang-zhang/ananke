@@ -80,11 +80,16 @@ type migration struct {
 }
 
 // migrations is the ordered, immutable list of schema upgrades. v1 establishes
-// the base journal; v2 adds the supervisor identity-file path column used by
-// the daemon's reconnect logic (ADR-0002 §3).
+// the base journal; v2 adds supervisor identity; v3 adds outbox diagnostics;
+// v4 adds the durable transcript-finalization handoff; v5 adds durable
+// cancellation intent; v6 adds durable transcript file identity.
 var migrations = []migration{
 	{version: 1, up: migrateV1},
 	{version: 2, up: migrateV2},
+	{version: 3, up: migrateV3},
+	{version: 4, up: migrateV4},
+	{version: 5, up: migrateV5},
+	{version: 6, up: migrateV6},
 }
 
 // SchemaVersion reports the highest applied migration version.
@@ -113,7 +118,7 @@ func (s *Store) runMigrations(ctx context.Context) error {
 	)`); err != nil {
 		return err
 	}
-	current, err := s.SchemaVersion(ctx)
+	current, err := s.validateSchemaVersionHistory(ctx)
 	if err != nil {
 		return err
 	}
@@ -140,6 +145,50 @@ func (s *Store) runMigrations(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *Store) validateSchemaVersionHistory(ctx context.Context) (int, error) {
+	head := 0
+	for i, migration := range migrations {
+		expected := i + 1
+		if migration.version != expected {
+			return 0, fmt.Errorf("inconsistent migration definitions: position %d has version %d", expected, migration.version)
+		}
+		head = migration.version
+	}
+
+	rows, err := s.db.QueryContext(ctx, `SELECT version FROM schema_version ORDER BY version`)
+	if err != nil {
+		return 0, fmt.Errorf("read schema version history: %w", err)
+	}
+	defer rows.Close()
+
+	current := 0
+	expected := 1
+	for rows.Next() {
+		var version int
+		if err := rows.Scan(&version); err != nil {
+			return 0, fmt.Errorf("scan schema version history: %w", err)
+		}
+		if version <= 0 {
+			return 0, fmt.Errorf("schema version history contains non-positive version %d", version)
+		}
+		if version > head {
+			return 0, fmt.Errorf("schema version %d is newer than supported head %d", version, head)
+		}
+		if version < expected {
+			return 0, fmt.Errorf("schema version history contains duplicate version %d", version)
+		}
+		if version > expected {
+			return 0, fmt.Errorf("schema version history has gap: expected version %d, found %d", expected, version)
+		}
+		current = version
+		expected++
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("read schema version history: %w", err)
+	}
+	return current, nil
 }
 
 func migrateV1(_ context.Context, tx *sql.Tx) error {
@@ -227,4 +276,43 @@ func migrateV2(_ context.Context, tx *sql.Tx) error {
 	// crash (ADR-0002 §3). Record its path on the run row.
 	_, err := tx.Exec(`ALTER TABLE runs ADD COLUMN identity_path TEXT NOT NULL DEFAULT ''`)
 	return err
+}
+
+func migrateV3(_ context.Context, tx *sql.Tx) error {
+	_, err := tx.Exec(`ALTER TABLE finalization_outbox ADD COLUMN diagnostic TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+func migrateV4(_ context.Context, tx *sql.Tx) error {
+	statements := []string{
+		`ALTER TABLE runs ADD COLUMN transcript_required INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE runs ADD COLUMN transcript_consumed_offset INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE runs ADD COLUMN transcript_final_size INTEGER NOT NULL DEFAULT -1`,
+		`UPDATE runs SET transcript_consumed_offset = committed_offset`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func migrateV5(_ context.Context, tx *sql.Tx) error {
+	_, err := tx.Exec(`ALTER TABLE runs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0`)
+	return err
+
+}
+
+func migrateV6(_ context.Context, tx *sql.Tx) error {
+	statements := []string{
+		`ALTER TABLE runs ADD COLUMN transcript_device INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE runs ADD COLUMN transcript_inode INTEGER NOT NULL DEFAULT 0`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return err
+		}
+	}
+	return nil
 }

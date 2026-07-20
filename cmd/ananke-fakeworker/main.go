@@ -3,7 +3,7 @@
 // It writes NDJSON transcript events to a file, can split a JSON write across
 // two writes (partial line test), can omit the final newline, can spawn normal
 // or SIGTERM-resistant children, and exits with a configurable code. It does
-// NOT call setpgid — it inherits the supervisor's process group (ADR-0002 §1).
+// not call setpgid: trampoline exec preserves the owned worker group.
 //
 // All behaviour is controlled by environment variables so the supervisor can
 // pass them through WorkerEnv:
@@ -30,6 +30,19 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+// transcriptRecord is the canonical fakeworker NDJSON envelope. Its source
+// sequence belongs in the payload; the event API assigns its own durable seq.
+type transcriptRecord struct {
+	Type    string            `json:"type"`
+	Payload transcriptPayload `json:"payload"`
+}
+
+type transcriptPayload struct {
+	SourceSequence int    `json:"source_seq"`
+	Text           string `json:"text"`
+	Timestamp      string `json:"timestamp"`
+}
 
 func main() {
 	transcriptPath := os.Getenv("ANANKE_FW_TRANSCRIPT")
@@ -73,18 +86,20 @@ func main() {
 }
 
 func writeTranscript(path string, nEvents, delayMs int, partial, noFinalNL bool) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0)
 	if err != nil {
 		return
 	}
 	defer f.Close()
 
 	for i := 1; i <= nEvents; i++ {
-		ev := map[string]any{
-			"seq":  i,
-			"type": "message",
-			"text": "event " + strconv.Itoa(i),
-			"ts":   time.Now().UTC().Format(time.RFC3339Nano),
+		ev := transcriptRecord{
+			Type: "message",
+			Payload: transcriptPayload{
+				SourceSequence: i,
+				Text:           "event " + strconv.Itoa(i),
+				Timestamp:      time.Now().UTC().Format(time.RFC3339Nano),
+			},
 		}
 		data, _ := json.Marshal(ev)
 		isLast := i == nEvents

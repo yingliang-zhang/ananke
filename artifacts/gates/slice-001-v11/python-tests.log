@@ -1,0 +1,31 @@
+test_aggregate_matches_independent_canonical_recomputation (test_candidate_manifest.SourceManifestTests.test_aggregate_matches_independent_canonical_recomputation) ... ok
+test_bound_report_embeds_the_exact_candidate (test_candidate_manifest.SourceManifestTests.test_bound_report_embeds_the_exact_candidate) ... ok
+test_included_content_change_changes_aggregate (test_candidate_manifest.SourceManifestTests.test_included_content_change_changes_aggregate) ... ok
+test_missing_required_root_is_rejected (test_candidate_manifest.SourceManifestTests.test_missing_required_root_is_rejected) ... ok
+test_ordering_independence (test_candidate_manifest.SourceManifestTests.test_ordering_independence) ... ok
+test_reports_and_build_are_excluded (test_candidate_manifest.SourceManifestTests.test_reports_and_build_are_excluded) ... ok
+test_source_drift_prevents_report_overwrite (test_candidate_manifest.SourceManifestTests.test_source_drift_prevents_report_overwrite) ... ok
+test_symlink_escape_is_rejected (test_candidate_manifest.SourceManifestTests.test_symlink_escape_is_rejected) ... ok
+test_api_request_does_not_half_close_after_complete_json_request (test_harness_support.LifecycleHarnessSupportTests.test_api_request_does_not_half_close_after_complete_json_request) ... ok
+test_event_evidence_rejects_missing_or_mismatched_payload (test_harness_support.LifecycleHarnessSupportTests.test_event_evidence_rejects_missing_or_mismatched_payload) ... ok
+test_event_evidence_requires_exact_monotonic_expected_events (test_harness_support.LifecycleHarnessSupportTests.test_event_evidence_requires_exact_monotonic_expected_events) ... ok
+test_omitted_events_field_means_empty_event_set (test_harness_support.LifecycleHarnessSupportTests.test_omitted_events_field_means_empty_event_set) ... ok
+test_partial_or_failed_result_sets_never_pass (test_harness_support.LifecycleHarnessSupportTests.test_partial_or_failed_result_sets_never_pass) ... ok
+test_persistence_queries_return_pgid_offset_and_outbox_status (test_harness_support.LifecycleHarnessSupportTests.test_persistence_queries_return_pgid_offset_and_outbox_status) ... ok
+test_poll_until_returns_first_truthy_value (test_harness_support.LifecycleHarnessSupportTests.test_poll_until_returns_first_truthy_value) ... ok
+test_poll_until_times_out_with_context (test_harness_support.LifecycleHarnessSupportTests.test_poll_until_times_out_with_context) ... ok
+test_process_group_members_are_exact_and_sorted (test_harness_support.LifecycleHarnessSupportTests.test_process_group_members_are_exact_and_sorted) ... ok
+test_compile_and_setup_failures_remain_distinct (test_mutation_proof.MutationProofAttributionTests.test_compile_and_setup_failures_remain_distinct) ... ok
+test_exit_one_without_named_test_is_not_detected (test_mutation_proof.MutationProofAttributionTests.test_exit_one_without_named_test_is_not_detected) ... ok
+test_named_fail_without_run_event_is_not_detected (test_mutation_proof.MutationProofAttributionTests.test_named_fail_without_run_event_is_not_detected) ... ok
+test_named_test_own_fail_event_is_detected (test_mutation_proof.MutationProofAttributionTests.test_named_test_own_fail_event_is_detected) ... ok
+test_named_test_pass_plus_unrelated_failure_is_not_detected (test_mutation_proof.MutationProofAttributionTests.test_named_test_pass_plus_unrelated_failure_is_not_detected) ... ok
+test_timeout_remains_distinct (test_mutation_proof.MutationProofAttributionTests.test_timeout_remains_distinct) ... ok
+test_default_iteration_count_remains_twenty (test_stress_lifecycle.StressLifecycleConfigurationTests.test_default_iteration_count_remains_twenty) ... ok
+test_iteration_count_must_be_positive (test_stress_lifecycle.StressLifecycleConfigurationTests.test_iteration_count_must_be_positive) ... ok
+test_one_iteration_focused_smoke_override (test_stress_lifecycle.StressLifecycleConfigurationTests.test_one_iteration_focused_smoke_override) ... ok
+
+----------------------------------------------------------------------
+Ran 26 tests in 0.022s
+
+OK

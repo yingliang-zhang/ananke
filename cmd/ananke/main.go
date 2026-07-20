@@ -31,6 +31,9 @@ func main() {
 		SupervisorBin: *supervisorBin,
 		DataDir:       *dataDir,
 		Token:         *token,
+		ReportError: func(err error) {
+			fmt.Fprintf(os.Stderr, "ananke: background error: %v\n", err)
+		},
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ananke: %v\n", err)
@@ -47,7 +50,7 @@ func main() {
 		cancel()
 	}()
 
-	fmt.Fprintf(os.Stderr, "ananke: listening on %s (token: %s)\n", *socketPath, eng.Token())
+	fmt.Fprintf(os.Stderr, "ananke: listening on %s\n", *socketPath)
 	if err := eng.Run(ctx); err != nil && err != context.Canceled {
 		fmt.Fprintf(os.Stderr, "ananke: %v\n", err)
 		os.Exit(1)

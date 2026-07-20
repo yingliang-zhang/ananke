@@ -1,0 +1,43 @@
+=== Baseline (no mutation tags) ===
+  TestMutationReapBeforeCleanupOrder: PASS
+  TestCommitTerminalAtomicRollbackOnOutboxFailure: PASS
+  TestMutationNoGroupSignalAfterReap: PASS
+  TestEngineTranscriptCorruptionStaysNonterminalWhileAlive: PASS
+  TestMutationResetOffsetNoDup: PASS
+  TestSupervisorResistantChildEscalation: PASS
+
+=== Mutations ===
+
+--- mutation_reap_before_cleanup ---
+  test: TestMutationReapBeforeCleanupOrder
+  desc: Reap worker before group cleanup — resistant child not killed before reap
+  result: DETECTED (behavioral_test_rejection, exit 1)
+
+--- mutation_no_outbox ---
+  test: TestCommitTerminalAtomicRollbackOnOutboxFailure
+  desc: Commit terminal state without outbox row — atomicity invariant violated
+  result: DETECTED (behavioral_test_rejection, exit 1)
+
+--- mutation_signal_after_reap ---
+  test: TestMutationNoGroupSignalAfterReap
+  desc: Signal numeric PGID after identity lost — post-reap group signal
+  result: DETECTED (behavioral_test_rejection, exit 1)
+
+--- mutation_terminal_while_alive ---
+  test: TestEngineTranscriptCorruptionStaysNonterminalWhileAlive
+  desc: Enter terminal failed while worker group alive — bypasses cleanup_required
+  result: DETECTED (behavioral_test_rejection, exit 1)
+
+--- mutation_reset_offset ---
+  test: TestMutationResetOffsetNoDup
+  desc: Reset transcript offset on restart — duplicate events on reconnect
+  result: DETECTED (behavioral_test_rejection, exit 1)
+
+--- mutation_cancel_parent_only ---
+  test: TestSupervisorResistantChildEscalation
+  desc: Cancel only the parent PID, not the group — resistant child survives
+  result: DETECTED (behavioral_test_rejection, exit 1)
+
+=== Report: /Users/yingliangzhang/Projects/ananke/reports/mutation-proof.json ===
+Detected: 6/6
+ALL MUTATIONS DETECTED

@@ -1,0 +1,8 @@
+PASS gofmt (0.0s)
+PASS vet (0.2s)
+PASS test (36.7s)
+PASS test-race (48.0s)
+PASS test-nocgo (37.2s)
+PASS build-nocgo (0.6s)
+
+ALL GATES PASS

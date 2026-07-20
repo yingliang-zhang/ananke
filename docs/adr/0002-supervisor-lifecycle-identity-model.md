@@ -59,132 +59,120 @@ identity-reuse vulnerability.
 
 ## Decision
 
-### 1. Supervisor is the process-group anchor
+### 1. Worker-led group with a paused pre-exec barrier
 
-The supervisor — not the worker — is the process-group leader. The
-supervisor launches the worker into its own process group, and the
-worker plus all descendants inherit the supervisor's PGID.
+The supervisor remains outside the owned worker process group. It launches a
+small trampoline as a new process-group leader, so `PGID == worker PID`, while
+retaining the only exact child wait authority.
 
 ```
   daemon
     │
     ▼
-  supervisor (PGID = supervisor PID)
-    ├── worker (inherits supervisor PGID)
-    │     ├── child A (inherits PGID)
-    │     └── child B (inherits PGID)
-    └── (supervisor itself, alive until cleanup done)
+  supervisor (outside owned group)
+    │
+    └── worker trampoline (PID = owned PGID)
+          ├── child A (inherits owned PGID)
+          └── child B (inherits owned PGID)
 ```
 
-The supervisor:
+Worker path, arguments, and environment are transferred through an inherited
+configuration descriptor. A second inherited descriptor is a release barrier.
+After `Start` returns, the supervisor installs exact exit observation, records
+the positive PID as both worker PID and owned PGID, and publishes identity JSON,
+SQLite authority, the authenticated socket, and running state. Only then does
+it release the trampoline. The trampoline `exec`s the real worker in place, so
+PID and PGID do not change.
 
-1. Calls `setpgid(0, 0)` at startup → becomes group leader.
-2. Forks the worker. The worker inherits the supervisor's PGID.
-3. Owns `waitpid(workerPID)` for exit status.
-4. Ignores SIGTERM — group-wide TERM must not kill the supervisor
-   before it can manage escalation.
-5. Exits only after all cleanup and finalization obligations are
-   complete.
+The persisted `supervisor_pgid` / Go `SupervisorPGID` names are retained for
+pre-v0.1 compatibility. Their value is the owned worker-group PGID, not the
+supervisor process's current group.
 
-### 2. Deferred reap: never reap the worker before group cleanup
+### 2. Deferred reap: never reap the worker leader before group cleanup
 
-The supervisor does NOT call `worker.Wait()` immediately. Instead:
+The supervisor does not consume the worker leader's wait status when exit is
+observed. The unreaped leader pins the numeric PGID until cleanup is proven:
 
-1. Monitor the worker via a pipe (stdout/stderr) or
-   `waitpid(WNOHANG)` for non-blocking exit detection.
-2. When the worker has exited (pipe closed or `WNOHANG` returns):
-   a. Check whether the process group has any remaining members
-      besides the supervisor.
-   b. If no survivors: reap the worker (`waitpid` blocking) →
-      safe, no group signaling needed.
-   c. If survivors exist (resistant descendants):
-      - Send `kill(-pgid, SIGTERM)` — supervisor is still alive,
-        PGID is stable, supervisor ignores SIGTERM.
-      - Wait for the grace period.
-      - If survivors remain: enumerate group members and send
-        `SIGKILL` to each member individually (NOT `kill(-pgid, …)`,
-        to avoid killing the supervisor itself).
-      - Wait for all members to exit.
-   d. Reap the worker.
-3. After reaping: the supervisor is still alive. No further group
-   signaling is needed. The supervisor exits when finalization is
-   acknowledged.
+1. `GroupMembers(pgid)` enumerates live, non-zombie members only as a
+   fail-closed quiescence oracle.
+2. If the group is nonempty, send one atomic `kill(-pgid, SIGTERM)` and wait the
+   grace period.
+3. If members remain, send one atomic `kill(-pgid, SIGKILL)` and poll until
+   enumeration proves the group empty.
+4. Reap the exact worker leader and preserve its real exit status.
+5. Never signal the group after reap.
+
+The supervisor is outside the target group, so atomic TERM and KILL cannot kill
+the cleanup authority. A durable cancellation observed before release follows
+the same cleanup path while the trampoline is still blocked; the real worker
+never executes.
 
 ### 3. Crash recovery with durable identity
 
-The supervisor writes a durable identity file before launching the
-worker:
+Transcript file identity is published before trampoline launch. Complete
+process authority is published after the paused trampoline returns a positive
+PID and before release:
 
 ```
 identity.json:
-  supervisor_pid:  <PID>
-  supervisor_pgid: <PGID>
-  worker_pid:       <PID>
+  supervisor_pid:  <supervisor PID>
+  supervisor_pgid: <owned worker PGID; compatibility field name>
+  worker_pid:       <worker/trampoline PID, equal to owned PGID>
   worker_args:      [...]
   socket_path:      <Unix socket>
   token:            <random secret>
   transcript_path:  <NDJSON file>
-  launch_time:      <monotonic+wall clock>
+  launch_time:      <wall clock>
 ```
 
 On daemon restart:
 
-1. Read the identity file.
-2. Check if the supervisor process is alive (`kill(supervisorPID, 0)`).
-3. If alive: reconnect via the Unix socket. The supervisor still pins
-   the PGID. Query worker status, continue monitoring.
-4. If dead: the supervisor's PID is freed. The PGID may be reused.
-   - Check if any process with `worker_pid` is alive.
-   - If the worker is still alive (reparented to PID 1): it may be in
-     a now-ambiguous group. Enter `recovery_unknown`.
-   - If the worker is also dead: exit status is lost (reaped by PID 1).
-     Use transcript evidence if available; otherwise `recovery_unknown`.
-   - Do NOT signal the numeric PGID after the supervisor is confirmed
-     dead. The identity is no longer provably stable.
+1. Read and cross-check the identity file and SQLite authority.
+2. Check whether the supervisor process is alive.
+3. If alive, authenticate to its Unix socket and adopt status/finalization. The
+   supervisor retains exact wait authority and does not reap before cleanup.
+4. If dead, the stored PGID is no longer safe signalling authority. If either
+   the worker PID or group occupancy remains, enter `recovery_unknown`; if all
+   processes are gone, use only durable transcript/finalization evidence.
+
+No restart path signals the numeric PGID after supervisor authority is lost.
 
 ### 4. Group member enumeration
 
-For targeted SIGKILL (step 2c), the supervisor must enumerate process
-group members:
+Enumeration is evidence only; enumerated numeric PIDs are never signalled
+individually:
 
-- **Darwin**: use `libproc` or `proc_listallpids` + `proc_pgrp`
-  filtering. A pure-Go wrapper via `golang.org/x/sys/unix` or cgo
-  (guarded by build tag, not in the CGO-free path) may be needed.
-  Alternative: shell out to `ps -A -o pid,pgid` and parse output.
-  This is acceptable because SIGKILL escalation is rare and not in
-  the hot path.
+- **Darwin**: parse `ps -A -o pid,pgid,stat`, rejecting malformed output and
+  excluding zombies. An unavailable or malformed enumeration is not empty-group
+  proof.
 - **Linux**: read `/proc/*/stat` and filter by process group.
-- **Windows**: Job Object provides implicit group membership. No
-  enumeration needed — `TerminateJobObject` kills all members.
+- **Windows**: Job Object provides implicit group membership and atomic
+  termination.
 
 ### 5. Platform abstraction
 
 ```go
 type LifecycleBackend interface {
-    // BecomeGroupLeader makes the calling process the leader of a
-    // new process group. Returns the PGID.
-    BecomeGroupLeader() (pgid int, err error)
-
-    // LaunchWorker forks/execs the worker into the caller's process
-    // group. Returns the worker PID.
+    // LaunchWorker starts a paused group-leading trampoline and installs exact
+    // exit observation. The positive PID is also the owned PGID.
     LaunchWorker(path string, args []string, env []string) (pid int, err error)
 
-    // WorkerExited returns a channel that closes when the worker
-    // exits. Does NOT reap the worker.
+    // ReleaseWorker lets the trampoline exec the real worker in place.
+    ReleaseWorker(pid int) error
+
+    // WorkerExited observes exact exit without reaping.
     WorkerExited(pid int) (<-chan struct{}, error)
 
-    // ReapWorker calls waitpid and returns the exit status. Only
-    // call after group cleanup is complete.
+    // ReapWorker consumes wait status only after group cleanup.
     ReapWorker(pid int) (exitCode int, err error)
 
-    // GroupMembers returns PIDs of all processes in the given
-    // process group, excluding the caller.
+    // GroupMembers is a fail-closed quiescence oracle.
     GroupMembers(pgid int) ([]int, error)
 
-    // SignalProcess sends a signal to a specific PID.
-    SignalProcess(pid int, sig Signal) error
+    // SignalGroup atomically signals the positive owned PGID.
+    SignalGroup(pgid int, sig Signal) error
 
-    // ProcessAlive checks if a PID is alive without signalling.
+    // ProcessAlive checks whether a PID exists without delivering a signal.
     ProcessAlive(pid int) bool
 }
 ```
@@ -247,16 +235,16 @@ contains the expected members by checking start time or process name.
 
 ### What this design guarantees
 
-- The PGID is stable for the entire duration of cleanup because the
-  group leader (supervisor) is alive and unreaped.
-- No `kill(-pgid, …)` is ever issued after the group leader has been
-  reaped.
-- SIGKILL escalation targets individual PIDs, not the group, avoiding
-  self-kill of the supervisor.
-- Daemon crash is recoverable: the supervisor is still alive, still
-  pinning the PGID, and can be reconnected.
-- Supervisor crash is detected and enters `recovery_unknown` rather
-  than risking identity-reuse signalling.
+- The supervisor is never a member of the worker group it must terminate.
+- The worker PID equals the owned PGID before any real worker code executes.
+- Complete durable and socket authority exists before barrier release.
+- The unreaped worker leader pins PGID identity through atomic group TERM/KILL
+  and fail-closed empty-group proof.
+- No group signal occurs after exact leader reap.
+- Daemon restart can authenticate to the still-live supervisor without changing
+  worker ownership.
+- Loss of supervisor authority enters `recovery_unknown` rather than risking a
+  reused numeric PGID.
 
 ### What this design does NOT guarantee
 

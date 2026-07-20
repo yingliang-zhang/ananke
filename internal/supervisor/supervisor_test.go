@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/yingliang-zhang/ananke/internal/store"
+	"golang.org/x/sys/unix"
 )
 
 // seedRunStore creates a fresh store with one run ready to be supervised.
@@ -44,16 +45,98 @@ func seedRunStore(t *testing.T, runID string) string {
 	return storePath
 }
 
-// TestSupervisorBecomesGroupLeaderAndWritesIdentity verifies the supervisor
-// subprocess becomes the group leader, writes an identity file with PGID==PID,
-// and transitions the run to running.
-func TestSupervisorBecomesGroupLeaderAndWritesIdentity(t *testing.T) {
+func TestForkSupervisorCleanupKillsOwnedGroup(t *testing.T) {
+	var supervisorPID, workerPID, childPID int
+	var socketPath string
+	t.Cleanup(func() {
+		if workerPID > 0 {
+			_ = unix.Kill(-workerPID, unix.SIGKILL)
+		}
+		if supervisorPID > 0 {
+			_ = unix.Kill(supervisorPID, unix.SIGKILL)
+		}
+	})
+
+	t.Run("resistant child", func(t *testing.T) {
+		const runID = "run-cleanup-owned-group"
+		storePath := seedRunStore(t, runID)
+		childPIDFile := filepath.Join(t.TempDir(), "child.pid")
+		cmd, socket, _, identityPath := forkSupervisor(t, storePath, runID, supEnv{
+			FWEvents:       1,
+			FWDelayMS:      60_000,
+			FWSpawnChild:   true,
+			FWChildMode:    "resistant",
+			FWChildPIDFile: childPIDFile,
+		})
+		supervisorPID = cmd.Process.Pid
+		socketPath = socket
+		waitForSocket(t, socketPath, 5*time.Second)
+		identity := readIdentityFile(t, identityPath)
+		workerPID = identity.WorkerPID
+		if identity.SupervisorPGID != workerPID {
+			t.Fatalf("compatibility SupervisorPGID = %d, want worker leader %d", identity.SupervisorPGID, workerPID)
+		}
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if data, err := os.ReadFile(childPIDFile); err == nil {
+				if pid, parseErr := atoi(string(data)); parseErr == nil && pid > 0 {
+					childPID = pid
+					break
+				}
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if childPID == 0 {
+			t.Fatal("resistant child PID was not written")
+		}
+		supervisorGroup, err := unix.Getpgid(supervisorPID)
+		if err != nil {
+			t.Fatalf("get supervisor PID %d process group: %v", supervisorPID, err)
+		}
+		if supervisorGroup == workerPID {
+			t.Fatalf("supervisor PID %d joined owned worker group %d", supervisorPID, workerPID)
+		}
+		for name, pid := range map[string]int{"worker": workerPID, "child": childPID} {
+			pgid, err := unix.Getpgid(pid)
+			if err != nil {
+				t.Fatalf("get %s PID %d process group: %v", name, pid, err)
+			}
+			if pgid != workerPID {
+				t.Fatalf("%s PID %d PGID = %d, want owned worker group %d", name, pid, pgid, workerPID)
+			}
+		}
+		response := sendCmd(t, socketPath, "test-token", "cancel")
+		if response["ok"] != true {
+			t.Fatalf("cancel resistant group: %v", response)
+		}
+		st, err := store.Open(storePath)
+		if err != nil {
+			t.Fatalf("open store for cancellation: %v", err)
+		}
+		defer st.Close()
+		waitUntilState(t, st, runID, store.StateCancelled, 15*time.Second)
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && (processAlive(supervisorPID) || processAlive(workerPID) || processAlive(childPID)) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	for name, pid := range map[string]int{"supervisor": supervisorPID, "worker": workerPID, "child": childPID} {
+		if processAlive(pid) {
+			t.Errorf("%s PID %d survived forkSupervisor cleanup", name, pid)
+		}
+	}
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Errorf("socket %q still exists after forkSupervisor cleanup: %v", socketPath, err)
+	}
+}
+
+// TestSupervisorStaysOutsideWorkerGroupAndWritesIdentity verifies the
+// supervisor remains outside the worker-led group while publishing complete
+// compatibility identity and transitioning the run to running.
+func TestSupervisorStaysOutsideWorkerGroupAndWritesIdentity(t *testing.T) {
 	storePath := seedRunStore(t, "run-1")
 	cmd, socketPath, _, identityPath := forkSupervisor(t, storePath, "run-1", supEnv{FWEvents: 1, FWExit: 0, FWDelayMS: 2000})
-	defer func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	}()
 
 	waitForSocket(t, socketPath, 5*time.Second)
 	// Ping while the worker is still running to capture the running state.
@@ -69,36 +152,37 @@ func TestSupervisorBecomesGroupLeaderAndWritesIdentity(t *testing.T) {
 		t.Errorf("pgid = 0, want nonzero")
 	}
 
-	// Wait for the run to complete.
+	id := readIdentityFile(t, identityPath)
+	if id.SupervisorPID != cmd.Process.Pid || id.WorkerPID <= 0 {
+		t.Fatalf("identity pids = supervisor %d worker %d, want %d and positive", id.SupervisorPID, id.WorkerPID, cmd.Process.Pid)
+	}
+	if id.SupervisorPGID != id.WorkerPID {
+		t.Fatalf("compatibility SupervisorPGID = %d, want worker group leader %d", id.SupervisorPGID, id.WorkerPID)
+	}
+	if id.SupervisorPGID == id.SupervisorPID {
+		t.Fatalf("supervisor PID %d equals owned worker PGID", id.SupervisorPID)
+	}
+	supervisorGroup, err := unix.Getpgid(cmd.Process.Pid)
+	if err != nil {
+		t.Fatalf("get supervisor process group: %v", err)
+	}
+	if supervisorGroup == id.SupervisorPGID {
+		t.Fatalf("supervisor current group %d equals owned worker group", supervisorGroup)
+	}
+
 	st, err := store.Open(storePath)
 	if err != nil {
-		t.Fatalf("Open store: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	defer st.Close()
 	waitUntilState(t, st, "run-1", store.StateCompleted, 10*time.Second)
-
-	// Verify identity file: PGID == supervisor PID.
-	id := readIdentityFile(t, identityPath)
-	if id.SupervisorPGID != id.SupervisorPID {
-		t.Errorf("identity PGID %d != PID %d", id.SupervisorPGID, id.SupervisorPID)
-	}
-	if id.WorkerPID == 0 {
-		t.Errorf("identity WorkerPID = 0, want nonzero")
-	}
-	if id.WorkerPGID() != id.SupervisorPGID {
-		t.Errorf("identity WorkerPGID %d != SupervisorPGID %d", id.WorkerPGID(), id.SupervisorPGID)
-	}
 }
 
-// TestSupervisorWorkerInheritsGroup verifies the worker PID inherits the
-// supervisor's PGID.
-func TestSupervisorWorkerInheritsGroup(t *testing.T) {
+// TestSupervisorWorkerPreservesTrampolineGroup verifies exec preserves the
+// paused trampoline's worker-led process group.
+func TestSupervisorWorkerPreservesTrampolineGroup(t *testing.T) {
 	storePath := seedRunStore(t, "run-2")
-	cmd, socketPath, _, identityPath := forkSupervisor(t, storePath, "run-2", supEnv{FWEvents: 1, FWExit: 0, FWDelayMS: 2000})
-	defer func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	}()
+	_, socketPath, _, identityPath := forkSupervisor(t, storePath, "run-2", supEnv{FWEvents: 1, FWExit: 0, FWDelayMS: 2000})
 	waitForSocket(t, socketPath, 5*time.Second)
 	resp := sendCmd(t, socketPath, "test-token", "ping")
 	pgid, _ := toInt(resp["pgid"])
@@ -121,11 +205,7 @@ func TestSupervisorWorkerInheritsGroup(t *testing.T) {
 // acknowledged.
 func TestSupervisorWorkerExitNoSurvivorsReapReport(t *testing.T) {
 	storePath := seedRunStore(t, "run-3")
-	cmd, socketPath, _, _ := forkSupervisor(t, storePath, "run-3", supEnv{FWEvents: 2, FWExit: 0, FWDelayMS: 20})
-	defer func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	}()
+	_, socketPath, _, _ := forkSupervisor(t, storePath, "run-3", supEnv{FWEvents: 2, FWExit: 0, FWDelayMS: 20})
 	waitForSocket(t, socketPath, 5*time.Second)
 
 	st, err := store.Open(storePath)
@@ -170,7 +250,23 @@ func TestSupervisorWorkerExitNoSurvivorsReapReport(t *testing.T) {
 func TestSupervisorResistantChildEscalation(t *testing.T) {
 	storePath := seedRunStore(t, "run-4")
 	childPIDFile := filepath.Join(t.TempDir(), "child.pid")
-	cmd, socketPath, resultPath, _ := forkSupervisor(t, storePath, "run-4", supEnv{
+	var childPID int
+	t.Cleanup(func() {
+		// Mutation builds intentionally skip production group cleanup. Remove the
+		// exact known fixture child so a detected mutation cannot pollute later
+		// gates; production cleanup remains negative-PGID only.
+		if childPID > 0 && processAlive(childPID) {
+			_ = unix.Kill(childPID, unix.SIGKILL)
+			deadline := time.Now().Add(2 * time.Second)
+			for processAlive(childPID) && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if processAlive(childPID) {
+				t.Errorf("mutation fixture child PID %d survived cleanup", childPID)
+			}
+		}
+	})
+	_, socketPath, resultPath, _ := forkSupervisor(t, storePath, "run-4", supEnv{
 		FWEvents:       1,
 		FWExit:         0,
 		FWDelayMS:      50,
@@ -178,14 +274,9 @@ func TestSupervisorResistantChildEscalation(t *testing.T) {
 		FWChildMode:    "resistant",
 		FWChildPIDFile: childPIDFile,
 	})
-	defer func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	}()
 	waitForSocket(t, socketPath, 5*time.Second)
 
 	// Wait for the child PID file to appear.
-	var childPID int
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if data, err := os.ReadFile(childPIDFile); err == nil {
@@ -237,11 +328,7 @@ func TestSupervisorResistantChildEscalation(t *testing.T) {
 // to cancelled.
 func TestSupervisorCancelCommand(t *testing.T) {
 	storePath := seedRunStore(t, "run-5")
-	cmd, socketPath, _, _ := forkSupervisor(t, storePath, "run-5", supEnv{FWEvents: 0, FWExit: 0, FWDelayMS: 5000})
-	defer func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	}()
+	_, socketPath, _, _ := forkSupervisor(t, storePath, "run-5", supEnv{FWEvents: 0, FWExit: 0, FWDelayMS: 5000})
 	waitForSocket(t, socketPath, 5*time.Second)
 
 	// Cancel the run.
@@ -274,11 +361,7 @@ func TestSupervisorCancelCommand(t *testing.T) {
 // ok with the current state (daemon reconnect acknowledgment).
 func TestSupervisorAdoptCommand(t *testing.T) {
 	storePath := seedRunStore(t, "run-6")
-	cmd, socketPath, _, _ := forkSupervisor(t, storePath, "run-6", supEnv{FWEvents: 1, FWExit: 0, FWDelayMS: 500})
-	defer func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	}()
+	_, socketPath, _, _ := forkSupervisor(t, storePath, "run-6", supEnv{FWEvents: 1, FWExit: 0, FWDelayMS: 500})
 	waitForSocket(t, socketPath, 5*time.Second)
 
 	resp := sendCmd(t, socketPath, "test-token", "adopt")
@@ -290,20 +373,37 @@ func TestSupervisorAdoptCommand(t *testing.T) {
 	}
 }
 
-// TestSupervisorIdentityFileWrittenBeforeLaunch verifies the identity file
-// exists by the time the worker starts producing a transcript. We detect this
-// by having the fakeworker write its transcript, then checking that the
-// identity file was present (non-empty) at worker-start time via the transcript
-// event order.
-func TestSupervisorIdentityFileWrittenBeforeLaunch(t *testing.T) {
+func TestSupervisorFinalizeCommandReturnsAuthenticatedIdentity(t *testing.T) {
+	storePath := seedRunStore(t, "run-finalize")
+	cmd, socketPath, _, _ := forkSupervisor(t, storePath, "run-finalize", supEnv{FWEvents: 1, FWExit: 0, FWDelayMS: 500})
+	waitForSocket(t, socketPath, 5*time.Second)
+
+	resp := sendCmd(t, socketPath, "test-token", "finalize")
+	if resp["ok"] != true {
+		t.Fatalf("finalize failed: %v", resp)
+	}
+	if resp["run_id"] != "run-finalize" || resp["state"] != "running" {
+		t.Fatalf("finalize response = %v, want exact running run identity", resp)
+	}
+	if supervisorPID, _ := toInt(resp["supervisor_pid"]); supervisorPID != cmd.Process.Pid {
+		t.Fatalf("finalize supervisor_pid = %d, want %d", supervisorPID, cmd.Process.Pid)
+	}
+	workerPID, _ := toInt(resp["worker_pid"])
+	if workerPID <= 0 {
+		t.Fatalf("finalize worker_pid = %d, want positive", workerPID)
+	}
+	if pgid, _ := toInt(resp["pgid"]); pgid != workerPID {
+		t.Fatalf("finalize pgid = %d, want worker group leader %d", pgid, workerPID)
+	}
+}
+
+// TestSupervisorIdentityPublishedBeforeWorkerExecution verifies complete
+// process identity exists before the released worker can write transcript data.
+func TestSupervisorIdentityPublishedBeforeWorkerExecution(t *testing.T) {
 	storePath := seedRunStore(t, "run-7")
 	dir := t.TempDir()
 	transcriptPath := filepath.Join(dir, "transcript.ndjson")
-	cmd, socketPath, _, identityPath := forkSupervisor(t, storePath, "run-7", supEnv{FWEvents: 3, FWExit: 0, FWDelayMS: 30, TranscriptPath: transcriptPath})
-	defer func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	}()
+	_, socketPath, _, identityPath := forkSupervisor(t, storePath, "run-7", supEnv{FWEvents: 3, FWExit: 0, FWDelayMS: 30, TranscriptPath: transcriptPath})
 	waitForSocket(t, socketPath, 5*time.Second)
 
 	st, _ := store.Open(storePath)
@@ -336,18 +436,11 @@ func TestSupervisorIdentityFileWrittenBeforeLaunch(t *testing.T) {
 	}
 }
 
-// TestSupervisorNoGroupSignalAfterReap is a structural assertion: it verifies
-// that after the run completes, the supervisor process is gone and no signal
-// was issued to the numeric PGID post-reap. We check this by confirming the
-// run completed cleanly and the supervisor's own PID (group leader) is the
-// last surviving member (it exits on its own after finalization).
+// TestSupervisorNoGroupSignalAfterReap verifies a clean worker is reaped and
+// finalization completes without any later signal to its now-unpinned PGID.
 func TestSupervisorNoGroupSignalAfterReap(t *testing.T) {
 	storePath := seedRunStore(t, "run-8")
-	cmd, socketPath, _, _ := forkSupervisor(t, storePath, "run-8", supEnv{FWEvents: 1, FWExit: 0, FWDelayMS: 20})
-	defer func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	}()
+	_, socketPath, _, _ := forkSupervisor(t, storePath, "run-8", supEnv{FWEvents: 1, FWExit: 0, FWDelayMS: 20})
 	waitForSocket(t, socketPath, 5*time.Second)
 
 	st, _ := store.Open(storePath)
@@ -365,5 +458,49 @@ func TestSupervisorNoGroupSignalAfterReap(t *testing.T) {
 	}
 	if outbox.Acknowledged != 1 {
 		t.Errorf("acknowledged = %d, want 1", outbox.Acknowledged)
+	}
+}
+
+func TestSupervisorCleanupRequiredOverridesExitAndCancel(t *testing.T) {
+	tests := []struct {
+		name      string
+		exitCode  int
+		cancelled bool
+	}{
+		{name: "zero exit", exitCode: 0},
+		{name: "zero exit after normal cancel", exitCode: 0, cancelled: true},
+		{name: "nonzero exit", exitCode: 23},
+		{name: "nonzero exit after normal cancel", exitCode: 23, cancelled: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			const runID = "run-cleanup-required"
+			storePath := seedRunStore(t, runID)
+			st, err := store.Open(storePath)
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			defer st.Close()
+			ctx := context.Background()
+			if err := st.Transition(ctx, runID, store.StateRunning, "launched"); err != nil {
+				t.Fatalf("Transition running: %v", err)
+			}
+			if err := st.Transition(ctx, runID, store.StateCleanupRequired, "transcript corruption"); err != nil {
+				t.Fatalf("Transition cleanup_required: %v", err)
+			}
+
+			s := &Supervisor{
+				cfg:       Config{RunID: runID},
+				store:     st,
+				cancelled: tc.cancelled,
+			}
+			state, reason := s.decideTerminal(tc.exitCode)
+			if state != store.StateFailed {
+				t.Errorf("decideTerminal(%d) = %q, want failed", tc.exitCode, state)
+			}
+			if reason != "transcript corruption required group cleanup" {
+				t.Errorf("reason = %q, want transcript corruption reason", reason)
+			}
+		})
 	}
 }

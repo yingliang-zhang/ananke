@@ -1,234 +1,996 @@
 {
-  "timestamp": "2026-07-18T03:41:10Z",
+  "timestamp": "2026-07-20T17:29:40Z",
+  "all_pass": true,
   "crash_restart": {
     "total": 20,
     "passed": 20,
+    "complete": true,
     "results": [
       {
         "pass": 0,
         "ok": true,
-        "state": "running"
+        "state": "completed",
+        "event_count": 1,
+        "event_sequences": [
+          1
+        ],
+        "committed_offset": 105,
+        "outbox_status": {
+          "terminal_state": "completed",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:27:15.472014Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56105,
+        "survivor_pids": []
       },
       {
         "pass": 1,
         "ok": true,
-        "state": "running"
+        "state": "completed",
+        "event_count": 1,
+        "event_sequences": [
+          1
+        ],
+        "committed_offset": 105,
+        "outbox_status": {
+          "terminal_state": "completed",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:27:20.719053Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56129,
+        "survivor_pids": []
       },
       {
         "pass": 2,
         "ok": true,
-        "state": "running"
+        "state": "completed",
+        "event_count": 1,
+        "event_sequences": [
+          1
+        ],
+        "committed_offset": 104,
+        "outbox_status": {
+          "terminal_state": "completed",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:27:25.967489Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56144,
+        "survivor_pids": []
       },
       {
         "pass": 3,
         "ok": true,
-        "state": "running"
+        "state": "completed",
+        "event_count": 1,
+        "event_sequences": [
+          1
+        ],
+        "committed_offset": 105,
+        "outbox_status": {
+          "terminal_state": "completed",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:27:31.214045Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56156,
+        "survivor_pids": []
       },
       {
         "pass": 4,
         "ok": true,
-        "state": "running"
+        "state": "completed",
+        "event_count": 1,
+        "event_sequences": [
+          1
+        ],
+        "committed_offset": 105,
+        "outbox_status": {
+          "terminal_state": "completed",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:27:36.426044Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56181,
+        "survivor_pids": []
       },
       {
         "pass": 5,
         "ok": true,
-        "state": "running"
+        "state": "completed",
+        "event_count": 1,
+        "event_sequences": [
+          1
+        ],
+        "committed_offset": 105,
+        "outbox_status": {
+          "terminal_state": "completed",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:27:41.6765Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56215,
+        "survivor_pids": []
       },
       {
         "pass": 6,
         "ok": true,
-        "state": "running"
+        "state": "completed",
+        "event_count": 1,
+        "event_sequences": [
+          1
+        ],
+        "committed_offset": 102,
+        "outbox_status": {
+          "terminal_state": "completed",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:27:46.893698Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56234,
+        "survivor_pids": []
       },
       {
         "pass": 7,
         "ok": true,
-        "state": "running"
+        "state": "completed",
+        "event_count": 1,
+        "event_sequences": [
+          1
+        ],
+        "committed_offset": 105,
+        "outbox_status": {
+          "terminal_state": "completed",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:27:52.113619Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56248,
+        "survivor_pids": []
       },
       {
         "pass": 8,
         "ok": true,
-        "state": "running"
+        "state": "completed",
+        "event_count": 1,
+        "event_sequences": [
+          1
+        ],
+        "committed_offset": 105,
+        "outbox_status": {
+          "terminal_state": "completed",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:27:57.351503Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56261,
+        "survivor_pids": []
       },
       {
         "pass": 9,
         "ok": true,
-        "state": "running"
+        "state": "completed",
+        "event_count": 1,
+        "event_sequences": [
+          1
+        ],
+        "committed_offset": 105,
+        "outbox_status": {
+          "terminal_state": "completed",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:28:02.544321Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56273,
+        "survivor_pids": []
       },
       {
         "pass": 10,
         "ok": true,
-        "state": "running"
+        "state": "completed",
+        "event_count": 1,
+        "event_sequences": [
+          1
+        ],
+        "committed_offset": 105,
+        "outbox_status": {
+          "terminal_state": "completed",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:28:07.746292Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56312,
+        "survivor_pids": []
       },
       {
         "pass": 11,
         "ok": true,
-        "state": "running"
+        "state": "completed",
+        "event_count": 1,
+        "event_sequences": [
+          1
+        ],
+        "committed_offset": 105,
+        "outbox_status": {
+          "terminal_state": "completed",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:28:12.990423Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56328,
+        "survivor_pids": []
       },
       {
         "pass": 12,
         "ok": true,
-        "state": "running"
+        "state": "completed",
+        "event_count": 1,
+        "event_sequences": [
+          1
+        ],
+        "committed_offset": 104,
+        "outbox_status": {
+          "terminal_state": "completed",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:28:18.208402Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56342,
+        "survivor_pids": []
       },
       {
         "pass": 13,
         "ok": true,
-        "state": "running"
+        "state": "completed",
+        "event_count": 1,
+        "event_sequences": [
+          1
+        ],
+        "committed_offset": 105,
+        "outbox_status": {
+          "terminal_state": "completed",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:28:23.429901Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56360,
+        "survivor_pids": []
       },
       {
         "pass": 14,
         "ok": true,
-        "state": "running"
+        "state": "completed",
+        "event_count": 1,
+        "event_sequences": [
+          1
+        ],
+        "committed_offset": 105,
+        "outbox_status": {
+          "terminal_state": "completed",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:28:28.636315Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56380,
+        "survivor_pids": []
       },
       {
         "pass": 15,
         "ok": true,
-        "state": "running"
+        "state": "completed",
+        "event_count": 1,
+        "event_sequences": [
+          1
+        ],
+        "committed_offset": 105,
+        "outbox_status": {
+          "terminal_state": "completed",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:28:33.85857Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56393,
+        "survivor_pids": []
       },
       {
         "pass": 16,
         "ok": true,
-        "state": "running"
+        "state": "completed",
+        "event_count": 1,
+        "event_sequences": [
+          1
+        ],
+        "committed_offset": 105,
+        "outbox_status": {
+          "terminal_state": "completed",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:28:39.116841Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56418,
+        "survivor_pids": []
       },
       {
         "pass": 17,
         "ok": true,
-        "state": "running"
+        "state": "completed",
+        "event_count": 1,
+        "event_sequences": [
+          1
+        ],
+        "committed_offset": 105,
+        "outbox_status": {
+          "terminal_state": "completed",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:28:44.34548Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56429,
+        "survivor_pids": []
       },
       {
         "pass": 18,
         "ok": true,
-        "state": "running"
+        "state": "completed",
+        "event_count": 1,
+        "event_sequences": [
+          1
+        ],
+        "committed_offset": 105,
+        "outbox_status": {
+          "terminal_state": "completed",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:28:49.551167Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56444,
+        "survivor_pids": []
       },
       {
         "pass": 19,
         "ok": true,
-        "state": "running"
+        "state": "completed",
+        "event_count": 1,
+        "event_sequences": [
+          1
+        ],
+        "committed_offset": 105,
+        "outbox_status": {
+          "terminal_state": "completed",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:28:54.749445Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56455,
+        "survivor_pids": []
       }
     ]
   },
   "cancellation": {
     "total": 20,
     "passed": 20,
+    "complete": true,
     "results": [
       {
         "pass": 0,
         "ok": true,
-        "accepted": true,
-        "state": "cancelled"
+        "state": "cancelled",
+        "event_count": 0,
+        "event_sequences": [],
+        "committed_offset": 0,
+        "outbox_status": {
+          "terminal_state": "cancelled",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:28:57.049879Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56472,
+        "survivor_pids": [],
+        "accepted": true
       },
       {
         "pass": 1,
         "ok": true,
-        "accepted": true,
-        "state": "cancelled"
+        "state": "cancelled",
+        "event_count": 0,
+        "event_sequences": [],
+        "committed_offset": 0,
+        "outbox_status": {
+          "terminal_state": "cancelled",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:28:59.339714Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56487,
+        "survivor_pids": [],
+        "accepted": true
       },
       {
         "pass": 2,
         "ok": true,
-        "accepted": true,
-        "state": "cancelled"
+        "state": "cancelled",
+        "event_count": 0,
+        "event_sequences": [],
+        "committed_offset": 0,
+        "outbox_status": {
+          "terminal_state": "cancelled",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:29:01.604045Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56500,
+        "survivor_pids": [],
+        "accepted": true
       },
       {
         "pass": 3,
         "ok": true,
-        "accepted": true,
-        "state": "cancelled"
+        "state": "cancelled",
+        "event_count": 0,
+        "event_sequences": [],
+        "committed_offset": 0,
+        "outbox_status": {
+          "terminal_state": "cancelled",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:29:03.845422Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56513,
+        "survivor_pids": [],
+        "accepted": true
       },
       {
         "pass": 4,
         "ok": true,
-        "accepted": true,
-        "state": "cancelled"
+        "state": "cancelled",
+        "event_count": 0,
+        "event_sequences": [],
+        "committed_offset": 0,
+        "outbox_status": {
+          "terminal_state": "cancelled",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:29:06.143267Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56525,
+        "survivor_pids": [],
+        "accepted": true
       },
       {
         "pass": 5,
         "ok": true,
-        "accepted": true,
-        "state": "cancelled"
+        "state": "cancelled",
+        "event_count": 0,
+        "event_sequences": [],
+        "committed_offset": 0,
+        "outbox_status": {
+          "terminal_state": "cancelled",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:29:08.424589Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56536,
+        "survivor_pids": [],
+        "accepted": true
       },
       {
         "pass": 6,
         "ok": true,
-        "accepted": true,
-        "state": "cancelled"
+        "state": "cancelled",
+        "event_count": 0,
+        "event_sequences": [],
+        "committed_offset": 0,
+        "outbox_status": {
+          "terminal_state": "cancelled",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:29:10.746841Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56550,
+        "survivor_pids": [],
+        "accepted": true
       },
       {
         "pass": 7,
         "ok": true,
-        "accepted": true,
-        "state": "cancelled"
+        "state": "cancelled",
+        "event_count": 0,
+        "event_sequences": [],
+        "committed_offset": 0,
+        "outbox_status": {
+          "terminal_state": "cancelled",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:29:13.00323Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56561,
+        "survivor_pids": [],
+        "accepted": true
       },
       {
         "pass": 8,
         "ok": true,
-        "accepted": true,
-        "state": "cancelled"
+        "state": "cancelled",
+        "event_count": 0,
+        "event_sequences": [],
+        "committed_offset": 0,
+        "outbox_status": {
+          "terminal_state": "cancelled",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:29:15.233045Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56577,
+        "survivor_pids": [],
+        "accepted": true
       },
       {
         "pass": 9,
         "ok": true,
-        "accepted": true,
-        "state": "cancelled"
+        "state": "cancelled",
+        "event_count": 0,
+        "event_sequences": [],
+        "committed_offset": 0,
+        "outbox_status": {
+          "terminal_state": "cancelled",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:29:17.48636Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56615,
+        "survivor_pids": [],
+        "accepted": true
       },
       {
         "pass": 10,
         "ok": true,
-        "accepted": true,
-        "state": "cancelled"
+        "state": "cancelled",
+        "event_count": 0,
+        "event_sequences": [],
+        "committed_offset": 0,
+        "outbox_status": {
+          "terminal_state": "cancelled",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:29:19.747199Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56628,
+        "survivor_pids": [],
+        "accepted": true
       },
       {
         "pass": 11,
         "ok": true,
-        "accepted": true,
-        "state": "cancelled"
+        "state": "cancelled",
+        "event_count": 0,
+        "event_sequences": [],
+        "committed_offset": 0,
+        "outbox_status": {
+          "terminal_state": "cancelled",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:29:22.052518Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56639,
+        "survivor_pids": [],
+        "accepted": true
       },
       {
         "pass": 12,
         "ok": true,
-        "accepted": true,
-        "state": "cancelled"
+        "state": "cancelled",
+        "event_count": 0,
+        "event_sequences": [],
+        "committed_offset": 0,
+        "outbox_status": {
+          "terminal_state": "cancelled",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:29:24.333529Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56652,
+        "survivor_pids": [],
+        "accepted": true
       },
       {
         "pass": 13,
         "ok": true,
-        "accepted": true,
-        "state": "cancelled"
+        "state": "cancelled",
+        "event_count": 0,
+        "event_sequences": [],
+        "committed_offset": 0,
+        "outbox_status": {
+          "terminal_state": "cancelled",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:29:26.573657Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56664,
+        "survivor_pids": [],
+        "accepted": true
       },
       {
         "pass": 14,
         "ok": true,
-        "accepted": true,
-        "state": "cancelled"
+        "state": "cancelled",
+        "event_count": 0,
+        "event_sequences": [],
+        "committed_offset": 0,
+        "outbox_status": {
+          "terminal_state": "cancelled",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:29:28.818122Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56713,
+        "survivor_pids": [],
+        "accepted": true
       },
       {
         "pass": 15,
         "ok": true,
-        "accepted": true,
-        "state": "cancelled"
+        "state": "cancelled",
+        "event_count": 0,
+        "event_sequences": [],
+        "committed_offset": 0,
+        "outbox_status": {
+          "terminal_state": "cancelled",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:29:31.124498Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56726,
+        "survivor_pids": [],
+        "accepted": true
       },
       {
         "pass": 16,
         "ok": true,
-        "accepted": true,
-        "state": "cancelled"
+        "state": "cancelled",
+        "event_count": 0,
+        "event_sequences": [],
+        "committed_offset": 0,
+        "outbox_status": {
+          "terminal_state": "cancelled",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:29:33.416074Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56737,
+        "survivor_pids": [],
+        "accepted": true
       },
       {
         "pass": 17,
         "ok": true,
-        "accepted": true,
-        "state": "cancelled"
+        "state": "cancelled",
+        "event_count": 0,
+        "event_sequences": [],
+        "committed_offset": 0,
+        "outbox_status": {
+          "terminal_state": "cancelled",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:29:35.693758Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56751,
+        "survivor_pids": [],
+        "accepted": true
       },
       {
         "pass": 18,
         "ok": true,
-        "accepted": true,
-        "state": "cancelled"
+        "state": "cancelled",
+        "event_count": 0,
+        "event_sequences": [],
+        "committed_offset": 0,
+        "outbox_status": {
+          "terminal_state": "cancelled",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:29:37.962976Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56764,
+        "survivor_pids": [],
+        "accepted": true
       },
       {
         "pass": 19,
         "ok": true,
-        "accepted": true,
-        "state": "cancelled"
+        "state": "cancelled",
+        "event_count": 0,
+        "event_sequences": [],
+        "committed_offset": 0,
+        "outbox_status": {
+          "terminal_state": "cancelled",
+          "acknowledged": 1,
+          "acknowledged_at": "2026-07-20T17:29:40.225489Z",
+          "diagnostic": ""
+        },
+        "supervisor_pgid": 56777,
+        "survivor_pids": [],
+        "accepted": true
+      }
+    ]
+  },
+  "candidate": {
+    "schema": "ananke-source-manifest-v1",
+    "aggregate_sha256": "93aef9afc7771cb79c35d3c7df0fa6bca6f50e8071619d0fa36473198b82dd7f",
+    "file_count": 68,
+    "files": [
+      {
+        "path": "cmd/ananke-fakeworker/main.go",
+        "sha256": "f6c0504f9e51af84ce4a994bc893748806be9f9ba775bd92a84294048fe3a489"
+      },
+      {
+        "path": "cmd/ananke-supervisor/main.go",
+        "sha256": "71bd5bc7b4fb4287ab7daf23c3934ea34e3153f93950755657671f00beaa7cf0"
+      },
+      {
+        "path": "cmd/ananke/main.go",
+        "sha256": "62f8ce9bb5db9c3a90c6c020cb9c0bf1dd74f7abc5abeb5d7d05a26a25be4124"
+      },
+      {
+        "path": "go.mod",
+        "sha256": "d3375e1dc47f06fb80cf65a2999580c5906f4e2ba1fdeb4b80c1eb7fd2d191e4"
+      },
+      {
+        "path": "go.sum",
+        "sha256": "ef76ed4f7178bd580b146a6b007974007c6d32787fd39cec53f1edcadab2f6fe"
+      },
+      {
+        "path": "internal/lifecycle/backend.go",
+        "sha256": "d87ec1af6ec1bdcfa5afa2aa71bcddf01b910e2f8ac6787f7c2a8bd8d017061d"
+      },
+      {
+        "path": "internal/lifecycle/backend_test.go",
+        "sha256": "904db9735db265b8c293a36cf185ada8b71252701fe203bb7dd3d0a11af671d7"
+      },
+      {
+        "path": "internal/lifecycle/cancel_async_test.go",
+        "sha256": "712f8903c754bc094827743b0e6eec7c39223a46ff4ae7ddbfdd4fda5bc05e03"
+      },
+      {
+        "path": "internal/lifecycle/cancel_durable_test.go",
+        "sha256": "eb62d7f7b14d4e1a4a8b2320d1e8f538194c071c70ef89f95c9b8eaf39a1afcb"
+      },
+      {
+        "path": "internal/lifecycle/engine.go",
+        "sha256": "99f178c578e17bd906abebeaaa55685e636a2316e696c22b283ddbe0047f5e7a"
+      },
+      {
+        "path": "internal/lifecycle/engine_shutdown_test.go",
+        "sha256": "f3d338ea58f401267e5733dcb0d4431f571cc42b55e2825c3b9df24915e42f07"
+      },
+      {
+        "path": "internal/lifecycle/engine_test.go",
+        "sha256": "a7e81926ed1f6072eb2a32aa3299eeb37606fb14f8dec65e0104fb20c6c3b080"
+      },
+      {
+        "path": "internal/lifecycle/helper_dispatch_test.go",
+        "sha256": "e214d53bc301611fa40d39cc41f15f3bfd41389b53acdd008477953093ef5e6c"
+      },
+      {
+        "path": "internal/lifecycle/helper_test.go",
+        "sha256": "f92c5812d799c69c2245d64420c503aabc366363a28fd7deaf04ccdad16a5e89"
+      },
+      {
+        "path": "internal/lifecycle/identity.go",
+        "sha256": "2b27b9191a1cf5d2410a4e7d1792fd5067f389181e9418f7c39d441433c3f48f"
+      },
+      {
+        "path": "internal/lifecycle/identity_test.go",
+        "sha256": "f4a86d1bfbdac2de945289995a902529d59644b6780b083588a745905a7158bc"
+      },
+      {
+        "path": "internal/lifecycle/launch_fail_closed_test.go",
+        "sha256": "18544d93328a05df0a5d25604ee9447656f0b866002eb464b5907170db09d9b7"
+      },
+      {
+        "path": "internal/lifecycle/mutation_hooks.go",
+        "sha256": "374798ae41bece3f07b01b47f789af6792281c38b7d5895701b0a766e7624be1"
+      },
+      {
+        "path": "internal/lifecycle/mutation_reset_offset.go",
+        "sha256": "5e15dd8025fed549353bfbe699cc0be90df99af1e1ecd506f416b75e34709dd1"
+      },
+      {
+        "path": "internal/lifecycle/mutation_terminal_while_alive.go",
+        "sha256": "8ff3a1c527378ea8d40dcb39fb0477e612fba9e5136d1a84a9c6b78c0872f58b"
+      },
+      {
+        "path": "internal/lifecycle/mutation_test.go",
+        "sha256": "499386302241f22d8209c47abeea4f863995d761f2581ffb76a5e8dfb0a6459a"
+      },
+      {
+        "path": "internal/lifecycle/outbox_reconcile_test.go",
+        "sha256": "1ef6d47aa7b431a21310a83defdc710ad5ad861eb3f2ef075c64cea10b3f3a26"
+      },
+      {
+        "path": "internal/lifecycle/repair_h_challenge_test.go",
+        "sha256": "b9d95eddd05b3164587a0fed7a694ca78d4719fcfa27c567bbd5d7ef22a32c5b"
+      },
+      {
+        "path": "internal/lifecycle/terminal_transcript_test.go",
+        "sha256": "9deab6e42e356656138469163a93ebf46a53c0591bf6700bbf3873a8e13d033b"
+      },
+      {
+        "path": "internal/store/active_test.go",
+        "sha256": "b755e1bd5681a69376c62d1d0ffbe9d53bbc17a466fe28d2f90cc0424d0ff11d"
+      },
+      {
+        "path": "internal/store/cancel_intent_test.go",
+        "sha256": "134e273fa755ff9d2657b89d7f37ee64e738b66484c9276634bd5ee3b7a06e40"
+      },
+      {
+        "path": "internal/store/cancellation.go",
+        "sha256": "9f68aaaf48c09aae7f92b020f2f7fdec6b3f996590fab550bcb55bcaf4814daa"
+      },
+      {
+        "path": "internal/store/events.go",
+        "sha256": "c165223d586e94586e5582129379597a661d7a98998cd636a22ed18c5078f096"
+      },
+      {
+        "path": "internal/store/events_test.go",
+        "sha256": "e021496c160b6ec9dce65de3e22b3ea7fdc6762e0f7965d62f45119de51815f3"
+      },
+      {
+        "path": "internal/store/migration_test.go",
+        "sha256": "34b10e0688a69b187b0fa6cafaec23191e2b15c250990c592fc8552185bed12e"
+      },
+      {
+        "path": "internal/store/migration_v5_test.go",
+        "sha256": "3b7f8812cf2bd82f31d0bec73d656bb21dfc4025e7e71e8534c4efdbd10ca65e"
+      },
+      {
+        "path": "internal/store/mutation_hooks.go",
+        "sha256": "4848e7b5cdeb43a2b6d996437d16e1748aeedeed2d07144840759eae38c0bee7"
+      },
+      {
+        "path": "internal/store/mutation_no_outbox.go",
+        "sha256": "3de6336cacf4d3a9fbe14820ca8182f153bb1f4ca44b73a0f793e63aca60b814"
+      },
+      {
+        "path": "internal/store/mutation_terminal_while_alive.go",
+        "sha256": "0980d6b4e98468bbb2f5db6a645241060cd4c892ef4f629b250fb7d294c3deb5"
+      },
+      {
+        "path": "internal/store/no_process_test.go",
+        "sha256": "88696ec45802adb46cbe05a41f348728ae04ac3aa1f420c66d6580ab2900644b"
+      },
+      {
+        "path": "internal/store/outbox.go",
+        "sha256": "84f8f5008023511b08d5cd6f4a1570692920c7c4c19c81895a9b4d6bef279350"
+      },
+      {
+        "path": "internal/store/queries.go",
+        "sha256": "d6a689753d381347eaf8d48f725881dd829b61764326d6317a4e6ff31c006626"
+      },
+      {
+        "path": "internal/store/reconnect_test.go",
+        "sha256": "0b37525870251f1832a388358eee230b8ad82059c2f42a0cfbe58274b06db48e"
+      },
+      {
+        "path": "internal/store/runs.go",
+        "sha256": "7598586aaaf4f086287900109a58869743ec7cbd141218d354d4a83063115154"
+      },
+      {
+        "path": "internal/store/state.go",
+        "sha256": "a639049f035eb7827a211e262c48dff159843df2124f47bafce02c52e0ccf43b"
+      },
+      {
+        "path": "internal/store/state_test.go",
+        "sha256": "2979d04e11a5985a04cdd26c21c948fb350d97efb2ee0523c8ed1a85990513ad"
+      },
+      {
+        "path": "internal/store/store.go",
+        "sha256": "2bb26a395f97ec186532ae78d1053dc6595e37f815c3ac2ecc5576b1ddc36a94"
+      },
+      {
+        "path": "internal/store/store_test.go",
+        "sha256": "966e47e6012a924164ecd09c691db1b87e45cd92d1e6ff1779246f28453ab1bf"
+      },
+      {
+        "path": "internal/store/transcript_handoff_test.go",
+        "sha256": "9c9e19ae164526d689a5b6ec7a1365f3b39225d28b63aceae1901cde3ba72511"
+      },
+      {
+        "path": "internal/store/transcript_identity_test.go",
+        "sha256": "95a2790fd0b9032dc67163cfb89789a9d91b5c034f82bce0aa910d4480d1d1ae"
+      },
+      {
+        "path": "internal/store/transitions.go",
+        "sha256": "95c2821431ae1af4a3129748508815651be9c5a99aa3be422c14be33121023cc"
+      },
+      {
+        "path": "internal/store/transitions_test.go",
+        "sha256": "6fc634e1a13b1be32901ab6c973297820188721706c5515628f4d901517c57a4"
+      },
+      {
+        "path": "internal/supervisor/authority_test.go",
+        "sha256": "a9a4e4f09ae1c02868ad950af249aab485039885df0ab6ba5666365ad4f71d5b"
+      },
+      {
+        "path": "internal/supervisor/cancel_intent_test.go",
+        "sha256": "0e87b29f2c54c97d977ed135bf53258a5f468212fc7f0ad109049c290bf8cde7"
+      },
+      {
+        "path": "internal/supervisor/fail_closed_test.go",
+        "sha256": "ea95d7fe88b855e0cd9ed0a9e446031fb84d56ad61f3966805cf9d0e3ba5fccf"
+      },
+      {
+        "path": "internal/supervisor/helper_dispatch_test.go",
+        "sha256": "e80079c4bd4dc7e25eabdb96daa855bdcf0ca6e87800b56de4fd813d32bd1575"
+      },
+      {
+        "path": "internal/supervisor/helper_test.go",
+        "sha256": "8f5ab236d54564512d081209f37c131e9e3a0f26cc646d72c495572154e9e704"
+      },
+      {
+        "path": "internal/supervisor/mutation_cancel_parent_only.go",
+        "sha256": "ca29186f9f47275b4e8bc1f72591943ef8751fb4ba4a2ea0c4f0ce87c0512b43"
+      },
+      {
+        "path": "internal/supervisor/mutation_hooks.go",
+        "sha256": "797ad03380294d0d754af5b8008456488e2746571de6eb24af6274679a772ee2"
+      },
+      {
+        "path": "internal/supervisor/mutation_reap_before_cleanup.go",
+        "sha256": "120c3b9d6ff7f8019e96a906b1d20f548803a3a1a696a62754b621476ea4d4d7"
+      },
+      {
+        "path": "internal/supervisor/mutation_signal_after_reap.go",
+        "sha256": "f9c2f834951bd8866141a05400f94c47cba0ef131b67ced8756ca8c52a1f5c0c"
+      },
+      {
+        "path": "internal/supervisor/mutation_test.go",
+        "sha256": "2a319eb6fd4c78d9d3361dceee8864a607d10112b3c08d4bf423aceef0e03408"
+      },
+      {
+        "path": "internal/supervisor/supervisor.go",
+        "sha256": "f25160d283025b6067f1b8d9c796df1b5a6ad51921b0fe03fa2993bd32e4912b"
+      },
+      {
+        "path": "internal/supervisor/supervisor_test.go",
+        "sha256": "34810c97324dc994db779ef1d438f55c8b8af35241a5eec416c1b6ff635bb899"
+      },
+      {
+        "path": "scripts/blackbox_lifecycle.py",
+        "sha256": "700cb6069b99057df792a1016bd6274edc76b89586ac21e6cacc8fdb6d9d8b38"
+      },
+      {
+        "path": "scripts/harness_support.py",
+        "sha256": "d50a54dd9ea1dc6e58f8f167f14aee5ab5a1c7d9bbeaa173f9b6a69e25ed6bc2"
+      },
+      {
+        "path": "scripts/mutation_proof.py",
+        "sha256": "fbc421d2246e8a985f1d58b9d8a47c5027a8bd29a320888e4fe09b77f744ea37"
+      },
+      {
+        "path": "scripts/stress_lifecycle.py",
+        "sha256": "3e0aee0ed19d8c60f978bdcb86bb3800081e95519ddc57ab40ac5c4716fe7dc1"
+      },
+      {
+        "path": "scripts/test_candidate_manifest.py",
+        "sha256": "b9ab095a99b321dc926028ea42f32d2d57cc2768ee4b899e4b60d536710e7468"
+      },
+      {
+        "path": "scripts/test_harness_support.py",
+        "sha256": "073e64f5c0109a2868b4493111e5bc12e973f7bc1c7f9edd8af1fefb28209015"
+      },
+      {
+        "path": "scripts/test_mutation_proof.py",
+        "sha256": "ba385b5a7c0ceee31af44750403e67bd515e5d951868a89c760b9a0c92a329e4"
+      },
+      {
+        "path": "scripts/test_stress_lifecycle.py",
+        "sha256": "e965274984fd7bbfc604f1959f53b0ae4bfa104871b1fb84ef5f2befbc976c31"
+      },
+      {
+        "path": "scripts/verify.py",
+        "sha256": "0750c59412ac2c6be6885bc0ac33dc52cb399b66c73e93c9fe1037e996802b4f"
       }
     ]
   }

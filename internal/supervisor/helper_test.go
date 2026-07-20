@@ -1,7 +1,9 @@
 package supervisor
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -23,6 +25,12 @@ const (
 
 // TestMain dispatches helper subprocess modes for the supervisor test binary.
 func TestMain(m *testing.M) {
+	if lifecycle.WorkerTrampolineRequested() {
+		if lifecycle.RunWorkerTrampoline() != nil {
+			os.Exit(125)
+		}
+		os.Exit(0)
+	}
 	if mode := os.Getenv(supHelperEnv); mode != "" {
 		runSupHelper(mode)
 		os.Exit(0)
@@ -76,6 +84,27 @@ func forkSupervisor(t *testing.T, storePath, runID string, env supEnv) (*exec.Cm
 	if env.GraceMS == 0 {
 		env.GraceMS = 500
 	}
+	st, err := store.Open(storePath)
+	if err != nil {
+		t.Fatalf("open supervisor helper store: %v", err)
+	}
+	run, err := st.GetRun(context.Background(), runID)
+	if err != nil {
+		_ = st.Close()
+		t.Fatalf("load supervisor helper run: %v", err)
+	}
+	if env.TranscriptPath == "" {
+		env.TranscriptPath = run.TranscriptPath
+	}
+	if _, err := st.DB().ExecContext(context.Background(), `UPDATE runs
+		SET identity_path = ?, socket_path = ?, transcript_path = ?, token = ? WHERE id = ?`,
+		env.IdentityPath, env.SocketPath, env.TranscriptPath, env.Token, runID); err != nil {
+		_ = st.Close()
+		t.Fatalf("align supervisor helper authority: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close supervisor helper store: %v", err)
+	}
 	resultPath := filepath.Join(dir, "supervisor_result.json")
 
 	args := []string{
@@ -116,8 +145,6 @@ func forkSupervisor(t *testing.T, storePath, runID string, env supEnv) (*exec.Cm
 	}
 	cmd := exec.Command(os.Args[0])
 	cmd.Env = append(os.Environ(), args...)
-	// Setpgid: false so the supervisor helper can call BecomeGroupLeader.
-	cmd.SysProcAttr = nil // inherit process group; supervisor will setpgid(0,0)
 	// Capture stderr for debugging to a stable path.
 	stderrPath := filepath.Join(os.TempDir(), "ananke-sup-stderr-"+runID+".log")
 	f, ferr := os.Create(stderrPath)
@@ -130,10 +157,16 @@ func forkSupervisor(t *testing.T, storePath, runID string, env supEnv) (*exec.Cm
 		t.Fatalf("fork supervisor: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = os.Remove(env.SocketPath)
 		if cmd.Process != nil {
-			_ = cmd.Process.Signal(unix.SIGKILL)
-			_, _ = cmd.Process.Wait()
+			if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, unix.ESRCH) {
+				t.Errorf("kill supervisor PID %d: %v", cmd.Process.Pid, err)
+			}
+			if _, err := cmd.Process.Wait(); err != nil && !errors.Is(err, unix.ECHILD) {
+				t.Errorf("wait supervisor PID %d: %v", cmd.Process.Pid, err)
+			}
+		}
+		if err := os.Remove(env.SocketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("remove supervisor socket %q: %v", env.SocketPath, err)
 		}
 	})
 	return cmd, env.SocketPath, resultPath, env.IdentityPath

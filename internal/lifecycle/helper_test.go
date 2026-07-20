@@ -20,6 +20,12 @@ const resultEnv = "ANANKE_RESULT"
 
 // TestMain dispatches helper subprocess modes; otherwise runs the suite.
 func TestMain(m *testing.M) {
+	if WorkerTrampolineRequested() {
+		if RunWorkerTrampoline() != nil {
+			os.Exit(125)
+		}
+		os.Exit(0)
+	}
 	if mode := os.Getenv(helperEnv); mode != "" {
 		runHelper(mode)
 		os.Exit(0)
@@ -27,10 +33,8 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// forkHelper re-executes the test binary in the given helper mode, inheriting
-// the test's process group (Setpgid=false) so that helpers which call
-// BecomeGroupLeader exercise the real setpgid path. Returns the cmd and the
-// result-file path the helper will write.
+// forkHelper re-executes the test binary in the requested helper mode and
+// returns the command plus the result-file path it will write.
 func forkHelper(t *testing.T, mode string, extra map[string]string) (*exec.Cmd, string) {
 	t.Helper()
 	dir := t.TempDir()

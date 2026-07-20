@@ -29,6 +29,8 @@ func TestIsTerminal(t *testing.T) {
 func TestAllowedTransitions(t *testing.T) {
 	allowed := []struct{ from, to State }{
 		{StateCreated, StateRunning},
+		{StateCreated, StateCleanupRequired},
+		{StateCreated, StateRecoveryUnknown},
 
 		{StateRunning, StateCancelling},
 		{StateRunning, StateCleanupRequired},
@@ -43,10 +45,8 @@ func TestAllowedTransitions(t *testing.T) {
 		{StateCancelling, StateRunning},
 
 		{StateCleanupRequired, StateFailed},
-		{StateCleanupRequired, StateCompleted},
 		{StateCleanupRequired, StateCancelled},
 		{StateCleanupRequired, StateRecoveryUnknown},
-		{StateCleanupRequired, StateRunning},
 
 		{StateRecoveryUnknown, StateRunning},
 		{StateRecoveryUnknown, StateCleanupRequired},
@@ -64,12 +64,11 @@ func TestAllowedTransitions(t *testing.T) {
 
 func TestRejectedTransitions(t *testing.T) {
 	rejected := []struct{ from, to State }{
-		// created may only advance to running.
+		// created cannot publish a terminal state or enter cancellation directly.
 		{StateCreated, StateCompleted},
 		{StateCreated, StateFailed},
 		{StateCreated, StateCancelled},
 		{StateCreated, StateCancelling},
-		{StateCreated, StateCleanupRequired},
 		{StateCreated, StateCreated},
 
 		// terminal states have no outgoing transitions.
@@ -83,6 +82,9 @@ func TestRejectedTransitions(t *testing.T) {
 		{StateCancelled, StateCompleted},
 		{StateCancelled, StateCancelled},
 
+		// cleanup_required is a one-way cleanup obligation.
+		{StateCleanupRequired, StateCompleted},
+		{StateCleanupRequired, StateRunning},
 		// no self-loops / no rewinding into created.
 		{StateRunning, StateRunning},
 		{StateRunning, StateCreated},

@@ -1,0 +1,278 @@
+# Ananke Experiment Ledger
+
+This ledger records executable reliability experiments and independent review gates for Ananke. Results must come from checked-in reports, test output, or review artifacts; blank cells mean unverified.
+
+## Summary
+
+| Date | Experiment / run | Hypothesis | Branch / commit | Variable | Verification result | Stress result | Mutation result | Review result | Decision | Evidence |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-07-18 | `slice-001-hard-review-b8e21ea` | Passing functional gates is insufficient unless source-level ADR invariants survive an independent hard review. | `main` @ `b8e21ea` | Independent hard review of frozen Slice-001 candidate | Prior gates were green, but review found source-contract violations | Prior stress did not cover live transcript truncation | Review found M1/M4 gates were proxy/no-op detections | 2 BLOCKER, 7 MAJOR, 6 MINOR | `iterate` — repair blockers/majors, then rerun all gates and independent re-review | [`artifacts/omp/slice-001-review/full-review.md`](../artifacts/omp/slice-001-review/full-review.md) |
+| 2026-07-18 | `slice-001-baseline-8bc3e21` | The initial Darwin supervisor proof can pass build, race, no-CGO, mutation, repeated lifecycle, and black-box gates. | `main` @ `8bc3e21` | Initial Vertical Slice 1 implementation | 6/6 verification gates PASS: gofmt, vet, test, race, no-CGO test, no-CGO build | Crash/restart 20/20; cancellation 20/20 | 6/6 reported detected | Not yet reviewed at this commit | `iterate` — later hard review showed the passing suite gave false confidence | [`reports/verification.json`](../reports/verification.json), [`reports/stress-lifecycle.json`](../reports/stress-lifecycle.json), [`reports/mutation-proof.json`](../reports/mutation-proof.json), [`reports/blackbox-lifecycle.json`](../reports/blackbox-lifecycle.json) |
+
+## Decisions Log
+
+### 2026-07-18 — Slice-001 baseline not accepted despite all executable gates passing
+
+The checked-in reports at commit `8bc3e21` verify:
+
+- verification gates: 6/6 PASS;
+- crash/restart stress: 20/20;
+- cancellation stress: 20/20;
+- mutation proof: 6/6 reported detected;
+- black-box scenarios: success and cancellation both PASS with zero name-matched survivors.
+
+The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 MINOR findings. Therefore these earlier results are retained as reproducible evidence but are **not** evidence that ADR-0002/0003 were satisfied. The candidate remains `iterate` until blocker/major repair, complete gate rerun, and independent re-review.
+
+## Current Repair Campaign
+
+| Batch | Scope | Status | Exit criteria |
+|---|---|---|---|
+| P0 | B1 live transcript truncation; B2 `cleanup_required` progression; M6 real M4 mutation | focused PASS | Independent focused runs passed: B1 3×, B2 3×, M6 baseline 2× plus tagged behavioral rejection; full gate remains pending |
+| Lifecycle identity | M1 worker deferred reap; M7 supervisor PID pinning | focused PASS | M1 uses Darwin `kqueue`/`EVFILT_PROC`/`NOTE_EXIT` with worker `Wait4` isolated to `ReapWorker`; M7 locally observes supervisor exit without reaping, pins unresolved crashes, reaps only terminal/finalized children, and leaves live supervisors untouched on `Engine.Close`; independent focused/race/mutation/process checks passed |
+| Recovery | M5 identity verification; M4 recovery exit; M3 outbox reconciliation | focused PASS | M5 authenticates durable identity/socket adoption; M4 safely exits `recovery_unknown`; M3 replaces PID-only outbox handling with one identity-authenticated startup/tick reconciler, durable abandonment diagnostics, exact local-child pinning, and idempotent resolution |
+| Cancellation | M2 immediate asynchronous acceptance | focused PASS | Nonterminal API calls return accepted before supervisor I/O; exact-token background cancel is bounded and deduplicated, failed/non-OK requests clear their marker for safe retry, and missing/terminal runs reject without scheduling |
+| Repair C | Durable cancellation intent; joined Engine shutdown | focused PASS | Schema v5 persists idempotent cancel intent before acceptance; created/recovery states retry only with exact local ownership or authenticated recovery; `Engine.Close` cancels and joins owned work before closing tails/store; independent package/race/format/leak gates passed |
+| Evidence harness | Candidate binding; terminal stress/black-box proof | focused PASS | `ananke-source-manifest-v1` binds all reports to 64 source files; one-iteration crash/restart and cancellation stress plus both black-box scenarios prove terminal state, event/offset durability, acknowledged outbox, exact PGID quiescence, and zero survivors |
+| Final gate | verify + mutation + stress + black-box + independent re-review | iterate | Candidate-bound 20× stress, 6/6 mutations, and black-box passed, but canonical no-CGO exposed test cleanup races and mutation cleanup leaked a resistant helper; repair and full rerun required |
+
+### 2026-07-18 — P0 focused repair evidence
+
+- B1: `go test ./internal/lifecycle/ -run '^TestEngineTranscript(Corruption|TruncationAfterTailing)$' -count=3` → PASS (6 test executions).
+- B2: focused store, supervisor, and lifecycle commands with `-count=3` → PASS; includes live corruption cleanup, nonblocking one-shot cancel, safe dead-supervisor probes, and terminal/outbox atomic rollback.
+- M6: baseline dedicated mutation test `-count=2` → PASS; tagged mutation exited 1 with `terminal state "failed" visible while worker/supervisor alive` and both PID liveness values true.
+- These are focused repair results, not final Slice-001 acceptance. Full verify/race/mutation/stress/black-box gates and independent re-review remain required.
+
+### 2026-07-19 — M1 deferred worker reap focused evidence
+
+- Exact-resume OMP session `019f7578-a8ff-7000-a925-b6c43474043c` completed with Darwin `kqueue` + `EVFILT_PROC` + `NOTE_EXIT` observation; a production-source scan found the sole `Wait4` at `internal/lifecycle/backend.go:184` inside `ReapWorker`.
+- `go test ./internal/lifecycle/ -run '^Test(BecomeGroupLeader|LaunchWorker|WorkerExited|ReapWorker|ProcessAlive)' -count=3 -timeout 120s` → PASS (`ok`, 2.755s).
+- `go test ./internal/supervisor/ -run '^TestMutationReapBeforeCleanupOrder$' -count=3 -timeout 120s` → PASS (`ok`, 17.937s).
+- Tagged `mutation_reap_before_cleanup` run exited 1 with the behavioral rejection `worker PID ... was reaped before group cleanup`; it was not a compile failure or timeout.
+- Focused race runs for lifecycle exit/reap tests and the M1 supervisor baseline both passed (`ok`, 4.760s and 8.456s).
+- Two stale orphaned `supervisor.test` processes from 2026-07-18 were identified and removed; the final process scan reported no matching Ananke worker, supervisor, lifecycle-test, or supervisor-test processes.
+- This is focused M1 acceptance only. M7 and all final Slice-001 executable/re-review gates remain pending.
+
+### 2026-07-19 — M7 daemon supervisor PID pinning focused evidence
+
+- The M7 exact-resume implementation run timed out at 600 seconds after completing code and initial focused/race checks; worktree and exact JSONL inspection showed only final verification/prose remained, so acceptance was performed independently without another resume.
+- Production-source scan found no eager/background supervisor wait; the sole supervisor reap is `h.cmd.Wait()` inside the `runHandle.reap` once-guard after exact exit observation plus terminal and acknowledged/abandoned outbox checks.
+- `go test ./internal/lifecycle/ -run '^TestEngine(SupervisorSIGKILL|TerminalSupervisorReaped|CloseLeavesLiveSupervisor|DaemonRestartRecover)$' -count=3 -timeout 240s` → PASS (`ok`, 47.753s).
+- The same M7 focused set under `go test -race` → PASS (`ok`, 17.951s).
+- Post-refactor M1 backend tests `-count=3` → PASS (`ok`, 1.812s); M1 supervisor mutation baseline `-count=3` → PASS (`ok`, 17.574s); focused M1 race → PASS (`ok`, 2.740s).
+- Tagged `mutation_reap_before_cleanup` still exited 1 with `worker PID ... was reaped before group cleanup`, confirming behavioral rejection after the shared watcher refactor.
+- `gofmt -d` and `git diff --check` passed; the final process scan found no matching Ananke worker, supervisor, lifecycle-test, or supervisor-test processes.
+- This is focused Lifecycle identity acceptance only. Recovery M5/M4/M3, M2, final executable gates, and independent re-review remain pending.
+
+### 2026-07-19 — M5 identity-authenticated restart recovery focused evidence
+
+- Fresh OMP session `019f7a6e-1fea-7000-a467-e29b0d5e3766` timed out after implementing M5 and running initial green checks; exact JSONL showed only final verification/reporting remained, so acceptance was completed independently without another resume.
+- Recovery now reads the durable identity before trust, validates run ID plus supervisor/worker PID, PGID, socket, token, and transcript fields, then authenticates both `status` and `adopt`; rejected identity/authentication paths durably enter `recovery_unknown` without group enumeration, signals, cleanup requests, tailing, or false local child ownership.
+- `go test ./internal/lifecycle -run '^(TestEngineRecover(ValidAuthenticatedSupervisor|RejectsIdentity|RejectsSupervisorAuthentication)|TestIdentityFileRoundTrip)$' -count=3 -timeout 180s` → PASS (`ok`, 0.361s).
+- `go test ./internal/lifecycle -run '^TestEngineDaemonRestartRecover$' -count=3 -timeout 180s` → PASS (`ok`, 23.009s).
+- `TestSupervisorAdoptCommand` and store transition focused runs with `-count=3` → PASS (`ok`, 0.386s and 0.376s).
+- M5/restart lifecycle `-race` → PASS (`ok`, 10.460s); supervisor adopt `-race` → PASS (`ok`, 1.615s).
+- Accepted M7 focused set rerun after shared engine/socket changes → PASS (`ok`, 16.300s).
+- `gofmt -d`, `git diff --check`, and final process-leak scan passed.
+- This is focused M5 acceptance only. M4 recovery progression, M3 outbox reconciliation, M2, final executable gates, and independent re-review remain pending.
+
+### 2026-07-19 — M4 `recovery_unknown` progression focused evidence
+
+- The M4 exact-resume implementation timed out after its focused GREEN runs. Independent review found that a correctly pinned local supervisor zombie remained visible in its PGID and could prevent real quiescence forever; an exact-UUID resume added the real-process regression and fixed production to ignore only that exact locally tracked, NOTE_EXIT-confirmed supervisor PID. Unowned/stored supervisor PIDs remain group occupancy.
+- Authenticated `status`/`adopt` responses must agree on state and identity before `recovery_unknown` transitions to `running`, `cancelling`, or `cleanup_required`. Ambiguous/live-unauthenticated cases remain nonterminal with zero signals.
+- Confirmed supervisor loss commits real terminal `failed` plus a pending outbox only after the validated worker PID is absent and group enumeration has no member other than an exact pinned local supervisor zombie. A fresh-engine regression proves the pending obligation survives without the in-memory marker and the terminal transition remains exactly once.
+- Independent `go test ./internal/lifecycle -run '^TestEngineRecoveryUnknown' -count=3 -timeout 240s` → PASS (`ok`, 8.412s); focused `-race` → PASS (`ok`, 6.106s).
+- Independent terminal/outbox store tests with `-count=3` → PASS (`ok`, 0.674s).
+- Accepted M5 recovery and M7 crash/pinning focused regressions after the M4 production changes → PASS (`ok`, 9.063s and 11.268s).
+- One independent `-count=3` run exposed a test setup race where `running` became visible before durable supervisor IDs; the regression now deterministically waits for positive durable IDs. A temporary `hermes-verify-*` script reran that exact test 3× (`ok`, 8.490s), checked formatting, and was removed. This was ad-hoc verification, not a full-suite claim.
+- A separate temporary `hermes-verify-*` script exercised the local-zombie and fresh-engine durability regressions (`ok`, 4.614s), checked M4 file formatting/whitespace, and was removed; also ad-hoc only.
+- Final `gofmt -d`, `git diff --check`, and process-leak scan passed.
+- This is focused M4 acceptance only. M3 outbox reconciliation, M2, final executable gates, and independent re-review remain pending.
+
+### 2026-07-19 — M3 identity-safe outbox reconciliation focused evidence
+
+- Fresh OMP session `019f7a98-bca2-7000-940d-686c42a682f6` timed out after implementing the shared reconciler, v3 schema migration, authenticated `finalize` command, and focused GREEN tests. An exact resume fixed two M4 integration expectations before also timing out; final acceptance was completed independently.
+- Startup `Recover` and periodic `tick` now use one idempotent pending-outbox reconciler. It requires matching durable run/identity/outbox authority, never trusts a live PID alone, acknowledges only an authenticated terminal `finalize` response, and abandons only after validated supervisor loss plus worker/group quiescence.
+- The temporary M4 `recoveryOutbox` map/reason guard was removed. Migration v3 adds a durable `diagnostic` column; abandonment now rejects an empty reason and persists the nonempty diagnostic. Exact local NOTE_EXIT-confirmed zombies may be ignored as group occupancy and remain pinned until durable resolution, after which they are reaped once; unowned numeric PIDs remain occupancy.
+- Independent `go test ./internal/lifecycle -run '^TestReconcilePendingOutbox' -count=3 -timeout 240s` → PASS (`ok`, 2.752s); focused `-race` → PASS (`ok`, 6.064s).
+- Independent M3 store/supervisor tests with `-count=3` → PASS (`store` 1.041s, `supervisor` 0.575s).
+- Updated full M4 recovery set → PASS (`ok`, 4.745s); M4 `-race` → PASS (`ok`, 8.603s).
+- Accepted M5 and M7 focused regressions after the shared recovery/finalization changes → PASS (`ok`, 10.660s and 12.683s). Migration-v1/outbox and adopt/finalize protocol regressions → PASS (`store` 1.178s, `supervisor` 1.557s).
+- A temporary `hermes-verify-*` script exercised the two corrected exact-child integration paths (`ok`, 4.508s), checked formatting/whitespace, and was removed. This was ad-hoc verification, not a full-suite claim.
+- Final scoped `gofmt -d`, `git diff --check`, and process-leak scan passed; all temporary scripts created by this session were removed. Unrelated GW verification files in the shared OS temp directory were left untouched.
+- This is focused M3 acceptance only. M2, final executable gates, and independent re-review remain pending.
+
+### 2026-07-19 — M2 immediate asynchronous cancellation focused evidence
+
+- The first fresh M2 OMP run timed out after planning without M2 edits. Exact resume `019f7aad-57ff-7000-b56a-fa5d81e30067` implemented and verified the minimal asynchronous handler. A second exact resume exposed and fixed one cleanup-retry safety issue before timing out; final test coverage and acceptance were completed independently.
+- RED evidence against the synchronous handler: delayed-response and unreachable-socket cases failed (`2.356s`), proving the API waited for supervisor I/O and rejected unreachable cancellation.
+- `handleCancelRun` now synchronously validates only run existence/terminal state, schedules the existing deduplicated background `cancel`, and immediately returns accepted. The background marker remains after authenticated success but is cleared after transport/decode/non-OK failure so a later explicit request or `cleanup_required` tick can retry.
+- Independent `go test ./internal/lifecycle -run '^TestEngineCancelRun.*$' -count=3 -timeout 300s` → PASS (`ok`, 39.919s).
+- Independent M2 plus shared cleanup `-race` → PASS (`ok`, 14.888s); shared cleanup-required regressions with `-count=3` → PASS (`ok`, 1.221s).
+- Deterministic coverage proves a blocked supervisor response does not delay acceptance beyond 500ms, exact `cmd=cancel`/token delivery, unreachable acceptance, 16-way duplicate deduplication, terminal/missing rejection with zero requests, failed/non-OK marker clearing followed by exactly one successful retry, and real cancellation reaching `cancelled`.
+- A fresh temporary `hermes-verify-*` script reran the failed-request retry 3× (`ok`, 0.349s), checked M2 formatting/whitespace, and was removed. This was ad-hoc verification, not a full-suite claim.
+- Final `gofmt -d`, repository `git diff --check`, and process-leak scan passed.
+- This is focused M2 acceptance only. Final executable gates and independent re-review remain pending.
+
+### 2026-07-19 — Final executable gates and frozen review candidate
+
+- The first canonical `python3 scripts/verify.py` run exposed two stale/racy integration fixtures: immediate identity consumption after `running`, and a pre-M3 terminal outbox with missing authority. No production change was needed. Tests now wait for published durable identity, and the crash-before-finalize fixture supplies matching run/identity/outbox authority plus deterministic dead/quiescent backend evidence.
+- Independent focused identity/finalization regressions → PASS (`ok`, 24.521s). OMP focused 3× and race evidence also passed (`56.613s` and `28.092s`).
+- Canonical `python3 scripts/verify.py` rerun → **ALL GATES PASS**: gofmt 0.4s, vet 2.0s, test 105.1s, race 116.4s, no-CGO test 80.1s, no-CGO build 1.2s. Report timestamp `2026-07-19T14:50:04Z`.
+- `python3 scripts/mutation_proof.py` → **6/6 DETECTED**, every mutation classified `behavioral_test_rejection`; no compile-failure or timeout classifications. Report timestamp `2026-07-19T14:51:34Z`.
+- `python3 scripts/stress_lifecycle.py` → crash/restart **20/20**, cancellation **20/20** with every request accepted and terminal state `cancelled`. Report timestamp `2026-07-19T14:56:44Z`.
+- The first black-box invocation exposed a harness readiness race (`daemon.sock` absent after fixed one-second sleep). `scripts/blackbox_lifecycle.py` now probes authenticated `ping` with a bounded readiness deadline and fails with captured daemon stderr. Rerun → success `completed`, cancellation `cancelled`, **0 survivors** in both scenarios. Report timestamp `2026-07-19T14:59:55Z`.
+- Final Python script compilation, repository `git diff --check`, and daemon/worker/supervisor/test process-leak scan passed.
+- Frozen code/test candidate: base `b8e21eac0b808a9ad35b90e59e1eacd925753d28`, 19 modified/untracked files under `internal/` and `scripts/`, manifest `artifacts/omp/slice-001-final-review/candidate-manifest.json`, SHA256 `19a3629aef125034538626ec0aa9391dc948c4869b5f175d4eb2179fe8d68d9e`.
+- Executable gates are complete. Slice-001 remains pending until an independent hard review returns explicit ACCEPT for this exact candidate hash.
+
+### 2026-07-20 — Repair C durable cancellation and shutdown evidence
+
+- Exact OMP session `019f7b4f-5b6d-7000-9141-8fccf0085bf4` implemented schema v5 durable cancellation and joined Engine shutdown. Its first three-package race run exposed a real startup cancel race: `TestSupervisorCancelCommand` observed `completed` instead of `cancelled`; buffering the one-shot cancel channel fixed the lost pre-receiver signal, and the subsequent focused plus three-package race reruns passed.
+- The OMP synthesis incorrectly reported that its process scan found no leaks. Independent inspection instead found one live supervisor intentionally preserved by `TestEngineCloseLeavesLiveSupervisor`; the test now proves `Engine.Close` leaves it alive and then removes the exact worker/supervisor during `t.Cleanup`, including reaping the owned supervisor handle.
+- Independent `go test ./internal/lifecycle -run '^TestEngineCloseLeavesLiveSupervisor$' -count=1 -timeout 60s` → PASS (`ok`, 1.669s), followed by an empty Ananke process scan.
+- Independent `go test ./internal/store ./internal/supervisor ./internal/lifecycle -count=1 -timeout 240s` → PASS (`store` 0.462s, `supervisor` 6.951s, `lifecycle` 15.235s).
+- Independent `go test -race ./internal/store ./internal/supervisor ./internal/lifecycle -count=1 -timeout 300s` → PASS (`store` 2.301s, `supervisor` 17.492s, `lifecycle` 25.799s).
+- Scoped `gofmt -d`, repository `git diff --check`, and final process-leak scan → PASS. Repair C is focused-accepted; canonical verify/mutation/stress/black-box gates and a newly frozen independent hard review remain required.
+- Repair C changed the source candidate, so the 2026-07-19 executable reports and candidate SHA256 above are retained as historical evidence but are superseded for acceptance.
+
+### 2026-07-20 — Candidate-bound harness focused acceptance
+
+- Added deterministic `ananke-source-manifest-v1` over `go.mod`, `go.sum`, `cmd/**/*.go`, `internal/**/*.go`, and direct `scripts/*.py`; reports refuse to overwrite when the source manifest drifts during execution.
+- Independent `python3 -m unittest scripts/test_candidate_manifest.py scripts/test_harness_support.py scripts/test_stress_lifecycle.py` → 18/18 PASS.
+- Independent `python3 scripts/blackbox_lifecycle.py` → success PASS and cancellation PASS; both terminal outboxes acknowledged and exact persisted PGIDs had zero survivors.
+- Independent `python3 scripts/stress_lifecycle.py --iterations 1` → crash/restart 1/1 PASS and cancellation 1/1 PASS. Crash evidence: `completed`, one event at sequence 1, positive committed offset, acknowledged outbox, zero survivors. Cancellation evidence: accepted, `cancelled`, acknowledged outbox, zero survivors.
+- Both smoke reports independently recomputed and matched candidate SHA256 `d5cbc341d1c46875d5d901afd8636686652889c4a1caf9f8f93a322305c4d6bf` across 64 files. Python compilation, `git diff --check`, and final process-leak scan passed.
+- This is focused harness acceptance only; canonical verify, six mutation gates, default 20× stress, final black-box, and independent hard review remain required.
+
+### 2026-07-20 — Promotion gate attempt rejected by test-process leaks
+
+- Candidate SHA256 `d5cbc341d1c46875d5d901afd8636686652889c4a1caf9f8f93a322305c4d6bf` was exercised through all four candidate-bound reports.
+- Canonical verify: gofmt PASS (0.1s), vet PASS (0.4s), normal tests PASS (16.0s), race tests PASS (27.4s), no-CGO test FAIL (15.3s), no-CGO build PASS (0.7s). The report lacked stdout, so the original Go failure text was not retained.
+- Independent no-CGO reproduction passed once, then `CGO_ENABLED=0 go test ./... -count=3 -timeout 300s` exposed `TestSupervisorAdoptCommand` racing `TempDir RemoveAll` (`directory not empty`) and left two fake workers. Root cause: per-test supervisor-only Kill/Wait defers run before the central fork cleanup and can abandon the worker process group.
+- Mutation proof behaviorally rejected 6/6 unsafe mutations, but `mutation_cancel_parent_only` intentionally left resistant helper PID 20672 alive because failed-test cleanup did not remove the exact owned group.
+- Hardened stress reached terminal evidence for crash/restart 20/20 and cancellation 20/20; black-box success and cancellation both passed. These results do not override the canonical/leak failures.
+- The attempt is rejected. Repair is limited to exact test-process ownership cleanup and bounded stdout diagnostic capture; all source-bound reports must be regenerated afterward.
+
+### 2026-07-20 — Final-gate test ownership repair
+
+- Centralized `forkSupervisor` cleanup now signals the exact still-owned supervisor process group before killing/waiting the supervisor child; redundant per-test supervisor-only Kill/Wait defers were removed. A new regression owns a supervisor, worker, and resistant child in one PGID and proves all three plus the socket are gone after subtest cleanup.
+- `scripts/verify.py` now prints and stores bounded stdout as well as stderr, so Go test failures remain diagnosable in the candidate-bound report.
+- RED proof: the new cleanup regression initially reported its worker and resistant child surviving. GREEN proof: the same regression passed after central exact-group cleanup.
+- Independent `CGO_ENABLED=0 go test ./internal/supervisor -run '^(TestForkSupervisorCleanupKillsOwnedGroup|TestSupervisorAdoptCommand|TestSupervisorResistantChildEscalation)$' -count=5 -timeout 120s` → PASS (4.257s).
+- Independent reproduction of the original failure, `CGO_ENABLED=0 go test ./... -count=3 -timeout 300s`, → PASS (`lifecycle` 42.672s, `store` 1.246s, `supervisor` 19.003s).
+- Tagged `mutation_cancel_parent_only` still behaviorally rejected with exit 1 and the expected resistant-child assertion; the exact executable scan immediately afterward and the corrected final `ps ... comm=` basename scan both found zero Ananke/test leaks.
+- Python compilation, scoped gofmt, `git diff --check`, and generated-cache removal passed. Because the repair changed candidate sources, every executable report from the rejected attempt remains superseded pending a full rerun.
+
+### 2026-07-20 — Repair D hard-review contract fixes
+
+- Independent hard review of frozen candidate v4 returned `VERDICT: CHANGES REQUESTED`. Dynamic evidence proved a P1 terminal transcript-loss bug: a nonzero-exit worker wrote three canonical records, but the failed run became terminal with only one durable event because `finishOwnedWorker` skipped transcript handoff whenever a lifecycle failure existed.
+- Repair D now requires transcript seal/drain after every successful exact worker reap, including failed and cancelled outcomes. Deterministic regressions block event persistence and prove no terminal state becomes visible until all three events are durable.
+- The canonical fake worker and in-process test helper now emit `{type, payload}` records with `source_seq`, `text`, and timezone-bearing `timestamp`; API and harness tests reject null, missing, or mismatched payloads.
+- Store open now rejects future, gapped, duplicate, and non-positive migration histories before applying any migration; a valid old contiguous history still migrates to head.
+- Mutation proof now parses `go test -json` and counts detection only when the exact named test emits its own `run` and `fail` events. Six focused Python tests reject exit-only, unrelated-test, compile/setup, pass-plus-unrelated-failure, incomplete, and timeout false positives.
+- Independent Repair D verification: Python 25/25 PASS; focused transcript/payload/migration tests PASS; no-CGO store/supervisor/lifecycle PASS (`1.146s`, `8.405s`, `16.863s` in the first package run); scoped gofmt and `git diff --check` PASS.
+
+### 2026-07-20 — Repair E transient handoff recovery and final candidate v6
+
+- The first post-Repair-D stress attempt exposed a harness-only macOS Unix-socket race: `api_request` called unnecessary `shutdown(SHUT_WR)` after sending a complete JSON request, and a fast peer close produced `Errno 57`. Deterministic RED reproduced the exception; removing the half-close made the focused test and full 9-test harness suite PASS. Stress then passed crash/restart 20/20 and cancellation 20/20 with no residual processes at 0s/1s/3s.
+- A subsequent full race gate exposed a production liveness gap: transient `SQLITE_BUSY` during `SealTranscript` moved the run to `cleanup_required`, after which no authority retried sealing. Repair E adds a deterministic trigger-based RED test and makes the exact live supervisor retry transient seal/read operations with capped backoff while preserving permanent invariant failures and transcript-corruption fail-closed behavior.
+- Repair E GREEN evidence: deterministic seal-retry test PASS; focused transcript/retry/corruption tests repeated 3× PASS (`6.917s`); focused race PASS (`4.552s`); no-CGO store/supervisor/lifecycle PASS (`0.855s`, `9.493s`, `17.170s`); `git diff --check` PASS.
+- Final v6 gate suite against source candidate `d9ddf86cd31c154c85d5057296aa75a1ee052077f33f009e43171bd4c79b0294` (65 files): verification PASS including full race; named-test-attributed mutation proof 6/6; crash/restart stress 20/20; cancellation stress 20/20; black-box success and cancellation PASS; exact process scan PASS at 0s/1s/3s.
+- Frozen review manifest: `artifacts/omp/slice-001-final-review/candidate-manifest-v6.json`, SHA256 `a03a5c0c57a276b9b19a5afc0ae7591574e79e52a62ec6b072fe060ccc158518`. All four report hashes were independently rebound to this manifest. Slice-001 remains `iterate` until an independent reviewer returns explicit ACCEPT for candidate v6.
+
+### 2026-07-20 — Candidate v6 hard review rejected
+
+- Independent hard review session `019f7d8a-d343-7000-a609-7c52ab68f753` verified the manifest, four report hashes, all 65 source-file hashes, and recomputed source candidate with zero mismatch, then returned `VERDICT: CHANGES REQUESTED`.
+- `/tmp` overlay challenges proved P1: transcript corruption can publish `failed` with `{ConsumedOffset:105 FinalSize:-1}` because supervisor treats `cleanup_required` as permission to skip seal/drain.
+- `/tmp` overlay challenges proved P1: dead-supervisor `recovery_unknown` fallback commits `failed` after process quiescence without checking or completing transcript handoff.
+- `/tmp` overlay challenges proved P2: daemon supervisor-start failure leaves a transcript-required terminal failed run with `{ConsumedOffset:0 FinalSize:-1}` instead of an explicit empty seal.
+- Candidate v6 and its green reports are reproducible historical evidence but are rejected for promotion. Repair F must enforce the transcript handoff invariant in the central terminal transaction, durably account malformed bytes without fabricating events, let the daemon seal/drain after proven quiescence, and atomically seal no-process transcripts as empty. New source changes require new reports and a newly frozen review candidate.
+
+### 2026-07-20 — Repair F/G terminal transcript authority
+
+- Repair F added a store-level invariant: `CommitTerminal` atomically rejects every transcript-required run whose transcript is unsealed or not fully accounted; `CommitNoProcessFailure` atomically records an explicit empty seal.
+- Malformed complete records now persist `cleanup_required` before durably advancing the consumed byte offset without fabricating an event. Supervisor terminalization no longer skips transcript handoff merely because the run is `cleanup_required`.
+- After exact supervisor death, worker absence, and empty-group proof, the daemon binds the named regular transcript file, seals its observed size, tails/drains all bytes, revalidates the same file identity/size, and only then publishes terminal state. Missing process transcripts and inode replacement at offset zero now fail closed.
+- Repair F focused verification: store/supervisor/lifecycle RED→GREEN tests passed; race and no-CGO three-package runs passed; Python harness 26/26 passed; the named `mutation_terminal_while_alive` test emitted its own `run` and `fail` JSON events.
+- Candidate v7 exposed a stable cancellation regression in ordinary/race/no-CGO verification: cancellation could kill the fakeworker before it opened `transcript.ndjson`, so a legitimate empty transcript appeared missing and the now-correct gate retained `cleanup_required`.
+- Repair G moved transcript creation authority to the supervisor before `LaunchWorker`: required transcripts are exclusively created as regular mode-0600 files under a mode-0700 parent, and the production fakeworker opens the existing inode without `O_CREATE`. The deterministic pre-launch test and `TestAcceptedCancellationSurvivesCloseAndRetriesAfterRestart` both changed RED→GREEN. A package-test fakeworker remained visible at a 1-second scan but disappeared by 4 seconds; canonical process scans below were clean at 0/1/4 seconds.
+
+### 2026-07-20 — Slice-001 candidate v8 frozen
+
+- Final canonical run after Repair G:
+  - `python3 scripts/verify.py` → PASS, including ordinary, race, and no-CGO suites.
+  - `python3 scripts/mutation_proof.py` → PASS, `6/6` named mutations detected.
+  - `python3 scripts/stress_lifecycle.py` → PASS, crash/restart `20/20`, cancellation `20/20`, no survivors.
+  - `python3 scripts/blackbox_lifecycle.py` → PASS, success and cancellation scenarios.
+- All four reports bind the same 66-file candidate `09d0935f9057a146c373f83800df5556636cff4ff729ba007c398b5112348ac2`.
+- Exact process scans after the suite passed at 0, 1, and 4 seconds.
+- Frozen review manifest: `artifacts/omp/slice-001-final-review/candidate-manifest-v8.json`.
+- Independent hard review of v8 remains required before commit; this row records executable evidence, not acceptance.
+
+### 2026-07-20 — Candidate v8 hard review rejected
+
+- Independent hard review session `019f7ddc-7300-7000-9e5b-15b2a40015ef` reverified all four report hashes, all 66 current source-file hashes, the full source set, and aggregate `09d0935f9057a146c373f83800df5556636cff4ff729ba007c398b5112348ac2` with zero mismatch.
+- The deterministic overlay `TestChallengeEmptyInodeReplacementCannotTerminalize` proved P1: replacing an empty transcript inode at offset zero still allowed terminal publication with `state=failed consumed=0 final=0 events=0`. Size/offset equality alone therefore does not prove transcript identity.
+- `TestChallengeTerminalRunReleasesTranscriptTail` proved P3: a terminal run remained present in `Engine.tails` with an open file handle. The separate `/bin/false` probe was invalid on this macOS host and is not evidence.
+- Provider policy interrupted the reviewer after the probes; exact-resume synthesis returned `VERDICT: CHANGES REQUESTED`. Candidate v8 must not be committed.
+- Repair H must make the supervisor-created transcript file identity durable across process and daemon restarts, enforce it in every tail/handoff/terminal path, and release terminal tail handles. The GUI acceptance contract also requires missing/null event payloads to follow the existing malformed-record cleanup path without fabricated events.
+
+### 2026-07-20 — Slice-001 Repair H (durable transcript file identity)
+
+#### Evidence
+
+- Independent hard-review challenge copied into `internal/lifecycle/repair_h_challenge_test.go`: replacing an empty transcript inode at durable offset zero previously published `failed` with `consumed=0`, `final=0`, and zero events; terminal tails also retained an open file descriptor.
+- Schema v6 adds immutable `transcript_device` / `transcript_inode` authority. A process-backed required transcript cannot terminalize unless size handoff is complete and the durable file identity is valid; the explicit no-process path remains the only zero-identity exception.
+- The supervisor now creates and retains the transcript anchor before worker launch, publishes the same identity to SQLite and `identity.json`, and includes it in socket authority responses. Daemon recovery, adoption, initial tail startup, quiescent handoff, and finalization responses require the same identity.
+- Terminal/outbox resolution now releases transcript tails idempotently, including runs that disappear from `ListActiveRuns` before the next tick.
+- Complete event envelopes now require a non-blank `type` and a present, non-null JSON `payload`; objects, arrays, strings, numbers, and booleans remain valid. Malformed complete records are durably accounted, create no event, and enter `cleanup_required`.
+- Permanent tests cover live offset-zero replacement, daemon-restart offset-zero replacement, terminal tail release, prelaunch publication failure, migration defaults, identity-file and supervisor-response mismatch, missing/null envelope fields, and valid non-null payload kinds.
+- `go test ./internal/store ./internal/supervisor ./internal/lifecycle -count=1 -timeout 300s`: PASS (`artifact://29`, 24.33 s after fixture convergence).
+- `go test -race ./internal/store ./internal/supervisor ./internal/lifecycle -count=1 -timeout 300s`: PASS (`artifacts/gates/repair-h-focused/race.log`: store 3.835 s, supervisor 19.161 s, lifecycle 39.522 s).
+- `CGO_ENABLED=0 go test ./internal/store ./internal/supervisor ./internal/lifecycle -count=1 -timeout 300s`: PASS (`artifacts/gates/repair-h-focused/no-cgo.log`: store 1.184 s, supervisor 7.737 s, lifecycle 19.737 s).
+- `python3 -m unittest scripts.test_candidate_manifest scripts.test_harness_support scripts.test_stress_lifecycle scripts.test_mutation_proof`: PASS (26/26).
+- Named `mutation_terminal_while_alive` proof: `TestEngineTranscriptCorruptionStaysNonterminalWhileAlive` itself ran and failed because terminal `failed` became visible while worker/supervisor were both alive.
+- Bounded process scans after explicit mutation-process cleanup: 0/1/4 seconds PASS; all three evidence files are zero bytes.
+
+#### Decision
+
+- Repair H focused gates are accepted.
+- Canonical candidate v9 is frozen by `artifacts/omp/slice-001-final-review/candidate-manifest-v9.json`: source aggregate `0fcf25ad39ccddf3b05fccc330fed620b03a852d9a97ec2c983d7b6cfa1931c6`, 68 files.
+- `python3 scripts/verify.py`: PASS for ordinary, race, and `CGO_ENABLED=0` suites.
+- `python3 scripts/mutation_proof.py`: PASS; all six mutation gates detected.
+- `python3 scripts/stress_lifecycle.py`: PASS; crash/restart 20/20 and cancellation 20/20.
+- `python3 scripts/blackbox_lifecycle.py`: PASS; success and cancellation scenarios.
+- Canonical post-gate process scans at 0/1/4 seconds: PASS.
+- The four bound report SHA-256 values are recorded in candidate-manifest-v9. A fresh 900-second independent hard review is running; v9 remains non-committable until that review returns ACCEPT.
+
+### 2026-07-20 — Slice-001 Candidate v9 independent review rejection
+
+#### Evidence
+
+- Independent reviewer session `019f7e15-5330-7000-9a08-7123bdfce5db` recomputed all four report hashes and the current source candidate: aggregate `0fcf25ad39ccddf3b05fccc330fed620b03a852d9a97ec2c983d7b6cfa1931c6`, 68 files, zero mismatches, and exact candidate equality across all reports.
+- P1 framing finding: `tailTranscript` can append a valid JSON envelope returned with `io.EOF` before a newline or durable final seal exists. A later append can turn the physical NDJSON line into malformed concatenated JSON after an event was already published.
+- P1 process finding: Darwin `GroupMembers` returns numeric PIDs from a `ps` snapshot and `cleanupGroup` later signals them individually. The supervisor pins the PGID but not each descendant PID, so an exiting/reused PID can redirect TERM/KILL to an unrelated process.
+- The reviewer's custom external framing probe was invalid because its temporary per-run Unix socket path exceeded the macOS limit; it is explicitly excluded from evidence. The daemon was stopped, PIDs `73820`, `73866`, and `73867` were absent, no matching process remained, and the temporary directory was removed.
+- Residual P2/P3 findings: ignored `rand.Read` error, silent terminal kqueue observation error, identity rename without file/directory `fsync`, and daemon token printed to stderr.
+
+#### Decision
+
+- `VERDICT: CHANGES REQUESTED`; candidate v9 must not be committed.
+- Repair I must gate every non-newline EOF record on a durable final seal, and must replace snapshot-then-signal-by-PID cleanup with an architecture that preserves stable signalling authority. The selected topology keeps the supervisor outside a worker-led process group, pins the worker group by deferring leader reap, and signals the group atomically before reaping.
+
+### 2026-07-20 — Slice-001 Repair I: durable framing and stable group authority
+
+#### Evidence
+
+- Session `019f7e28-37ec-7000-8ec3-8e520f0e35f5` reproduced the framing failure before implementation: a valid non-newline EOF record advanced `ConsumedOffset` and appended one event while `FinalSize == -1`.
+- The permanent framing contract now retains the prior durable offset until a newline exists or the sealed final size proves the exact final record boundary. Sealed final records without a newline remain accepted.
+- The old backend reproduced worker PID/PGID inheritance from the supervisor. The replacement starts a paused trampoline as `PID == owned PGID`; the supervisor remains outside the group, publishes identity/SQLite/socket/running authority, and only then releases the trampoline to `exec` the real worker in place.
+- Cleanup uses only atomic negative-PGID TERM/KILL while the unreaped worker leader pins group identity. Production `SignalProcess` and `BecomeGroupLeader` paths were removed.
+- A positive paused PID with a publication failure can now persist the one-way nonterminal `created -> cleanup_required` obligation. Direct `created -> terminal` transitions remain forbidden outside the existing no-process atomic exception.
+- Post-start watcher, identity, SQLite, socket, transition, release and monitor failures are covered as cleanup-before-reap cases. The resistant-child integration test proves worker and descendants share the owned worker PGID and are removed by cancellation.
+- Reviewer P2 items were also closed: entropy failures abort daemon/run token creation, terminal kqueue errors wake fail-closed cleanup, identity temp and parent directory are synced, and daemon stderr no longer prints credentials.
+- Expanded UI reference evidence is recorded separately in `docs/ui-reference-audit.md`; no external UI source was copied.
+
+#### Decision
+
+- Repair I source and focused contracts are complete. Canonical candidate v11 is frozen by `artifacts/omp/slice-001-final-review/candidate-manifest-v11.json`: aggregate `93aef9afc7771cb79c35d3c7df0fa6bca6f50e8071619d0fa36473198b82dd7f`, 68 files. Verify, mutation (6/6), stress, blackbox, Python 26/26, gofmt/diff, and 0/1/4 process scans all passed. Independent hard review session `019f8099-15bf-7000-a2ac-5014079acaa2` returned `VERDICT: ACCEPT`; report `artifacts/omp/slice-001-final-review/hard-review-v11-output.md`. Residual risk is the documented ADR-0002 fail-closed `recovery_unknown` path after supervisor crash with resistant descendants; it is not a commit blocker.
