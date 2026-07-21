@@ -1,0 +1,1 @@
+Do not call any tools. Synthesize only evidence already collected in this exact Arm B session. State files changed, commands and outcomes, exact versions, which frozen-contract requirements are complete or incomplete, scope hygiene status including repo-root generated/, and a provisional verdict. Do not edit or test.

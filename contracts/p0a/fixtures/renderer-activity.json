@@ -1,0 +1,23 @@
+{
+  "runs": [
+    {
+      "id": "run-001",
+      "state": "running",
+      "diagnostics": {
+        "project_id": "project-a",
+        "workstream_id": "main",
+        "worker_pid": 1234,
+        "supervisor_pid": 1235,
+        "committed_offset": 4096
+      }
+    }
+  ],
+  "events": [
+    {"seq": 1, "type": "status", "payload": null},
+    {"seq": 2, "type": "progress", "payload": {"percent": 50, "nested": ["x", true]}},
+    {"seq": 3, "type": "metrics", "payload": [1, "two", false]},
+    {"seq": 4, "type": "notice", "payload": "done"},
+    {"seq": 5, "type": "count", "payload": 3.5},
+    {"seq": 6, "type": "flag", "payload": true}
+  ]
+}

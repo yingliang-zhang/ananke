@@ -1,0 +1,5 @@
+{
+  "ok": true,
+  "state": "running",
+  "future_response_field": {"must": "be ignored"}
+}

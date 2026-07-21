@@ -8,8 +8,27 @@ This ledger records executable reliability experiments and independent review ga
 |---|---|---|---|---|---|---|---|---|---|---|
 | 2026-07-18 | `slice-001-hard-review-b8e21ea` | Passing functional gates is insufficient unless source-level ADR invariants survive an independent hard review. | `main` @ `b8e21ea` | Independent hard review of frozen Slice-001 candidate | Prior gates were green, but review found source-contract violations | Prior stress did not cover live transcript truncation | Review found M1/M4 gates were proxy/no-op detections | 2 BLOCKER, 7 MAJOR, 6 MINOR | `iterate` — repair blockers/majors, then rerun all gates and independent re-review | [`artifacts/omp/slice-001-review/full-review.md`](../artifacts/omp/slice-001-review/full-review.md) |
 | 2026-07-18 | `slice-001-baseline-8bc3e21` | The initial Darwin supervisor proof can pass build, race, no-CGO, mutation, repeated lifecycle, and black-box gates. | `main` @ `8bc3e21` | Initial Vertical Slice 1 implementation | 6/6 verification gates PASS: gofmt, vet, test, race, no-CGO test, no-CGO build | Crash/restart 20/20; cancellation 20/20 | 6/6 reported detected | Not yet reviewed at this commit | `iterate` — later hard review showed the passing suite gave false confidence | [`reports/verification.json`](../reports/verification.json), [`reports/stress-lifecycle.json`](../reports/stress-lifecycle.json), [`reports/mutation-proof.json`](../reports/mutation-proof.json), [`reports/blackbox-lifecycle.json`](../reports/blackbox-lifecycle.json) |
+| 2026-07-21 | `p0a-schema-codegen` | A generated Go/Rust/TypeScript contract toolchain can reproduce the frozen public/private JSON boundary without hand-edited generated code or renderer secret leakage. | `spike/p0a-schema-codegen` @ `eedba6d` | Binary spike: JSON Schema + Quicktype versus Proto3 + Buf ecosystem | Arm A revision-4 verifier PASS: 15.889s, 6 files / 677 LOC; Arm B partial scripts failed runtime/drift gates | Arm A preserves all frozen payload forms; Arm B Rust drops `null` payload | Arm A staged content drift PASS; Arm B drift probe failed to prove content difference | Arm A final focused hard re-review ACCEPT; Arm B BOUNDED | `select Arm A` — JSON Schema + Quicktype, P0a only | [`P0a contract`](experiments/p0a-schema-codegen-contract.md), [`ADR-0004`](adr/0004-select-json-schema-quicktype-for-p0a-codegen.md), [`A final review`](../artifacts/omp/p0a/arm-a-final-focused-rereview-output.md) |
 
 ## Decisions Log
+
+### 2026-07-21 — P0a selects JSON Schema + Quicktype for the next experiment stage
+
+- Frozen contract revision 4 separated private daemon requests, internal daemon
+  responses, and public renderer DTOs. The public nested `RunDto.diagnostics`
+  fixture, `ok:false` presence, payload variants, generated-public privacy,
+  drift, clean regeneration, optional evolution, and production-scope guard
+  were all explicit must-haves.
+- Arm A (`JSON Schema 2020-12 + Quicktype`) independently ran
+  `node scripts/verify.mjs` successfully in `15.889s`: six generated files / 677
+  LOC, Go 1.26.5, Git 2.54.0, Quicktype 26.0.0, TypeScript 5.9.3, Cargo 1.97.1.
+  The final focused hard review returned `ACCEPT`.
+- Arm B (`Proto3 + Buf`) generated code but is **BOUNDED — CHANGES REQUESTED**:
+  its Rust fixture run dropped `payload:null`, several probes target missing
+  Rust tests, and drift rejection was not a content-difference proof. It also
+  lacked complete verifier, evolution/breaking, and README evidence.
+- ADR-0004 selects Arm A for further experiment work only. No daemon transport,
+  production DTO, or semantic adapter migration is authorized by this decision.
 
 ### 2026-07-18 — Slice-001 baseline not accepted despite all executable gates passing
 

@@ -1,0 +1,12 @@
+{
+  "project": {
+    "id": "project-a",
+    "name": "Ananke",
+    "root": "/workspace/ananke"
+  },
+  "workstream": {
+    "id": "main",
+    "project_id": "project-a",
+    "name": "Main"
+  }
+}
