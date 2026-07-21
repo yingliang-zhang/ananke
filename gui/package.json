@@ -13,6 +13,9 @@
     "dev": "npm run build:go && npm run web:dev",
     "build": "npm run build:go && npm run web:build",
     "typecheck": "tsc -b --pretty false",
+    "generate:renderer-public": "node scripts/generate-renderer-public.mjs",
+    "check:renderer-public": "node scripts/generate-renderer-public.mjs --check",
+    "check:renderer-public-privacy": "node scripts/generate-renderer-public.mjs --check-public-fields",
     "test:state": "node scripts/test-run-state.mjs",
     "tauri": "npm run build:go && tauri",
     "tauri:dev": "npm run build:go && tauri dev",
@@ -23,6 +26,7 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4",
+    "quicktype": "26.0.0",
     "typescript": "^5.8.3",
     "vite": "^7.1.0"
   }

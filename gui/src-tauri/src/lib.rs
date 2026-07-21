@@ -1,3 +1,10 @@
+pub mod generated;
+
+use generated::{
+    renderer_public_bootstrap::{Bootstrap, Project, Workstream},
+    renderer_public_event::Event,
+    renderer_public_run::{Run, RunDiagnostics},
+};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -403,6 +410,22 @@ impl From<JsonRun> for RunDto {
     }
 }
 
+impl From<JsonRun> for Run {
+    fn from(run: JsonRun) -> Self {
+        Self {
+            id: run.id,
+            state: run.state,
+            diagnostics: RunDiagnostics {
+                project_id: run.project_id,
+                workstream_id: run.workstream_id,
+                worker_pid: run.worker_pid.into(),
+                supervisor_pid: run.supervisor_pid.into(),
+                committed_offset: run.committed_offset,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EventDto {
     pub seq: i64,
@@ -411,24 +434,16 @@ pub struct EventDto {
     pub payload: serde_json::Value,
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct ProjectDto {
-    pub id: String,
-    pub name: String,
-    pub root: String,
-}
+impl TryFrom<EventDto> for Event {
+    type Error = serde_json::Error;
 
-#[derive(Clone, Debug, Serialize)]
-pub struct WorkstreamDto {
-    pub id: String,
-    pub project_id: String,
-    pub name: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct BootstrapDto {
-    pub project: ProjectDto,
-    pub workstream: WorkstreamDto,
+    fn try_from(event: EventDto) -> Result<Self, Self::Error> {
+        Ok(Self {
+            payload: serde_json::from_value(event.payload)?,
+            seq: event.seq,
+            event_type: event.event_type,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -531,7 +546,7 @@ impl Backend {
         Ok(())
     }
 
-    fn bootstrap(&mut self) -> Result<BootstrapDto, BridgeError> {
+    fn bootstrap(&mut self) -> Result<Bootstrap, BridgeError> {
         self.ensure_daemon()?;
         let root = self.paths.repository_root.to_string_lossy();
         let mut create_project = GoRequest::new("create-project", &self.token);
@@ -546,16 +561,16 @@ impl Backend {
         create_workstream.name = Some(DEFAULT_WORKSTREAM_NAME);
         self.accept_existing(create_workstream)?;
 
-        Ok(BootstrapDto {
-            project: ProjectDto {
+        Ok(Bootstrap {
+            project: Project {
                 id: DEFAULT_PROJECT_ID.into(),
                 name: DEFAULT_PROJECT_NAME.into(),
                 root: root.into_owned(),
             },
-            workstream: WorkstreamDto {
+            workstream: Workstream {
                 id: DEFAULT_WORKSTREAM_ID.into(),
-                project_id: DEFAULT_PROJECT_ID.into(),
                 name: DEFAULT_WORKSTREAM_NAME.into(),
+                project_id: DEFAULT_PROJECT_ID.into(),
             },
         })
     }
@@ -564,7 +579,7 @@ impl Backend {
         accept_existing_response(self.request(request))
     }
 
-    fn list_runs(&mut self) -> Result<Vec<RunDto>, BridgeError> {
+    fn list_runs(&mut self) -> Result<Vec<Run>, BridgeError> {
         self.ensure_daemon()?;
         let mut request = GoRequest::new("list-runs", &self.token);
         request.project_id = Some(DEFAULT_PROJECT_ID);
@@ -573,11 +588,11 @@ impl Backend {
             .request(request)?
             .runs
             .into_iter()
-            .map(RunDto::from)
+            .map(Run::from)
             .collect())
     }
 
-    fn launch_fixture(&mut self) -> Result<RunDto, BridgeError> {
+    fn launch_fixture(&mut self) -> Result<Run, BridgeError> {
         self.ensure_daemon()?;
         let run_id = fixture_run_id();
         let worker_env = vec![
@@ -596,26 +611,31 @@ impl Backend {
         request.worker_env = Some(&worker_env);
         self.request(request)?
             .run
-            .map(RunDto::from)
+            .map(Run::from)
             .ok_or(BridgeError::Protocol)
     }
 
-    fn get_run(&mut self, run_id: &str) -> Result<RunDto, BridgeError> {
+    fn get_run(&mut self, run_id: &str) -> Result<Run, BridgeError> {
         self.ensure_daemon()?;
         let mut request = GoRequest::new("get-run", &self.token);
         request.id = Some(run_id);
         self.request(request)?
             .run
-            .map(RunDto::from)
+            .map(Run::from)
             .ok_or(BridgeError::Protocol)
     }
 
-    fn list_events(&mut self, run_id: &str, after_seq: i64) -> Result<Vec<EventDto>, BridgeError> {
+    fn list_events(&mut self, run_id: &str, after_seq: i64) -> Result<Vec<Event>, BridgeError> {
         self.ensure_daemon()?;
         let mut request = GoRequest::new("list-events", &self.token);
         request.id = Some(run_id);
         request.after_seq = Some(after_seq);
-        Ok(self.request(request)?.events)
+        self.request(request)?
+            .events
+            .into_iter()
+            .map(Event::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(BridgeError::from)
     }
 
     fn cancel_run(&mut self, run_id: &str) -> Result<CancelDto, BridgeError> {
@@ -688,7 +708,7 @@ fn use_backend<T>(
 }
 
 #[tauri::command]
-fn bootstrap(state: State<'_, BridgeState>) -> Result<BootstrapDto, String> {
+fn bootstrap(state: State<'_, BridgeState>) -> Result<Bootstrap, String> {
     use_backend(state, Backend::bootstrap)
 }
 
@@ -701,17 +721,17 @@ fn daemon_health(state: State<'_, BridgeState>) -> Result<HealthDto, String> {
 }
 
 #[tauri::command]
-fn list_runs(state: State<'_, BridgeState>) -> Result<Vec<RunDto>, String> {
+fn list_runs(state: State<'_, BridgeState>) -> Result<Vec<Run>, String> {
     use_backend(state, Backend::list_runs)
 }
 
 #[tauri::command]
-fn launch_fixture(state: State<'_, BridgeState>) -> Result<RunDto, String> {
+fn launch_fixture(state: State<'_, BridgeState>) -> Result<Run, String> {
     use_backend(state, Backend::launch_fixture)
 }
 
 #[tauri::command]
-fn get_run(state: State<'_, BridgeState>, run_id: String) -> Result<RunDto, String> {
+fn get_run(state: State<'_, BridgeState>, run_id: String) -> Result<Run, String> {
     use_backend(state, |backend| backend.get_run(&run_id))
 }
 
@@ -720,7 +740,7 @@ fn list_events(
     state: State<'_, BridgeState>,
     run_id: String,
     after_seq: i64,
-) -> Result<Vec<EventDto>, String> {
+) -> Result<Vec<Event>, String> {
     use_backend(state, |backend| backend.list_events(&run_id, after_seq))
 }
 
@@ -949,6 +969,260 @@ mod tests {
         assert_eq!(value["token"].as_str().map(str::len), Some(64));
     }
 
+    #[test]
+    fn bootstrap_public_wire_json_is_frozen() {
+        let mut test = new_test_backend();
+        let project_root = test
+            .backend
+            .paths
+            .repository_root
+            .to_string_lossy()
+            .into_owned();
+        let bootstrap: generated::renderer_public_bootstrap::Bootstrap = test
+            .backend
+            .bootstrap()
+            .expect("bootstrap through the public bridge");
+
+        assert_eq!(
+            serde_json::to_value(&bootstrap).expect("serialize public bootstrap result"),
+            serde_json::json!({
+                "project": {
+                    "id": DEFAULT_PROJECT_ID,
+                    "name": DEFAULT_PROJECT_NAME,
+                    "root": project_root,
+                },
+                "workstream": {
+                    "id": DEFAULT_WORKSTREAM_ID,
+                    "project_id": DEFAULT_PROJECT_ID,
+                    "name": DEFAULT_WORKSTREAM_NAME,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn list_runs_public_wire_json_is_frozen() {
+        let mut test = new_test_backend();
+        test.backend
+            .bootstrap()
+            .expect("bootstrap before listing public runs");
+        let launched = test
+            .backend
+            .launch_fixture()
+            .expect("launch known public run through bridge");
+        let runs: Vec<generated::renderer_public_run::Run> = test
+            .backend
+            .list_runs()
+            .expect("list public runs through bridge");
+        let run = runs
+            .into_iter()
+            .find(|run| run.id == launched.id)
+            .expect("list response contains launched public run");
+
+        assert_eq!(
+            serde_json::to_value(run).expect("serialize public list-runs result"),
+            serde_json::json!({
+                "id": launched.id,
+                "state": launched.state,
+                "diagnostics": {
+                    "project_id": DEFAULT_PROJECT_ID,
+                    "workstream_id": DEFAULT_WORKSTREAM_ID,
+                    "worker_pid": launched.diagnostics.worker_pid,
+                    "supervisor_pid": launched.diagnostics.supervisor_pid,
+                    "committed_offset": launched.diagnostics.committed_offset,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn launch_fixture_public_run_wire_json_is_frozen() {
+        let mut test = new_test_backend();
+        test.backend
+            .bootstrap()
+            .expect("bootstrap before launching public run");
+        let launched: Run = test
+            .backend
+            .launch_fixture()
+            .expect("launch public run through bridge");
+
+        assert_eq!(
+            serde_json::to_value(&launched).expect("serialize public launch result"),
+            serde_json::json!({
+                "id": launched.id,
+                "state": launched.state,
+                "diagnostics": {
+                    "project_id": DEFAULT_PROJECT_ID,
+                    "workstream_id": DEFAULT_WORKSTREAM_ID,
+                    "worker_pid": launched.diagnostics.worker_pid,
+                    "supervisor_pid": launched.diagnostics.supervisor_pid,
+                    "committed_offset": launched.diagnostics.committed_offset,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn get_run_public_run_wire_json_is_frozen() {
+        let mut test = new_test_backend();
+        test.backend
+            .bootstrap()
+            .expect("bootstrap before getting public run");
+        let launched = test
+            .backend
+            .launch_fixture()
+            .expect("launch known run through bridge");
+        let run: Run = test
+            .backend
+            .get_run(&launched.id)
+            .expect("get public run through bridge");
+
+        assert_eq!(
+            serde_json::to_value(&run).expect("serialize public get-run result"),
+            serde_json::json!({
+                "id": launched.id,
+                "state": launched.state,
+                "diagnostics": {
+                    "project_id": DEFAULT_PROJECT_ID,
+                    "workstream_id": DEFAULT_WORKSTREAM_ID,
+                    "worker_pid": launched.diagnostics.worker_pid,
+                    "supervisor_pid": launched.diagnostics.supervisor_pid,
+                    "committed_offset": launched.diagnostics.committed_offset,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn generated_event_requires_present_non_null_payload() {
+        for payload in [
+            serde_json::json!({"label": "object", "nested": [1, true]}),
+            serde_json::json!(["item", 2, false]),
+            serde_json::json!("text value"),
+            serde_json::json!(42.5),
+            serde_json::json!(true),
+        ] {
+            let public_json = serde_json::json!({
+                "seq": 1,
+                "type": "valid",
+                "payload": payload,
+            });
+            let event: generated::renderer_public_event::Event =
+                serde_json::from_value(public_json.clone())
+                    .expect("generated Event deserializes every valid non-null JSON payload kind");
+            assert_eq!(
+                serde_json::to_value(event).expect("serialize generated Event"),
+                public_json,
+            );
+        }
+
+        for malformed_json in [
+            serde_json::json!({"seq": 1, "type": "missing-payload"}),
+            serde_json::json!({"seq": 1, "type": "null-payload", "payload": null}),
+        ] {
+            assert!(
+                serde_json::from_value::<generated::renderer_public_event::Event>(
+                    malformed_json.clone()
+                )
+                .is_err(),
+                "generated Event must reject a missing or null payload: {malformed_json}",
+            );
+        }
+    }
+
+    #[test]
+    fn list_events_public_wire_json_preserves_arbitrary_payloads() {
+        let mut test = new_test_backend();
+        test.backend
+            .bootstrap()
+            .expect("bootstrap before listing public events");
+
+        let fixture_path = test.environment.root.join("event-payload-fixture.sh");
+        fs::write(
+            &fixture_path,
+            r#"#!/bin/sh
+cat > "$ANANKE_FW_TRANSCRIPT" <<'EOF'
+{"type":"object","payload":{"label":"object","nested":[1,true]}}
+{"type":"array","payload":["item",2,false]}
+{"type":"string","payload":"text value"}
+{"type":"number","payload":42.5}
+{"type":"boolean","payload":true}
+EOF
+"#,
+        )
+        .expect("write event payload fixture");
+        let mut permissions = fs::metadata(&fixture_path)
+            .expect("read event payload fixture metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&fixture_path, permissions)
+            .expect("make event payload fixture executable");
+
+        let run_id = format!("event-payload-{}", test_nonce());
+        let worker_path = fixture_path.to_string_lossy().into_owned();
+        let worker_args = Vec::new();
+        let worker_env = Vec::new();
+        let mut request = GoRequest::new("launch-run", &test.backend.token);
+        request.id = Some(&run_id);
+        request.project_id = Some(DEFAULT_PROJECT_ID);
+        request.workstream_id = Some(DEFAULT_WORKSTREAM_ID);
+        request.worker_path = Some(&worker_path);
+        request.worker_args = Some(&worker_args);
+        request.worker_env = Some(&worker_env);
+        let response = test
+            .backend
+            .request(request)
+            .expect("launch event payload fixture through bridge");
+        assert!(response.ok);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let events: Vec<generated::renderer_public_event::Event> = loop {
+            let events = test
+                .backend
+                .list_events(&run_id, 0)
+                .expect("list event payload fixture through bridge");
+            if events.len() == 5 {
+                break events;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "event payload fixture did not produce five events"
+            );
+            thread::sleep(Duration::from_millis(50));
+        };
+
+        assert_eq!(
+            serde_json::to_value(events).expect("serialize public list-events result"),
+            serde_json::json!([
+                {
+                    "seq": 1,
+                    "type": "object",
+                    "payload": {"label": "object", "nested": [1, true]},
+                },
+                {
+                    "seq": 2,
+                    "type": "array",
+                    "payload": ["item", 2, false],
+                },
+                {
+                    "seq": 3,
+                    "type": "string",
+                    "payload": "text value",
+                },
+                {
+                    "seq": 4,
+                    "type": "number",
+                    "payload": 42.5,
+                },
+                {
+                    "seq": 5,
+                    "type": "boolean",
+                    "payload": true,
+                },
+            ])
+        );
+    }
+
     struct TestBackend {
         backend: Backend,
         environment: TestEnvironment,
@@ -997,7 +1271,7 @@ mod tests {
         }
     }
 
-    fn wait_for_events(backend: &mut Backend, run_id: &str) -> Vec<EventDto> {
+    fn wait_for_events(backend: &mut Backend, run_id: &str) -> Vec<Event> {
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
             let events = backend
@@ -1011,7 +1285,7 @@ mod tests {
         panic!("run {run_id} did not produce canonical events");
     }
 
-    fn wait_for_state(backend: &mut Backend, run_id: &str, wanted: &str) -> RunDto {
+    fn wait_for_state(backend: &mut Backend, run_id: &str, wanted: &str) -> Run {
         let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline {
             let run = backend.get_run(run_id).expect("get run through bridge");
@@ -1055,7 +1329,12 @@ mod tests {
             "fixture supervisor socket must fit Darwin's Unix-domain socket limit"
         );
         let events = wait_for_events(&mut first.backend, &launched.id);
-        assert!(events.iter().all(|event| !event.payload.is_null()));
+        assert!(events.iter().all(|event| {
+            serde_json::to_value(event)
+                .expect("serialize generated Event")
+                .get("payload")
+                .is_some_and(|payload| !payload.is_null())
+        }));
         let cancellation = first
             .backend
             .cancel_run(&launched.id)

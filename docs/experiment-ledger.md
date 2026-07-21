@@ -317,3 +317,117 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 - Final B1 re-review (`artifacts/omp/gui-v0.1/b1-final-review-output.md`) returned `VERDICT: ACCEPT`; it verified the private `0700` runtime socket directory, auth/protocol-aware stale classification, safe Go socket removal, internal-only error detail, public Backend E2E, release-safe root, and nonterminal cancellation state.
 - Final verified evidence: Rust `cargo test` 9 passed; frontend state test/typecheck/Vite production build passed; Go store/supervisor/lifecycle packages passed; `CI=true npm run tauri:build` produced `Ananke.app` with all Go sidecars.
 - GUI v0.1 is accepted as a first macOS `.app` lifecycle proof. DMG generation remains deliberately outside this acceptance because the host's macOS 27 `hdiutil` command rejects Tauri's current create-dmg invocation; this is a packaging compatibility follow-up, not a runtime authority workaround.
+
+### 2026-07-21 — P0b renderer-public bootstrap code generation
+
+#### Evidence
+
+- Canonical schema: `gui/contracts/renderer-public-bootstrap.schema.json` (33 LOC). Deterministic Node generator: `gui/scripts/generate-renderer-public.mjs` (151 LOC). It requires Node 22, runs the GUI-local pinned Quicktype executable with telemetry disabled, and supports generation, byte-for-byte content drift checking, and generated-public privacy checking.
+- Toolchain observed: Node `v22.22.3`, Quicktype `26.0.0`, Cargo `1.97.1`. Quicktype produced three Rust/TypeScript generated artifacts totaling 62 LOC: `renderer_public_bootstrap.rs` (40), `mod.rs` (3), and `renderer-public-bootstrap.ts` (19).
+- TDD RED: after the required `PATH=/Users/yingliangzhang/.hermes/node/bin:$PATH npm run build:go` sidecar prerequisite, `cargo test bootstrap_public_wire_json_is_frozen --lib` exited 101 with `E0433: cannot find module or crate generated`. The test was added before generated integration.
+- TDD GREEN: the same focused command passed after integration (`1 passed`, `9 filtered`, `0.40s`). It serializes the real bridge bootstrap result and compares the full public project/workstream JSON object, including `project.root` and `workstream.project_id`.
+- Content-drift proof: a temporary comment injected into generated Rust made `PATH=/Users/yingliangzhang/.hermes/node/bin:$PATH npm run check:renderer-public` exit 1 with `Generated renderer-public models drifted`; regeneration restored the artifact, then the check passed. `npm run check:renderer-public-privacy` passed and reported no generated `token` or `error` fields.
+- Final checks passed: focused Rust test; `cargo fmt -- --check`; `npm --prefix gui run check:renderer-public`; `npm --prefix gui run check:renderer-public-privacy`; `npm --prefix gui run typecheck`; and `npm --prefix gui run web:build` (Vite `7.3.6`, 7 modules, 54 ms).
+- `git diff --check` passed. Production-path validation listed only the approved P0b GUI paths: package manifest/lockfile, canonical schema, generator, generated Rust/TypeScript sources, `src-tauri/src/lib.rs`, and `src/main.ts`.
+- Independent hard review returned **ACCEPT** after re-running the focused bridge
+  test, generator/check/privacy commands, TypeScript typecheck/web build, and
+  scope audit. It verified no daemon transport, private/internal DTO, or
+  `JsonRun -> RunDto` behavior changed.
+
+#### Limitations
+
+- This proof changes only the renderer-public Tauri bootstrap model and its TypeScript consumer. Go transport, credential-bearing/internal daemon types, `JsonRun -> RunDto`, run/event/cancel/health behavior, and all other semantic adapters remain unchanged.
+
+#### Decision
+
+- P0b bootstrap generation and integration are independently accepted in this
+  worktree. No commit or push was performed.
+
+### 2026-07-21 — P0b.1 renderer-public Run code generation
+
+#### Evidence
+
+- TDD RED: `PATH=/Users/yingliangzhang/.hermes/node/bin:$PATH cargo test list_runs_public_wire_json_is_frozen --lib` exited 101 before Run integration with `E0433: cannot find renderer_public_run in generated` at the new public list-runs wire test.
+- The canonical `gui/contracts/renderer-public-run.schema.json` generated `Run`/`RunDiagnostics` Rust and TypeScript models. The handwritten `JsonRun -> Run` adapter preserves the nested diagnostics projection only for `list_runs`; launch and get-run retain `RunDto`.
+- TDD GREEN: `PATH=/Users/yingliangzhang/.hermes/node/bin:$PATH npm --prefix gui run build:go && cargo test list_runs_public_wire_json_is_frozen --lib --manifest-path gui/src-tauri/Cargo.toml` passed (`1 passed`, `10 filtered`, `0.45s`). A post-format rerun of the focused Cargo command also passed (`1 passed`, `10 filtered`, `0.65s`). The test launches a real fixture through the bridge, lists it, and asserts exact nested diagnostics JSON including both PIDs and `committed_offset`.
+- Content-drift proof: after inserting `// Controlled drift proof.` in generated `renderer_public_run.rs`, `PATH=/Users/yingliangzhang/.hermes/node/bin:$PATH npm --prefix gui run check:renderer-public` exited 1 and named that Run file. Regeneration restored it; the generator content check then passed. The all-target public-field privacy check passed and reported no generated `token` or `error` fields.
+- Final validation passed: `cargo fmt --manifest-path gui/src-tauri/Cargo.toml`; renderer-public content and privacy checks; `npm --prefix gui run typecheck`; and `npm --prefix gui run web:build` (Vite `7.3.6`, 7 modules, 70 ms).
+- Scope evidence: `git diff --check` exited 0. `git status --short` listed only the accepted P0b/P0b.1 GUI paths plus `docs/` and `artifacts/omp/p0b*` paths; no path outside the allowed GUI/docs/artifact scope appeared.
+- Independent hard review returned **ACCEPT**. It independently verified the
+  live bridge list-runs fixture path, exact nested diagnostics, all generated
+  target drift/privacy coverage, and zero daemon/internal/non-list-runs scope
+  changes.
+
+#### Limitations
+
+- No Go daemon transport, Go structs, bootstrap behavior, or non-`list_runs` Tauri command was changed. No commit or push was performed.
+
+### 2026-07-21 — P0b.2 renderer-public Event code generation
+
+#### Evidence
+
+- TDD RED: after `PATH=/Users/yingliangzhang/.hermes/node/bin:$PATH npm --prefix gui run build:go`, `PATH=/Users/yingliangzhang/.hermes/node/bin:$PATH cargo test list_events_public_wire_json_preserves_arbitrary_payloads --lib --manifest-path gui/src-tauri/Cargo.toml` exited `101` before Event integration with `E0433: could not find renderer_public_event in generated`.
+- `gui/contracts/renderer-public-event.schema.json` generated public Rust `Event` and TypeScript `Event` models. The generator now covers the Event Rust/TypeScript targets and generated Rust module in its content-drift inventory; its public-field privacy scan covers Event with every other renderer-public target.
+- The real bridge test creates an executable NDJSON fixture, launches it through the real daemon bridge, calls `list_events`, and compares the exact serialized public result. It proves `seq`, wire key `type`, and object, array, string, number (`42.5`), and boolean payloads.
+- TDD GREEN: the same focused bridge command passed after integration (`1 passed`, `11 filtered`, `1.44s`). After `cargo fmt --manifest-path gui/src-tauri/Cargo.toml`, the focused test passed again (`1 passed`, `11 filtered`, `1.43s`).
+- Content-drift proof: inserting `// Controlled Event drift proof.` into generated `renderer_public_event.rs` made `PATH=/Users/yingliangzhang/.hermes/node/bin:$PATH npm --prefix gui run check:renderer-public` exit `1` and name that Event artifact. Regeneration restored it; the content check then passed. `npm --prefix gui run check:renderer-public-privacy` passed and reported no generated `token` or `error` fields.
+- Final frontend checks passed with Node `v22.22.3`: `npm --prefix gui run typecheck`; `npm --prefix gui run web:build` (Vite `7.3.6`, 7 modules, 52 ms).
+- `git diff --check` passed with no output. The combined P0b/P0b.1/P0b.2 whitelist passed for all 32 changed worktree paths; no path fell outside the exact approved set.
+
+#### Formatter-stability repair
+
+- Correction: the earlier P0b.2 evidence established generator and formatter checks separately, but did not establish compatibility after a formatting write. `rustModuleSource` expected `bootstrap`/`run`/`event`, while rustfmt canonicalizes declarations as `bootstrap`/`event`/`run`; that made a formatted generated `mod.rs` fail content-drift checking.
+- The generator now emits rustfmt's canonical module order, and `npm --prefix gui run generate:renderer-public` regenerated `gui/src-tauri/src/generated/mod.rs`.
+- Order-independence verification passed in both required sequences: `npm --prefix gui run check:renderer-public && cargo fmt --manifest-path gui/src-tauri/Cargo.toml -- --check`, then `cargo fmt --manifest-path gui/src-tauri/Cargo.toml -- --check && npm --prefix gui run check:renderer-public`. Each content check reported `Renderer-public generated models match the canonical schema`; both formatter checks exited 0 with no output.
+- Rerun evidence: after `npm --prefix gui run build:go`, `cargo test list_events_public_wire_json_preserves_arbitrary_payloads --lib --manifest-path gui/src-tauri/Cargo.toml` passed (`1 passed`, `11 filtered`, `1.42s`). The all-target privacy scan passed; `npm --prefix gui run typecheck` and `npm --prefix gui run web:build` passed (Vite `7.3.6`, seven modules, `56ms`).
+- Final diff/scope guard: `git diff --check` exited 0 with no output. `git status --short --untracked-files=all` reported five modified and 29 untracked paths, all within the combined P0b GUI renderer-public, `docs/`, or `artifacts/omp/p0b*` scope. No commit or push was performed.
+
+#### Limitations
+
+- The fixture verifies the contract's five non-null payload kinds only. The lifecycle transport rejects null payloads upstream; no null public-event fixture is claimed.
+- Numeric fidelity is proven only for the frozen `42.5` fixture; arbitrary-precision numeric fidelity remains outside this P0b.2 proof.
+- No Go daemon event wire struct, daemon transport, token behavior, Run/bootstrap/cancel/health/launch/get command, or non-list-events adapter was changed. No commit or push was performed.
+
+### 2026-07-21 — P0b.2 non-null Event payload repair
+
+#### Evidence
+
+- Correction: the prior canonical Event schema gave `payload` only a description, so it admitted `null`; Quicktype consequently generated Rust `Option<serde_json::Value>` and TypeScript `unknown`.
+- TDD RED: `cargo test generated_event_requires_present_non_null_payload --lib --manifest-path gui/src-tauri/Cargo.toml` exited `101` before the schema repair. The new generated-wire regression failed because `{"seq":1,"type":"missing-payload"}` deserialized through the nullable Event model.
+- Canonical `payload.type` is now exactly `["object", "array", "string", "number", "boolean"]`, with `payload` still required. Regeneration produced Rust `Event { payload: Payload, ... }`, not `Option<_>`, and the TypeScript union `unknown[] | boolean | number | { [key: string]: unknown } | string`; the TypeScript field is required and its top-level union excludes `null` and `undefined`.
+- TDD GREEN: the same generated-wire regression passed (`1 passed`, `12 filtered`). It directly deserializes and exactly reserializes object, array, string, number (`42.5`), and boolean Event payloads. It observes deserialization failure for both missing and explicit `null` payloads, so neither malformed wire form can produce an Event to serialize.
+- Real bridge proof: after `npm --prefix gui run build:go`, `cargo test list_events_public_wire_json_preserves_arbitrary_payloads --lib --manifest-path gui/src-tauri/Cargo.toml` passed (`1 passed`, `12 filtered`, `1.43s`). The executable NDJSON fixture still proves exact serialized `seq`, wire `type`, and all five accepted payload kinds through `list_events`.
+- Formatter/generator order-independence passed after a formatting write in both sequences: `check:renderer-public` then `cargo fmt -- --check`, and `cargo fmt -- --check` then `check:renderer-public`. Each content check reported canonical-schema agreement; each formatter check exited `0`.
+- Controlled drift proof: injecting `// Controlled Event drift proof.` into generated `renderer_public_event.rs` made `npm --prefix gui run check:renderer-public` exit `1` and name that artifact. Regeneration restored it. Final `check:renderer-public`, `check:renderer-public-privacy`, focused regression, focused bridge fixture, `typecheck`, and `web:build` all passed; Vite `7.3.6` built seven modules in `68ms`.
+
+#### Exact generator limitations
+
+- Quicktype represents the required top-level union in Rust as untagged `Payload`, not as `serde_json::Value`. Its array and object variants contain `Option<serde_json::Value>` only for nested values, where JSON `null` remains permitted; `Event.payload` itself is non-optional and has no null variant.
+- Quicktype maps a top-level JSON number to `Payload::Double(f64)`. This repair proves the frozen `42.5` value only; arbitrary-precision numeric fidelity remains unproven.
+- The generated TypeScript union enforces the top-level distinction statically. Its array elements and object properties are `unknown`, intentionally leaving nested arbitrary JSON unconstrained; it supplies no runtime JSON Schema validation.
+
+#### Terminal verdict
+
+- **PASS:** the canonical P0b.2 Event payload contract now requires a present, non-null top-level value of exactly one of the five permitted JSON kinds. No handwritten TypeScript alias, schema weakening, commit, or push was used.
+- Focused independent hard re-review returned **ACCEPT**. It verified non-null
+  schema/model behavior, missing/null rejection, all five live bridge payload
+  kinds, formatter/generator order stability, and list-events-only scope.
+
+### 2026-07-22 — P0b.3 generated Run command reuse
+
+#### Evidence
+
+- TDD RED: `cargo test public_run_wire_json_is_frozen --lib --manifest-path gui/src-tauri/Cargo.toml` exited `101` before integration. Both new real-bridge tests failed with `E0308`, requiring generated `Run` while `Backend::launch_fixture` and `Backend::get_run` still returned handwritten `RunDto`.
+- Added `launch_fixture_public_run_wire_json_is_frozen` and `get_run_public_run_wire_json_is_frozen`. Each bootstraps the real test backend and exercises the fixture launch/get path; each compares its serialized result to the complete public object, including the nested `diagnostics` project/workstream IDs, both PIDs, and `committed_offset`.
+- The two launch/get backend results and their Tauri command results now return generated `Run`, using the existing explicit `JsonRun -> Run` adapter. `main.ts` already imported the generated `Run`; no renderer type edit was needed.
+- TDD GREEN: after `PATH=/Users/yingliangzhang/.hermes/node/bin:$PATH npm --prefix gui run build:go`, `cargo test public_run_wire_json_is_frozen --lib --manifest-path gui/src-tauri/Cargo.toml` passed (`2 passed`, `13 filtered`, `1.57s`). After `cargo fmt --manifest-path gui/src-tauri/Cargo.toml`, the focused tests passed again (`2 passed`, `13 filtered`, `0.40s`).
+- Generator validation used Node `v22.22.3`: `npm --prefix gui run check:renderer-public` reported canonical-schema agreement, and `npm --prefix gui run check:renderer-public-privacy` reported no generated `token` or `error` fields.
+- `npm --prefix gui run typecheck` and `npm --prefix gui run web:build` passed. Vite `7.3.6` built seven modules in `51ms`.
+- `git diff --check` passed. The combined accepted P0b/P0b.1/P0b.2/P0b.3 scope guard accepted all `41` changed worktree paths and found none outside the P0b documentation/artifacts or approved GUI renderer-public paths.
+- Focused independent hard review returned **ACCEPT**: both daemon-backed tests
+  compile-require generated Run, assert complete nested wire JSON, and scope is
+  limited to launch/get public return conversions.
+
+#### Terminal verdict
+
+- **PASS:** only launch/get public results now reuse generated `Run`; no schema/generator, daemon transport, events/list-runs/bootstrap/cancel/health behavior, or private wire type was changed. No commit or push was performed.

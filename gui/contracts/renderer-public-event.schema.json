@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ananke.local/contracts/renderer-public-event.schema.json",
+  "title": "Event",
+  "description": "Public result of the Tauri list_events command.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["seq", "type", "payload"],
+  "properties": {
+    "seq": { "type": "integer" },
+    "type": { "type": "string" },
+    "payload": {
+      "type": ["object", "array", "string", "number", "boolean"],
+      "description": "Arbitrary non-null JSON payload from the daemon event stream."
+    }
+  }
+}

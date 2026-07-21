@@ -1,10 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { Bootstrap } from "./generated/renderer-public-bootstrap";
+import type { Run } from "./generated/renderer-public-run";
+import type { Event } from "./generated/renderer-public-event";
 import { isActiveRunState } from "./run-state";
 import "./styles.css";
 
-type Run = { id:string; state:string; diagnostics:{ project_id:string; workstream_id:string; worker_pid:number; supervisor_pid:number; committed_offset:number } };
-type Event = { seq:number; type:string; payload:unknown };
-type Bootstrap = { project:{id:string;name:string}; workstream:{id:string;name:string} };
 let boot: Bootstrap | null = null, runs: Run[] = [], selected = "", events: Event[] = [], tab = "activity", error = "", online = false;
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const glyph = (s:string) => ({running:"●",cancelling:"◌",cleanup_required:"!",failed:"×",cancelled:"−",completed:"✓"}[s] ?? "·");

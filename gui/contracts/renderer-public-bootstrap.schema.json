@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ananke.local/contracts/renderer-public-bootstrap.schema.json",
+  "title": "Bootstrap",
+  "description": "Public result of the Tauri bootstrap command.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["project", "workstream"],
+  "properties": {
+    "project": {
+      "title": "Project",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "root"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "root": { "type": "string" }
+      }
+    },
+    "workstream": {
+      "title": "Workstream",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "project_id", "name"],
+      "properties": {
+        "id": { "type": "string" },
+        "project_id": { "type": "string" },
+        "name": { "type": "string" }
+      }
+    }
+  }
+}

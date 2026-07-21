@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ananke.local/contracts/renderer-public-run.schema.json",
+  "title": "Run",
+  "description": "Public result of the Tauri list_runs command.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "state", "diagnostics"],
+  "properties": {
+    "id": { "type": "string" },
+    "state": { "type": "string" },
+    "diagnostics": {
+      "title": "RunDiagnostics",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project_id",
+        "workstream_id",
+        "worker_pid",
+        "supervisor_pid",
+        "committed_offset"
+      ],
+      "properties": {
+        "project_id": { "type": "string" },
+        "workstream_id": { "type": "string" },
+        "worker_pid": { "type": "integer" },
+        "supervisor_pid": { "type": "integer" },
+        "committed_offset": { "type": "integer" }
+      }
+    }
+  }
+}
