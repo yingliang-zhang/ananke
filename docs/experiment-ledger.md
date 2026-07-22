@@ -554,3 +554,79 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 - **PASS:** the P1a contract/fixture-only verifier closes the focused rereview
   findings. No storage, GUI/IPC, claims, workers, adapters, runtime code,
   commit, or push was changed.
+
+### 2026-07-22 — P1b durable Task Proposal store
+
+#### Evidence
+
+- **TDD RED:** `TestP1ACanonicalHashesMatchFixtures` first failed to build because `canonicalJSONHash` did not exist. Create, append, decision, and withdrawal focused tests then each first failed to build on their absent store API. `TestCreateProposalAcceptsCanonicalUTF8ControlText` then failed because valid UTF-8 control text was rejected; validation was narrowed to the frozen P1a 1–N UTF-8 byte limits.
+- **GREEN:** migration v7 now stores immutable canonical revision snapshots and hashes, Proposal current pointers, one-to-one lifecycle/Approval pairs, append-only activity, and durable idempotency response identities. `CreateProposal`, `AppendProposalRevision`, `DecideProposalApproval`, and `WithdrawProposal` look up the operation-scope idempotency tuple before mutable state reads. Conflict paths roll back without durable mutation; rejected predecessors remain rejected on append and withdrawal.
+- Fixture-derived tests prove the frozen Revision hash and all four request body hashes. They cover v6-to-head migration, restart replay after later state changes, same-key conflict, stale-base and competing-decision no-partial-write outcomes, pending append supersession, rejected-predecessor append, rejected withdrawal, and barrier-synchronized append/decision/replay races.
+- The first full store run exposed a hard-coded v6 head assertion in `TestSchemaVersionMigrationFromV5DefaultsTranscriptIdentityUnknown`; it now asserts the migration-list head. The final commands observed after that repair were: `go test ./internal/store -count=1` and `go test -race ./internal/store -count=1`, both exited `0`. `gofmt` completed on every touched Go file with no remaining diff. `node contracts/p1a/verify.mjs` printed `P1a proposal contract fixtures verified.` and its self-test passed.
+
+#### Scope
+
+- P1b changes only SQLite storage and `internal/store` tests. No GUI/IPC, Grill or policy evaluation, claims, workers, adapters, process launch, commit, or push was added or run.
+
+#### Terminal verdict
+
+- **PASS:** the durable P1b Task Proposal store meets the frozen P1a persistence boundary under focused, full-package, and race verification. Independent review should inspect canonical-JCS edge cases beyond the frozen fixture corpus.
+
+### 2026-07-22 — P1b independent-review blocker repair
+
+#### TDD RED
+
+- `go test ./internal/store -run 'TestCrossStoreProposalMutationsPreserveP1ASemantics|TestProposalIdentityForeignKeysRejectCrossLinks' -count=1` initially exited `1`. Two independent `Open` handles returned `database is locked (5) (SQLITE_BUSY)` for same-key create, same-base append, competing decisions, and append-versus-rejection. The raw-SQL adversarial updates/inserts also succeeded, proving v7 did not bind lifecycle hashes, approvals, proposal pointers, activity, or idempotency response identities to their own revision tuple.
+- `TestProposalReadsRejectCrossLinkedRowsWhenForeignKeysWereDisabled` initially exited `1`: `GetRevisionLifecycle`, `GetApproval`, `GetProposal`, `ListProposalActivity`, and durable create replay accepted deliberately cross-linked rows.
+
+#### GREEN
+
+- SQLite connections now use `_txlock=immediate`, so the mutation transactions serialize across independent handles. Real two-`Open`-handle barrier tests return only P1a outcomes: same-key/same-body create returns the winner identity twice; same-base append returns one success plus `revision_conflict`; competing decision returns one success plus `approval_conflict`; and append-versus-rejection reaches one of its two frozen allowed linearizations. Exact journal row-count assertions prove zero partial records.
+- Fresh v7 schema creation and the v8 in-place rebuild bind Proposal current pointers to `(proposal_id, revision, revision_hash)` and bind approvals, lifecycles, activity, and idempotency response identities to their complete revision/lifecycle tuple with composite deferred foreign keys. `TestProposalV7DataUpgradesToCompositeIdentityForeignKeys` preserves an existing proposal across the v7-to-v8 rebuild, rejects a cross-linked pointer, passes `PRAGMA foreign_key_check`, and proves the three reviewed redundant v7 indexes are absent.
+- Adversarial raw-SQL tests now reject mismatched lifecycle hashes, approval hashes, lifecycle approvals, proposal pointers, activity identities, and idempotency identities. Read and replay paths additionally validate current revision, lifecycle, approval, activity, and idempotency identities, returning `ErrProposalRecordCorrupt` for rows written while foreign keys were disabled.
+
+#### Verification
+
+- Focused regression command passed: `go test ./internal/store -run 'TestCrossStoreProposalMutationsPreserveP1ASemantics|TestProposalIdentityForeignKeysRejectCrossLinks|TestProposalReadsRejectCrossLinkedRowsWhenForeignKeysWereDisabled|TestProposalV7DataUpgradesToCompositeIdentityForeignKeys' -count=1 -timeout=90s`.
+- Full store verification passed: `go test ./internal/store -count=1 -timeout=180s`.
+- Race verification passed: `go test -race ./internal/store -count=1 -timeout=180s`.
+- `node contracts/p1a/verify.mjs` printed `P1a proposal contract fixtures verified.` Its self-test also passed and reported rejection of fixture drift, private fields, Unicode surrogates, request-hash conflation, rehashed timestamp/envelope tampering, and missing vectors.
+
+#### Terminal verdict
+
+- **PASS:** the P1b review blockers are repaired in `internal/store`; no GUI, IPC, P2, P3, commit, or push scope was used.
+
+### 2026-07-22 — P1b focused re-review repair
+
+#### TDD RED
+
+- `go test ./internal/store -run 'TestProposalV7DataUpgradesToCompositeIdentityForeignKeys|TestProposalIdentityForeignKeysRejectCrossLinks|TestProposalReadsRejectCrossLinkedRowsWhenForeignKeysWereDisabled' -count=1` exited `1` before the repair. The historical-fixture assertion observed schema version `8` instead of `9`; an orphan Approval insert returned no error; and `GetApproval` returned no error after an FK-disabled lifecycle reassignment.
+
+#### GREEN
+
+- The same focused command passed after adding migration v9 and the Approval lifecycle-pair validation.
+
+#### Verification
+
+- `go test ./internal/store -count=1 -timeout=180s` passed.
+- `go test -race ./internal/store -count=1 -timeout=180s` passed.
+- `node contracts/p1a/verify.mjs` printed `P1a proposal contract fixtures verified.`
+- `node contracts/p1a/verify.mjs --self-test` reported rejection of drift, private fields, unpaired Unicode surrogates, request-hash conflation, rehashed timestamp and envelope-identity tampering, and missing vectors.
+
+### 2026-07-22 — P1b migration-history integrity repair
+
+#### TDD RED
+
+- `go test ./internal/store -run '^TestProposalV7DataUpgradesToCompositeIdentityForeignKeys$' -count=1` exited `1`: applying `migrations[:7]` produced the v8 full lifecycle identity foreign key on `task_proposal_idempotency`, where the v7 expectation is its partial `(proposal_id, revision)` foreign key to `task_proposal_revisions`.
+
+#### GREEN
+
+- `migrateV7` now calls `createTaskProposalSchemaV7`; `migrateV8` calls `createTaskProposalSchemaV8`; `migrateV9` retains `createTaskProposalSchemaV9`.
+- `TestProposalV7DataUpgradesToCompositeIdentityForeignKeys` now applies `migrations[:7]`, asserts the historical v7 foreign-key targets, seeds a valid v7 chain, and opens that database through v8 and v9. It replays the create request, checks the v8 and v9 version records, rejects an orphan Approval, and passes `PRAGMA foreign_key_check`.
+
+#### Verification
+
+- `go test ./internal/store -run '^(TestSchemaVersionMigrationFromV1Fixture|TestSchemaVersionMigrationFromV2AddsOutboxDiagnostic|TestOpenRejectsInvalidSchemaVersionHistory|TestOpenMigratesValidOldSchemaHistoryToHead|TestProposalSchemaMigrationFromV6Fixture|TestProposalV7DataUpgradesToCompositeIdentityForeignKeys)$' -count=1 -timeout=90s` passed.
+- `go test ./internal/store -count=1 -timeout=180s` passed.
+- `go test -race ./internal/store -count=1 -timeout=180s` passed.
+- `node contracts/p1a/verify.mjs` printed `P1a proposal contract fixtures verified.`

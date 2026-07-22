@@ -67,8 +67,8 @@ func TestSchemaVersionMigrationFromV5DefaultsTranscriptIdentityUnknown(t *testin
 	if err != nil {
 		t.Fatalf("SchemaVersion: %v", err)
 	}
-	if version != 6 {
-		t.Fatalf("SchemaVersion = %d, want 6", version)
+	if version != len(migrations) {
+		t.Fatalf("SchemaVersion = %d, want %d", version, len(migrations))
 	}
 	run, err := s.GetRun(ctx, "r")
 	if err != nil {

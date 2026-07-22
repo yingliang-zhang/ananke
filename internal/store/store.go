@@ -28,8 +28,8 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	// A single writer connection serializes all mutations; readers share.
-	// SQLite handles concurrency best under a small, bounded pool.
+	// Each handle uses one connection; `_txlock=immediate` in sqliteDSN
+	// serializes write transactions across every handle and process.
 	db.SetMaxOpenConns(1)
 	s := &Store{db: db}
 	if err := s.migrate(context.Background()); err != nil {
@@ -45,7 +45,7 @@ func Open(path string) (*Store, error) {
 // durability configuration as production.
 func sqliteDSN(path string) string {
 	return fmt.Sprintf(
-		"file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)",
+		"file:%s?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)",
 		path,
 	)
 }
@@ -82,7 +82,9 @@ type migration struct {
 // migrations is the ordered, immutable list of schema upgrades. v1 establishes
 // the base journal; v2 adds supervisor identity; v3 adds outbox diagnostics;
 // v4 adds the durable transcript-finalization handoff; v5 adds durable
-// cancellation intent; v6 adds durable transcript file identity.
+// cancellation intent; v6 adds durable transcript file identity; v7 adds the
+// P1b durable task-proposal journal; v8 repairs v7 identity constraints; and
+// v9 makes the Approval and RevisionLifecycle pair reciprocal.
 var migrations = []migration{
 	{version: 1, up: migrateV1},
 	{version: 2, up: migrateV2},
@@ -90,6 +92,9 @@ var migrations = []migration{
 	{version: 4, up: migrateV4},
 	{version: 5, up: migrateV5},
 	{version: 6, up: migrateV6},
+	{version: 7, up: migrateV7},
+	{version: 8, up: migrateV8},
+	{version: 9, up: migrateV9},
 }
 
 // SchemaVersion reports the highest applied migration version.
@@ -308,6 +313,413 @@ func migrateV6(_ context.Context, tx *sql.Tx) error {
 	statements := []string{
 		`ALTER TABLE runs ADD COLUMN transcript_device INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE runs ADD COLUMN transcript_inode INTEGER NOT NULL DEFAULT 0`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func migrateV7(ctx context.Context, tx *sql.Tx) error {
+	return createTaskProposalSchemaV7(ctx, tx)
+}
+
+// migrateV8 rebuilds the original v7 task-proposal tables so databases created
+// before the identity fix receive the same composite foreign-key guarantees as
+// new databases.
+func migrateV8(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys = ON`); err != nil {
+		return fmt.Errorf("defer proposal foreign keys: %w", err)
+	}
+	legacyTables := []string{
+		"task_proposal_idempotency",
+		"task_proposal_activity",
+		"task_proposal_revision_lifecycles",
+		"task_proposal_approvals",
+		"task_proposal_revisions",
+		"task_proposals",
+	}
+	for _, table := range legacyTables {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s RENAME TO %s_v7`, table, table)); err != nil {
+			return fmt.Errorf("rename legacy %s: %w", table, err)
+		}
+	}
+	if err := createTaskProposalSchemaV8(ctx, tx); err != nil {
+		return err
+	}
+	for _, copy := range []struct {
+		table   string
+		columns string
+	}{
+		{"task_proposals", "proposal_id, project_id, workstream_id, created_at, created_by, state, current_revision, current_revision_hash"},
+		{"task_proposal_revisions", "proposal_id, revision, revision_hash, snapshot_json"},
+		{"task_proposal_approvals", "approval_id, proposal_id, revision, revision_hash, created_at, created_by, state, decided_at, decided_by, decision_idempotency_key, reason"},
+		{"task_proposal_revision_lifecycles", "proposal_id, revision, revision_hash, approval_id, state, created_at, updated_at, version"},
+		{"task_proposal_activity", "proposal_id, sequence, operation, revision, revision_hash, approval_id, written_at"},
+		{"task_proposal_idempotency", "actor, operation, resource, idempotency_key, request_body_hash, proposal_id, revision, revision_hash, approval_id"},
+	} {
+		statement := fmt.Sprintf(`INSERT INTO %s (%s) SELECT %s FROM %s_v7`, copy.table, copy.columns, copy.columns, copy.table)
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("copy legacy %s: %w", copy.table, err)
+		}
+	}
+	for _, table := range legacyTables {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DROP TABLE %s_v7`, table)); err != nil {
+			return fmt.Errorf("drop legacy %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
+// migrateV9 rebuilds the v8 task-proposal tables so each Approval must name
+// its one RevisionLifecycle pair. The reciprocal foreign key is deferred
+// because a mutation creates the Approval and its lifecycle atomically.
+func migrateV9(ctx context.Context, tx *sql.Tx) error {
+	return rebuildTaskProposalTables(ctx, tx, "v8", createTaskProposalSchemaV9)
+}
+
+func rebuildTaskProposalTables(ctx context.Context, tx *sql.Tx, suffix string, createSchema func(context.Context, *sql.Tx) error) error {
+	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys = ON`); err != nil {
+		return fmt.Errorf("defer proposal foreign keys: %w", err)
+	}
+	legacyTables := []string{
+		"task_proposal_idempotency",
+		"task_proposal_activity",
+		"task_proposal_revision_lifecycles",
+		"task_proposal_approvals",
+		"task_proposal_revisions",
+		"task_proposals",
+	}
+	for _, table := range legacyTables {
+		legacyTable := fmt.Sprintf("%s_%s", table, suffix)
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s RENAME TO %s`, table, legacyTable)); err != nil {
+			return fmt.Errorf("rename legacy %s: %w", table, err)
+		}
+	}
+	if err := createSchema(ctx, tx); err != nil {
+		return err
+	}
+	for _, copy := range []struct {
+		table   string
+		columns string
+	}{
+		{"task_proposals", "proposal_id, project_id, workstream_id, created_at, created_by, state, current_revision, current_revision_hash"},
+		{"task_proposal_revisions", "proposal_id, revision, revision_hash, snapshot_json"},
+		{"task_proposal_approvals", "approval_id, proposal_id, revision, revision_hash, created_at, created_by, state, decided_at, decided_by, decision_idempotency_key, reason"},
+		{"task_proposal_revision_lifecycles", "proposal_id, revision, revision_hash, approval_id, state, created_at, updated_at, version"},
+		{"task_proposal_activity", "proposal_id, sequence, operation, revision, revision_hash, approval_id, written_at"},
+		{"task_proposal_idempotency", "actor, operation, resource, idempotency_key, request_body_hash, proposal_id, revision, revision_hash, approval_id"},
+	} {
+		legacyTable := fmt.Sprintf("%s_%s", copy.table, suffix)
+		statement := fmt.Sprintf(`INSERT INTO %s (%s) SELECT %s FROM %s`, copy.table, copy.columns, copy.columns, legacyTable)
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("copy legacy %s: %w", copy.table, err)
+		}
+	}
+	for _, table := range legacyTables {
+		legacyTable := fmt.Sprintf("%s_%s", table, suffix)
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DROP TABLE %s`, legacyTable)); err != nil {
+			return fmt.Errorf("drop legacy %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
+// createTaskProposalSchemaV7 preserves the released v7 proposal DDL. Later
+// migrations must rebuild this shape rather than revise it in place.
+func createTaskProposalSchemaV7(ctx context.Context, tx *sql.Tx) error {
+	statements := []string{
+		`CREATE TABLE task_proposals (
+			proposal_id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL,
+			workstream_id TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			created_by TEXT NOT NULL CHECK (created_by = 'local_gui_operator'),
+			state TEXT NOT NULL CHECK (state IN ('open', 'approved', 'withdrawn')),
+			current_revision INTEGER NOT NULL CHECK (current_revision > 0),
+			current_revision_hash TEXT NOT NULL
+		)`,
+		`CREATE TABLE task_proposal_revisions (
+			proposal_id TEXT NOT NULL,
+			revision INTEGER NOT NULL CHECK (revision > 0),
+			revision_hash TEXT NOT NULL UNIQUE,
+			snapshot_json TEXT NOT NULL,
+			PRIMARY KEY (proposal_id, revision),
+			FOREIGN KEY (proposal_id) REFERENCES task_proposals(proposal_id)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE task_proposal_approvals (
+			approval_id TEXT PRIMARY KEY,
+			proposal_id TEXT NOT NULL,
+			revision INTEGER NOT NULL CHECK (revision > 0),
+			revision_hash TEXT NOT NULL UNIQUE,
+			created_at TEXT NOT NULL,
+			created_by TEXT NOT NULL CHECK (created_by = 'local_gui_operator'),
+			state TEXT NOT NULL CHECK (state IN ('pending', 'approved', 'rejected', 'superseded', 'withdrawn')),
+			decided_at TEXT,
+			decided_by TEXT,
+			decision_idempotency_key TEXT,
+			reason TEXT,
+			UNIQUE (proposal_id, revision),
+			FOREIGN KEY (proposal_id, revision)
+				REFERENCES task_proposal_revisions(proposal_id, revision)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE task_proposal_revision_lifecycles (
+			proposal_id TEXT NOT NULL,
+			revision INTEGER NOT NULL CHECK (revision > 0),
+			revision_hash TEXT NOT NULL UNIQUE,
+			approval_id TEXT NOT NULL UNIQUE,
+			state TEXT NOT NULL CHECK (state IN ('pending', 'approved', 'rejected', 'superseded', 'withdrawn')),
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			version INTEGER NOT NULL CHECK (version > 0),
+			PRIMARY KEY (proposal_id, revision),
+			FOREIGN KEY (proposal_id, revision)
+				REFERENCES task_proposal_revisions(proposal_id, revision)
+				DEFERRABLE INITIALLY DEFERRED,
+			FOREIGN KEY (approval_id) REFERENCES task_proposal_approvals(approval_id)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE task_proposal_activity (
+			proposal_id TEXT NOT NULL,
+			sequence INTEGER NOT NULL CHECK (sequence > 0),
+			operation TEXT NOT NULL,
+			revision INTEGER NOT NULL CHECK (revision > 0),
+			revision_hash TEXT NOT NULL,
+			approval_id TEXT NOT NULL,
+			written_at TEXT NOT NULL,
+			PRIMARY KEY (proposal_id, sequence),
+			FOREIGN KEY (proposal_id, revision)
+				REFERENCES task_proposal_revisions(proposal_id, revision)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE task_proposal_idempotency (
+			actor TEXT NOT NULL CHECK (actor = 'local_gui_operator'),
+			operation TEXT NOT NULL,
+			resource TEXT NOT NULL,
+			idempotency_key TEXT NOT NULL,
+			request_body_hash TEXT NOT NULL,
+			proposal_id TEXT NOT NULL,
+			revision INTEGER NOT NULL CHECK (revision > 0),
+			revision_hash TEXT NOT NULL,
+			approval_id TEXT NOT NULL,
+			PRIMARY KEY (actor, operation, resource, idempotency_key),
+			FOREIGN KEY (proposal_id, revision)
+				REFERENCES task_proposal_revisions(proposal_id, revision)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE INDEX idx_task_proposal_revisions_hash ON task_proposal_revisions(revision_hash)`,
+		`CREATE INDEX idx_task_proposal_approvals_revision ON task_proposal_approvals(proposal_id, revision)`,
+		`CREATE INDEX idx_task_proposal_activity_proposal ON task_proposal_activity(proposal_id, sequence)`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// createTaskProposalSchemaV8 preserves the repaired composite-identity DDL
+// introduced by v8. The v9 reciprocal Approval FK belongs only in v9.
+func createTaskProposalSchemaV8(_ context.Context, tx *sql.Tx) error {
+	statements := []string{
+		`CREATE TABLE task_proposals (
+			proposal_id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL,
+			workstream_id TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			created_by TEXT NOT NULL CHECK (created_by = 'local_gui_operator'),
+			state TEXT NOT NULL CHECK (state IN ('open', 'approved', 'withdrawn')),
+			current_revision INTEGER NOT NULL CHECK (current_revision > 0),
+			current_revision_hash TEXT NOT NULL,
+			UNIQUE (proposal_id, current_revision, current_revision_hash),
+			FOREIGN KEY (proposal_id, current_revision, current_revision_hash)
+				REFERENCES task_proposal_revisions(proposal_id, revision, revision_hash)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE task_proposal_revisions (
+			proposal_id TEXT NOT NULL,
+			revision INTEGER NOT NULL CHECK (revision > 0),
+			revision_hash TEXT NOT NULL UNIQUE,
+			snapshot_json TEXT NOT NULL,
+			PRIMARY KEY (proposal_id, revision),
+			UNIQUE (proposal_id, revision, revision_hash),
+			FOREIGN KEY (proposal_id) REFERENCES task_proposals(proposal_id)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE task_proposal_approvals (
+			approval_id TEXT PRIMARY KEY,
+			proposal_id TEXT NOT NULL,
+			revision INTEGER NOT NULL CHECK (revision > 0),
+			revision_hash TEXT NOT NULL UNIQUE,
+			created_at TEXT NOT NULL,
+			created_by TEXT NOT NULL CHECK (created_by = 'local_gui_operator'),
+			state TEXT NOT NULL CHECK (state IN ('pending', 'approved', 'rejected', 'superseded', 'withdrawn')),
+			decided_at TEXT,
+			decided_by TEXT,
+			decision_idempotency_key TEXT,
+			reason TEXT,
+			UNIQUE (proposal_id, revision),
+			UNIQUE (proposal_id, revision, revision_hash, approval_id),
+			FOREIGN KEY (proposal_id, revision, revision_hash)
+				REFERENCES task_proposal_revisions(proposal_id, revision, revision_hash)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE task_proposal_revision_lifecycles (
+			proposal_id TEXT NOT NULL,
+			revision INTEGER NOT NULL CHECK (revision > 0),
+			revision_hash TEXT NOT NULL UNIQUE,
+			approval_id TEXT NOT NULL UNIQUE,
+			state TEXT NOT NULL CHECK (state IN ('pending', 'approved', 'rejected', 'superseded', 'withdrawn')),
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			version INTEGER NOT NULL CHECK (version > 0),
+			PRIMARY KEY (proposal_id, revision),
+			UNIQUE (proposal_id, revision, revision_hash, approval_id),
+			FOREIGN KEY (proposal_id, revision, revision_hash)
+				REFERENCES task_proposal_revisions(proposal_id, revision, revision_hash)
+				DEFERRABLE INITIALLY DEFERRED,
+			FOREIGN KEY (proposal_id, revision, revision_hash, approval_id)
+				REFERENCES task_proposal_approvals(proposal_id, revision, revision_hash, approval_id)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE task_proposal_activity (
+			proposal_id TEXT NOT NULL,
+			sequence INTEGER NOT NULL CHECK (sequence > 0),
+			operation TEXT NOT NULL,
+			revision INTEGER NOT NULL CHECK (revision > 0),
+			revision_hash TEXT NOT NULL,
+			approval_id TEXT NOT NULL,
+			written_at TEXT NOT NULL,
+			PRIMARY KEY (proposal_id, sequence),
+			FOREIGN KEY (proposal_id, revision, revision_hash, approval_id)
+				REFERENCES task_proposal_revision_lifecycles(proposal_id, revision, revision_hash, approval_id)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE task_proposal_idempotency (
+			actor TEXT NOT NULL CHECK (actor = 'local_gui_operator'),
+			operation TEXT NOT NULL,
+			resource TEXT NOT NULL,
+			idempotency_key TEXT NOT NULL,
+			request_body_hash TEXT NOT NULL,
+			proposal_id TEXT NOT NULL,
+			revision INTEGER NOT NULL CHECK (revision > 0),
+			revision_hash TEXT NOT NULL,
+			approval_id TEXT NOT NULL,
+			PRIMARY KEY (actor, operation, resource, idempotency_key),
+			FOREIGN KEY (proposal_id, revision, revision_hash, approval_id)
+				REFERENCES task_proposal_revision_lifecycles(proposal_id, revision, revision_hash, approval_id)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// createTaskProposalSchemaV9 is distinct from the released v8 schema so its
+// migration definition remains immutable. It adds only the reciprocal
+// Approval-to-RevisionLifecycle full-identity foreign key.
+func createTaskProposalSchemaV9(_ context.Context, tx *sql.Tx) error {
+	statements := []string{
+		`CREATE TABLE task_proposals (
+			proposal_id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL,
+			workstream_id TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			created_by TEXT NOT NULL CHECK (created_by = 'local_gui_operator'),
+			state TEXT NOT NULL CHECK (state IN ('open', 'approved', 'withdrawn')),
+			current_revision INTEGER NOT NULL CHECK (current_revision > 0),
+			current_revision_hash TEXT NOT NULL,
+			UNIQUE (proposal_id, current_revision, current_revision_hash),
+			FOREIGN KEY (proposal_id, current_revision, current_revision_hash)
+				REFERENCES task_proposal_revisions(proposal_id, revision, revision_hash)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE task_proposal_revisions (
+			proposal_id TEXT NOT NULL,
+			revision INTEGER NOT NULL CHECK (revision > 0),
+			revision_hash TEXT NOT NULL UNIQUE,
+			snapshot_json TEXT NOT NULL,
+			PRIMARY KEY (proposal_id, revision),
+			UNIQUE (proposal_id, revision, revision_hash),
+			FOREIGN KEY (proposal_id) REFERENCES task_proposals(proposal_id)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE task_proposal_approvals (
+			approval_id TEXT PRIMARY KEY,
+			proposal_id TEXT NOT NULL,
+			revision INTEGER NOT NULL CHECK (revision > 0),
+			revision_hash TEXT NOT NULL UNIQUE,
+			created_at TEXT NOT NULL,
+			created_by TEXT NOT NULL CHECK (created_by = 'local_gui_operator'),
+			state TEXT NOT NULL CHECK (state IN ('pending', 'approved', 'rejected', 'superseded', 'withdrawn')),
+			decided_at TEXT,
+			decided_by TEXT,
+			decision_idempotency_key TEXT,
+			reason TEXT,
+			UNIQUE (proposal_id, revision),
+			UNIQUE (proposal_id, revision, revision_hash, approval_id),
+			FOREIGN KEY (proposal_id, revision, revision_hash)
+				REFERENCES task_proposal_revisions(proposal_id, revision, revision_hash)
+				DEFERRABLE INITIALLY DEFERRED,
+			FOREIGN KEY (proposal_id, revision, revision_hash, approval_id)
+				REFERENCES task_proposal_revision_lifecycles(proposal_id, revision, revision_hash, approval_id)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE task_proposal_revision_lifecycles (
+			proposal_id TEXT NOT NULL,
+			revision INTEGER NOT NULL CHECK (revision > 0),
+			revision_hash TEXT NOT NULL UNIQUE,
+			approval_id TEXT NOT NULL UNIQUE,
+			state TEXT NOT NULL CHECK (state IN ('pending', 'approved', 'rejected', 'superseded', 'withdrawn')),
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			version INTEGER NOT NULL CHECK (version > 0),
+			PRIMARY KEY (proposal_id, revision),
+			UNIQUE (proposal_id, revision, revision_hash, approval_id),
+			FOREIGN KEY (proposal_id, revision, revision_hash)
+				REFERENCES task_proposal_revisions(proposal_id, revision, revision_hash)
+				DEFERRABLE INITIALLY DEFERRED,
+			FOREIGN KEY (proposal_id, revision, revision_hash, approval_id)
+				REFERENCES task_proposal_approvals(proposal_id, revision, revision_hash, approval_id)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE task_proposal_activity (
+			proposal_id TEXT NOT NULL,
+			sequence INTEGER NOT NULL CHECK (sequence > 0),
+			operation TEXT NOT NULL,
+			revision INTEGER NOT NULL CHECK (revision > 0),
+			revision_hash TEXT NOT NULL,
+			approval_id TEXT NOT NULL,
+			written_at TEXT NOT NULL,
+			PRIMARY KEY (proposal_id, sequence),
+			FOREIGN KEY (proposal_id, revision, revision_hash, approval_id)
+				REFERENCES task_proposal_revision_lifecycles(proposal_id, revision, revision_hash, approval_id)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE task_proposal_idempotency (
+			actor TEXT NOT NULL CHECK (actor = 'local_gui_operator'),
+			operation TEXT NOT NULL,
+			resource TEXT NOT NULL,
+			idempotency_key TEXT NOT NULL,
+			request_body_hash TEXT NOT NULL,
+			proposal_id TEXT NOT NULL,
+			revision INTEGER NOT NULL CHECK (revision > 0),
+			revision_hash TEXT NOT NULL,
+			approval_id TEXT NOT NULL,
+			PRIMARY KEY (actor, operation, resource, idempotency_key),
+			FOREIGN KEY (proposal_id, revision, revision_hash, approval_id)
+				REFERENCES task_proposal_revision_lifecycles(proposal_id, revision, revision_hash, approval_id)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := tx.Exec(statement); err != nil {
