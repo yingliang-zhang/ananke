@@ -481,3 +481,76 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 #### Terminal verdict
 
 - **PASS:** debug/test fixture control makes the cancellable Mac2 observation deterministic without weakening terminal-state handling or changing release behavior. No commit or push was performed.
+
+### 2026-07-22 — P1a Proposal / Revision / Approval contract fixture slice
+
+#### Evidence
+
+- **RED evidence:** the pre-repair five-fixture verifier accepted a rehashed
+  `acceptance.create_replay.given.repository_root` field and an unpaired
+  Unicode surrogate after a consistent rehash. Its create `body_hash` equaled
+  the Revision snapshot hash, it had no lifecycle fixture, and its six-case
+  acceptance inventory omitted append, rejected-withdrawal, restart, and
+  concurrency vectors. The first strict verifier run then rejected that old
+  manifest because it lacked the required request-envelope and lifecycle
+  fixtures.
+- **GREEN contract:** immutable `Revision` snapshots now pair one-to-one with
+  mutable composite-key `(proposal_id, revision)` `RevisionLifecycle` records;
+  atomic append/decision/withdrawal semantics include rejected-current
+  withdrawal. Canonical create, append, decision, and withdrawal envelopes
+  specify exact scope tuples, body hashes, and durable lookup before mutable
+  checks.
+- Added seven canonical fixtures and the updated versioned SHA-256 manifest
+  under `contracts/p1a/fixtures/`. The approved golden Revision hash remains
+  `sha256:114a02349dc027540bb0abd3947f20c5ef238ca9b917309910f17dd068270263`.
+- `node --check contracts/p1a/verify.mjs` completed successfully, and
+  `node contracts/p1a/verify.mjs` printed
+  `P1a proposal contract fixtures verified.` The verifier now checks
+  unpaired-surrogate rejection in keys and values, exact request body hashes
+  and scope ordering, closed schemas for every fixture object, full privacy
+  denylist coverage, lifecycle links, and all 13 acceptance vectors.
+- `node contracts/p1a/verify.mjs --self-test` printed
+  `P1a fixture verifier self-test rejected drift, private fields, unpaired Unicode surrogates, request-hash conflation, and missing vectors.`
+- Targeted, consistently rehashed copies were rejected for lifecycle/Approval
+  state divergence, reordered operation scope, request-hash conflation,
+  unpaired-surrogate key, `repository_root`, and a missing same-key concurrent
+  replay vector. No commit or push operation was run.
+
+#### Status
+
+- **FROZEN CONTRACT / FIXTURE ONLY:** Proposal persistence, SQLite migrations,
+  GUI/IPC, claims, workers, adapters, budget enforcement, OMP audit execution,
+  model execution, commits, and pushes remain outside P1a.
+
+### 2026-07-22 — P1a focused rereview repair
+
+#### Evidence
+
+- **RED probes executed by the self-test:** each probe used a temporary fixture
+  copy and rewrote its manifest before expecting verifier rejection. The new
+  probes consistently rehashed every Revision-hash link, affected append and
+  decision body hash, acceptance reference, and manifest before rejecting
+  `2026-99-99T99:99:99Z`, non-leap `2026-02-29T12:00:00Z`, and
+  `2026-07-22T24:00:00Z`. It also rejected a consistently rehashed create
+  `project_id` target and approved-decision `revision_hash` tamper.
+- **GREEN:** `node --check contracts/p1a/verify.mjs && node contracts/p1a/verify.mjs && node contracts/p1a/verify.mjs --self-test` exited `0` in `0.53s`.
+  The canonical verifier printed `P1a proposal contract fixtures verified.`
+  The self-test printed `P1a fixture verifier self-test rejected drift, private fields, unpaired Unicode surrogates, request-hash conflation, rehashed timestamp and envelope-identity tampering, and missing vectors.`
+- The acceptance fixture now has 15 frozen cases, including append-first and
+  reject-first append-vs-reject linearizations. The rejection-first vector
+  requires two commits, an open Proposal, a retained rejected predecessor, a
+  new pending current pair, and `partial_writes: 0`; the append-first vector
+  requires one append commit, `approval_conflict` for rejection, and no partial
+  writes. The approved-decision race remains one-commit.
+- Canonical envelope verification now links create targets/input to Proposal and
+  Revision; append/decision targets and revision hashes to Proposal, Revision,
+  RevisionLifecycle, and Approval; the approved decision's idempotency
+  identity/decision/reason to Approval; and withdrawal to Proposal. The
+  canonical acceptance digest is
+  `d87ef3d21b169ca9b715061c01378d02a84daa23a7f861421bf314a74a7ca940`.
+
+#### Terminal verdict
+
+- **PASS:** the P1a contract/fixture-only verifier closes the focused rereview
+  findings. No storage, GUI/IPC, claims, workers, adapters, runtime code,
+  commit, or push was changed.
