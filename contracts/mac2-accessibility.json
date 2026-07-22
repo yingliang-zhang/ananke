@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "selectorAttribute": "aria-label",
+  "selectors": {
+    "bootstrapState": "ananke-bootstrap-state",
+    "daemonHealth": "ananke-daemon-health",
+    "refresh": "ananke-refresh",
+    "runList": "ananke-run-list",
+    "launchFixture": "ananke-launch-fixture",
+    "selectedRunId": "ananke-selected-run-id",
+    "selectedRunState": "ananke-selected-run-state",
+    "cancelRun": "ananke-cancel-run"
+  }
+}

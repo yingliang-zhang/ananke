@@ -1,0 +1,48 @@
+name: P0b renderer-public contract
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  renderer-public:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install GUI dependencies
+        run: npm --prefix gui ci
+      - name: Build bridge sidecars
+        run: npm --prefix gui run build:go
+      - name: Regenerate renderer-public models
+        run: npm --prefix gui run generate:renderer-public
+      - name: Reject generated drift
+        run: git diff --exit-code -- gui/src/generated gui/src-tauri/src/generated
+      - name: Enforce generated public privacy
+        run: npm --prefix gui run check:renderer-public-privacy
+      - name: Test privacy denylist enforcement
+        run: npm --prefix gui run test:renderer-public-privacy
+      - name: Test generated TypeScript decoders
+        run: npm --prefix gui run test:renderer-public
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path gui/src-tauri/Cargo.toml --check
+      - name: Test Tauri bridge
+        run: cargo test --manifest-path gui/src-tauri/Cargo.toml --lib
+      - name: Typecheck renderer
+        run: npm --prefix gui run typecheck
+      - name: Test renderer run state
+        run: npm --prefix gui run test:state
+      - name: Build renderer
+        run: npm --prefix gui run web:build

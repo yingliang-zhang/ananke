@@ -1,34 +1,30 @@
 // @ts-nocheck
 // To parse this data:
 //
-//   import { Convert, Event } from "./file";
+//   import { Convert, Cancel } from "./file";
 //
-//   const event = Convert.toEvent(json);
+//   const cancel = Convert.toCancel(json);
 //
 // These functions will throw an error if the JSON doesn't
 // match the expected interface, even if the JSON is valid.
 
 /**
- * Public result of the Tauri list_events command.
+ * Public result of the Tauri cancel_run command.
  */
-export interface Event {
-    /**
-     * Arbitrary non-null JSON payload from the daemon event stream.
-     */
-    payload: unknown[] | boolean | number | { [key: string]: unknown } | string;
-    seq:     number;
-    type:    string;
+export interface Cancel {
+    accepted: boolean;
+    state:    string;
 }
 
 // Converts JSON strings to/from your types
 // and asserts the results of JSON.parse at runtime
 export class Convert {
-    public static toEvent(json: string): Event {
-        return cast(JSON.parse(json), r("Event"));
+    public static toCancel(json: string): Cancel {
+        return cast(JSON.parse(json), r("Cancel"));
     }
 
-    public static eventToJson(value: Event): string {
-        return JSON.stringify(uncast(value, r("Event")), null, 2);
+    public static cancelToJson(value: Cancel): string {
+        return JSON.stringify(uncast(value, r("Cancel")), null, 2);
     }
 }
 
@@ -185,9 +181,8 @@ function r(name: string) {
 }
 
 const typeMap: any = {
-    "Event": o([
-        { json: "payload", js: "payload", typ: u(a("any"), true, 3.14, m("any"), "") },
-        { json: "seq", js: "seq", typ: 0 },
-        { json: "type", js: "type", typ: "" },
+    "Cancel": o([
+        { json: "accepted", js: "accepted", typ: true },
+        { json: "state", js: "state", typ: "" },
     ], false),
 };

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ananke.local/contracts/renderer-public-cancel.schema.json",
+  "title": "Cancel",
+  "description": "Public result of the Tauri cancel_run command.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["accepted", "state"],
+  "properties": {
+    "accepted": { "type": "boolean" },
+    "state": { "type": "string" }
+  }
+}

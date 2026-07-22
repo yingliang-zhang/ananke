@@ -431,3 +431,53 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 #### Terminal verdict
 
 - **PASS:** only launch/get public results now reuse generated `Run`; no schema/generator, daemon transport, events/list-runs/bootstrap/cancel/health behavior, or private wire type was changed. No commit or push was performed.
+
+### 2026-07-22 — P0b.4 generated Cancel and Health migration
+
+#### Evidence
+
+- TDD RED: before the new generated modules existed, `cargo test daemon_health_public_health_wire_json_is_frozen --lib --manifest-path gui/src-tauri/Cargo.toml` exited `101`: `renderer_public_health` and `renderer_public_cancel` were absent and `Backend::daemon_health` did not exist. After generation but before the return-path integration, the same focused compile exited `101` with `CancelDto` where generated `Cancel` was required and with no `Backend::daemon_health`.
+- Added real daemon-backed `daemon_health_public_health_wire_json_is_frozen` and `cancel_run_public_cancel_wire_json_is_frozen` tests. They compile-require generated `Health` and `Cancel`, serialize exact public JSON, and exercise daemon startup plus fixture cancellation. The cancellation test waits for `running` before issuing cancellation, then proves `{ "accepted": true, "state": "cancelling" }` and eventual `cancelled`; the initial fixture race returned the valid `created` state, so an immediate cancellation assertion was intentionally rejected as nondeterministic.
+- TDD GREEN: after `npm --prefix gui run build:go`, both focused tests passed individually. The final runs passed with `1 passed`, `16 filtered` each (health `0.45s`; cancellation `3.25s`).
+- Canonical Cancel and Health schemas generated Rust and TypeScript artifacts. `npm --prefix gui run check:renderer-public` passed before and after formatting in both generator/formatter orders. A controlled mutation to generated Cancel Rust and Health TypeScript artifacts made content checking exit `1` and list both exact drifted targets; regeneration restored canonical output.
+- Node `v22.22.3` generated the artifacts. The all-target public-field privacy scan passed after restoration: generated public models expose no `token` or `error` fields. Final `cargo fmt -- --check`, `npm --prefix gui run typecheck`, and `npm --prefix gui run web:build` passed; Vite `7.3.6` transformed seven modules and completed in `59ms`.
+- `git diff --check` passed. The final scope scan found five modified tracked paths—this ledger, the renderer-public generator and Rust module export, `lib.rs`, and `main.ts`—plus 29 untracked paths. The six P0b.4 code-generation artifacts are confined to `gui/contracts/`, `gui/src/generated/`, and `gui/src-tauri/src/generated/`; all remaining untracked paths are the accepted P0b–P0b.4 OMP artifacts or the P0b.4 contract. No commit or push was performed.
+
+#### Terminal verdict
+
+- **PASS:** only `daemon_health` and `cancel_run` public Rust return paths and their renderer invocation types now use generated Health and Cancel models. Their public JSON remains `online`, `accepted`, and `state`; daemon transport/private/internal types and all other commands were not changed.
+
+### 2026-07-22 — P0b full acceptance repair
+
+#### Evidence
+
+- Generated TypeScript now includes Quicktype runtime `Convert` decoders rather than `--just-types` interfaces. TDD RED: `node gui/scripts/test-renderer-public.mjs` initially exited `1` because `Convert.toBootstrap` was undefined. TDD GREEN: `npm --prefix gui run test:renderer-public` decoded the shared `gui/contracts/fixtures/renderer-public-golden.json` bootstrap, Run, five Event payload kinds, Cancel, and Health values, and rejected malformed values for every model.
+- The same fixture is decoded and reserialized through all generated Rust models by `generated_public_models_decode_golden_json`; the focused command passed (`1 passed`, `17 filtered`). The final bridge suite passed `18` tests.
+- The renderer now sends every public command result through the generated runtime decoder. `launch_fixture` and `get_run` both decode as generated `Run`; list responses validate every generated Run/Event entry before state use.
+- Removed unused `RunDto` and `RunDiagnosticsDto`. `EventDto` is now private and `Deserialize`-only, retaining only the raw daemon-response adapter before generated Event conversion.
+- The generator enforces recursive canonical-schema field denylisting. Its regression mutates a public schema field and proves rejection for `token`, `error`, `worker_env`, `socket_path`, `identity_file`, and `adapter_secret`. TDD RED: the original scan accepted injected `token`; TDD GREEN: `npm --prefix gui run test:renderer-public-privacy` passed. The final privacy check reported `Renderer-public schemas expose no prohibited private fields.`
+- Added `.github/workflows/p0b-renderer-public.yml`. It installs pinned GUI dependencies and sidecars, regenerates checked-in models then rejects drift, and runs privacy enforcement/regression, TypeScript decoder regression, Rust format/test, renderer typecheck/state test, and web build. The workflow was added locally; no GitHub execution is claimed.
+- Final local gates passed: `npm --prefix gui run build:go`; `check:renderer-public`; `check:renderer-public-privacy`; `test:renderer-public`; `test:renderer-public-privacy`; `test:state`; `typecheck`; `cargo fmt --manifest-path gui/src-tauri/Cargo.toml --check`; `cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` (`18` passed); and `web:build` (Vite `7.3.6`, `12` modules, `82ms`).
+- `git diff --quiet 73fc6de -- internal cmd` exited `0`, preserving the Go daemon transport and source scope. No commit or push operation was run.
+
+#### GUI E2E host blocker
+
+- No pre-existing Tauri WebDriver tooling was installed. `cargo install tauri-driver --locked` installed `tauri-driver v2.0.6`, but `tauri-driver --help` immediately exited `1` with `tauri-driver is not supported on this platform` on this Darwin arm64 host. `/System/Cryptexes/App/usr/bin/safaridriver` exists, but it is not a Tauri app WebDriver bridge. Therefore bootstrap → launch → events → cancel → reconnect was not GUI-E2E-exercised here; this is a concrete host blocker, not a passing E2E claim.
+
+#### Terminal verdict
+
+- All repairable P0b local acceptance gates pass. GUI-level Tauri E2E remains host-blocked as recorded above; no daemon Go transport or P1/P2/P3 scope was changed.
+
+### 2026-07-22 — Mac2 cancellable fixture determinism repair
+
+#### Evidence
+
+- The Mac2 failure evidence showed the selector, daemon health, and launch paths working, then the selected run already `completed` before the harness observed `running`; the harness correctly did not cancel.
+- TDD RED: `fixture_worker_env_scopes_cancellable_lifetime_to_debug_builds` initially failed to compile because `fixture_worker_env` did not exist. TDD GREEN: it passed after the bridge selected worker configuration by build mode.
+- Debug builds now retain the fixture's six canonical events and use the existing fakeworker `ANANKE_FW_EXIT_DELAY_MS=30000` pre-exit fixture hold. The first attempted zero-event configuration broke `bridge_bootstrap_launches_lists_events_cancels_and_reconnects`; retaining the event stream repaired that regression. Release configuration remains the prior six-event, 250 ms cadence, 750 ms pre-exit fixture.
+- Final local checks passed: `cargo test --lib --manifest-path gui/src-tauri/Cargo.toml` (`19` passed), `cargo fmt --check --manifest-path gui/src-tauri/Cargo.toml`, `cargo check --release --lib --manifest-path gui/src-tauri/Cargo.toml`, and `npm --prefix tests/mac2 test` (`5` passed).
+- Built the debug `Ananke.app`, then used caller-provided WDA to verify static accessibility identifiers, refresh health (`● daemon online`), launch, and selected state (`● running`). Evidence: `/var/folders/fh/7dlfvrsn5938lw_4z6_pg_th0000gn/T/ananke-mac2-running-proof-final.YppDc2/result.json` and `running.png`. The proof closed only its WDA session and did not issue cancellation.
+
+#### Terminal verdict
+
+- **PASS:** debug/test fixture control makes the cancellable Mac2 observation deterministic without weakening terminal-state handling or changing release behavior. No commit or push was performed.

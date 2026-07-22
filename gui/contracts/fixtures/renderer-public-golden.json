@@ -1,0 +1,59 @@
+{
+  "bootstrap": {
+    "project": {
+      "id": "project-a",
+      "name": "Ananke",
+      "root": "/workspace/ananke"
+    },
+    "workstream": {
+      "id": "main",
+      "name": "Main",
+      "project_id": "project-a"
+    }
+  },
+  "run": {
+    "id": "run-001",
+    "state": "running",
+    "diagnostics": {
+      "project_id": "project-a",
+      "workstream_id": "main",
+      "worker_pid": 1234,
+      "supervisor_pid": 1235,
+      "committed_offset": 4096
+    }
+  },
+  "events": [
+    {
+      "seq": 1,
+      "type": "object",
+      "payload": { "label": "object", "nested": [1, true] }
+    },
+    {
+      "seq": 2,
+      "type": "array",
+      "payload": ["item", 2, false]
+    },
+    {
+      "seq": 3,
+      "type": "string",
+      "payload": "text value"
+    },
+    {
+      "seq": 4,
+      "type": "number",
+      "payload": 42.5
+    },
+    {
+      "seq": 5,
+      "type": "boolean",
+      "payload": true
+    }
+  ],
+  "cancel": {
+    "accepted": true,
+    "state": "cancelling"
+  },
+  "health": {
+    "online": true
+  }
+}

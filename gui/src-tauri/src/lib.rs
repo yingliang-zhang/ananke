@@ -2,7 +2,9 @@ pub mod generated;
 
 use generated::{
     renderer_public_bootstrap::{Bootstrap, Project, Workstream},
+    renderer_public_cancel::Cancel,
     renderer_public_event::Event,
+    renderer_public_health::Health,
     renderer_public_run::{Run, RunDiagnostics},
 };
 use serde::{Deserialize, Serialize};
@@ -378,38 +380,6 @@ struct JsonRun {
     committed_offset: i64,
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct RunDiagnosticsDto {
-    pub project_id: String,
-    pub workstream_id: String,
-    pub worker_pid: i32,
-    pub supervisor_pid: i32,
-    pub committed_offset: i64,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct RunDto {
-    pub id: String,
-    pub state: String,
-    pub diagnostics: RunDiagnosticsDto,
-}
-
-impl From<JsonRun> for RunDto {
-    fn from(run: JsonRun) -> Self {
-        Self {
-            id: run.id,
-            state: run.state,
-            diagnostics: RunDiagnosticsDto {
-                project_id: run.project_id,
-                workstream_id: run.workstream_id,
-                worker_pid: run.worker_pid,
-                supervisor_pid: run.supervisor_pid,
-                committed_offset: run.committed_offset,
-            },
-        }
-    }
-}
-
 impl From<JsonRun> for Run {
     fn from(run: JsonRun) -> Self {
         Self {
@@ -426,12 +396,12 @@ impl From<JsonRun> for Run {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct EventDto {
-    pub seq: i64,
+#[derive(Clone, Debug, Deserialize)]
+struct EventDto {
+    seq: i64,
     #[serde(rename = "type")]
-    pub event_type: String,
-    pub payload: serde_json::Value,
+    event_type: String,
+    payload: serde_json::Value,
 }
 
 impl TryFrom<EventDto> for Event {
@@ -444,17 +414,6 @@ impl TryFrom<EventDto> for Event {
             event_type: event.event_type,
         })
     }
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct CancelDto {
-    pub accepted: bool,
-    pub state: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct HealthDto {
-    pub online: bool,
 }
 
 struct BridgeState {
@@ -515,6 +474,11 @@ impl Backend {
             thread::sleep(Duration::from_millis(50));
         }
         Err(BridgeError::DaemonUnavailable)
+    }
+
+    fn daemon_health(&mut self) -> Result<Health, BridgeError> {
+        self.ensure_daemon()?;
+        Ok(Health { online: true })
     }
 
     fn spawn_daemon(&mut self) -> Result<(), BridgeError> {
@@ -595,11 +559,7 @@ impl Backend {
     fn launch_fixture(&mut self) -> Result<Run, BridgeError> {
         self.ensure_daemon()?;
         let run_id = fixture_run_id();
-        let worker_env = vec![
-            "ANANKE_FW_EVENTS=6".to_owned(),
-            "ANANKE_FW_DELAY_MS=250".to_owned(),
-            "ANANKE_FW_EXIT_DELAY_MS=750".to_owned(),
-        ];
+        let worker_env = fixture_worker_env();
         let worker_args = Vec::new();
         let worker_path = self.paths.fakeworker_binary.to_string_lossy();
         let mut request = GoRequest::new("launch-run", &self.token);
@@ -638,12 +598,12 @@ impl Backend {
             .map_err(BridgeError::from)
     }
 
-    fn cancel_run(&mut self, run_id: &str) -> Result<CancelDto, BridgeError> {
+    fn cancel_run(&mut self, run_id: &str) -> Result<Cancel, BridgeError> {
         self.ensure_daemon()?;
         let mut request = GoRequest::new("cancel-run", &self.token);
         request.id = Some(run_id);
         let response = self.request(request)?;
-        Ok(CancelDto {
+        Ok(Cancel {
             accepted: response.accepted,
             state: response.state.ok_or(BridgeError::Protocol)?,
         })
@@ -688,6 +648,23 @@ fn remove_known_stale_socket(runtime_dir: &Path, socket: &Path) -> Result<(), Br
     }
 }
 
+#[cfg(debug_assertions)]
+fn fixture_worker_env() -> Vec<String> {
+    vec![
+        "ANANKE_FW_EVENTS=6".to_owned(),
+        "ANANKE_FW_EXIT_DELAY_MS=30000".to_owned(),
+    ]
+}
+
+#[cfg(not(debug_assertions))]
+fn fixture_worker_env() -> Vec<String> {
+    vec![
+        "ANANKE_FW_EVENTS=6".to_owned(),
+        "ANANKE_FW_DELAY_MS=250".to_owned(),
+        "ANANKE_FW_EXIT_DELAY_MS=750".to_owned(),
+    ]
+}
+
 fn fixture_run_id() -> String {
     let milliseconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -713,11 +690,8 @@ fn bootstrap(state: State<'_, BridgeState>) -> Result<Bootstrap, String> {
 }
 
 #[tauri::command]
-fn daemon_health(state: State<'_, BridgeState>) -> Result<HealthDto, String> {
-    use_backend(state, |backend| {
-        backend.ensure_daemon()?;
-        Ok(HealthDto { online: true })
-    })
+fn daemon_health(state: State<'_, BridgeState>) -> Result<Health, String> {
+    use_backend(state, Backend::daemon_health)
 }
 
 #[tauri::command]
@@ -745,7 +719,7 @@ fn list_events(
 }
 
 #[tauri::command]
-fn cancel_run(state: State<'_, BridgeState>, run_id: String) -> Result<CancelDto, String> {
+fn cancel_run(state: State<'_, BridgeState>, run_id: String) -> Result<Cancel, String> {
     use_backend(state, |backend| backend.cancel_run(&run_id))
 }
 
@@ -914,6 +888,34 @@ mod tests {
     }
 
     #[test]
+    fn generated_public_models_decode_golden_json() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../contracts/fixtures/renderer-public-golden.json"
+        ))
+        .expect("decode public golden fixture");
+
+        let bootstrap: Bootstrap = serde_json::from_value(fixture["bootstrap"].clone())
+            .expect("generated Bootstrap decodes public golden JSON");
+        let run: Run = serde_json::from_value(fixture["run"].clone())
+            .expect("generated Run decodes public golden JSON");
+        let events: Vec<Event> = serde_json::from_value(fixture["events"].clone())
+            .expect("generated Event decodes public golden JSON");
+        let cancel: Cancel = serde_json::from_value(fixture["cancel"].clone())
+            .expect("generated Cancel decodes public golden JSON");
+        let health: Health = serde_json::from_value(fixture["health"].clone())
+            .expect("generated Health decodes public golden JSON");
+
+        assert_eq!(
+            serde_json::to_value(bootstrap).unwrap(),
+            fixture["bootstrap"]
+        );
+        assert_eq!(serde_json::to_value(run).unwrap(), fixture["run"]);
+        assert_eq!(serde_json::to_value(events).unwrap(), fixture["events"]);
+        assert_eq!(serde_json::to_value(cancel).unwrap(), fixture["cancel"]);
+        assert_eq!(serde_json::to_value(health).unwrap(), fixture["health"]);
+    }
+
+    #[test]
     fn bootstrap_duplicate_rejection_is_idempotent_but_storage_rejection_fails() {
         let duplicate = BridgeError::DaemonRejected(
             "constraint failed: UNIQUE constraint failed: projects.id (1555)".into(),
@@ -967,6 +969,67 @@ mod tests {
         assert_eq!(value["project_id"], DEFAULT_PROJECT_ID);
         assert_eq!(value["worker_env"][0], "ANANKE_FW_EVENTS=2");
         assert_eq!(value["token"].as_str().map(str::len), Some(64));
+    }
+
+    #[test]
+    fn fixture_worker_env_scopes_cancellable_lifetime_to_debug_builds() {
+        #[cfg(debug_assertions)]
+        assert_eq!(
+            fixture_worker_env(),
+            vec![
+                "ANANKE_FW_EVENTS=6".to_owned(),
+                "ANANKE_FW_EXIT_DELAY_MS=30000".to_owned(),
+            ]
+        );
+
+        #[cfg(not(debug_assertions))]
+        assert_eq!(
+            fixture_worker_env(),
+            vec![
+                "ANANKE_FW_EVENTS=6".to_owned(),
+                "ANANKE_FW_DELAY_MS=250".to_owned(),
+                "ANANKE_FW_EXIT_DELAY_MS=750".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn daemon_health_public_health_wire_json_is_frozen() {
+        let mut test = new_test_backend();
+        let health: generated::renderer_public_health::Health = test
+            .backend
+            .daemon_health()
+            .expect("get public daemon health through bridge");
+
+        assert_eq!(
+            serde_json::to_value(health).expect("serialize public daemon-health result"),
+            serde_json::json!({"online": true})
+        );
+    }
+
+    #[test]
+    fn cancel_run_public_cancel_wire_json_is_frozen() {
+        let mut test = new_test_backend();
+        test.backend
+            .bootstrap()
+            .expect("bootstrap before cancelling public run");
+        let launched = test
+            .backend
+            .launch_fixture()
+            .expect("launch known public run through bridge");
+        let running = wait_for_state(&mut test.backend, &launched.id, "running");
+        assert_eq!(running.state, "running");
+        let cancellation: generated::renderer_public_cancel::Cancel = test
+            .backend
+            .cancel_run(&launched.id)
+            .expect("cancel public run through bridge");
+
+        assert_eq!(
+            serde_json::to_value(cancellation).expect("serialize public cancel-run result"),
+            serde_json::json!({"accepted": true, "state": "cancelling"})
+        );
+        let cancelled = wait_for_state(&mut test.backend, &launched.id, "cancelled");
+        assert_eq!(cancelled.state, "cancelled");
     }
 
     #[test]

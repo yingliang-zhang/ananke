@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ananke.local/contracts/renderer-public-health.schema.json",
+  "title": "Health",
+  "description": "Public result of the Tauri daemon_health command.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["online"],
+  "properties": {
+    "online": { "type": "boolean" }
+  }
+}

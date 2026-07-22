@@ -1,0 +1,13 @@
+{
+  "name": "ananke-mac2-e2e",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "preflight": "node scripts/preflight.mjs",
+    "e2e": "node scripts/e2e.mjs"
+  }
+}
