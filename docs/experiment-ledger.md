@@ -630,3 +630,63 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 - `go test ./internal/store -count=1 -timeout=180s` passed.
 - `go test -race ./internal/store -count=1 -timeout=180s` passed.
 - `node contracts/p1a/verify.mjs` printed `P1a proposal contract fixtures verified.`
+
+### 2026-07-22 — P1c canonical Revision hash-link repair
+
+#### RED
+
+- The P1c self-test copied the fixture and schemas, changed the embedded
+  `get_proposal` Revision together with its immutable create-input counterpart,
+  recanonicalized the copied fixture, and rewrote its copied manifest. With the
+  fixed-fixture digest deliberately waived only for that probe, the verifier
+  rejected the mismatched embedded Revision at
+  `detail revision/proposal canonical hash link`.
+
+#### GREEN
+
+- `node --check contracts/p1c/verify.mjs && node contracts/p1c/verify.mjs &&
+  node contracts/p1c/verify.mjs --self-test` exited `0` in `0.42s`. The
+  canonical verifier printed `P1c proposal public protocol fixtures and 12 DTO
+  schema targets verified.` The self-test printed rejection of the consistently
+  rehashed embedded Revision/hash mismatch alongside the existing drift,
+  privacy, and closed-shape probes.
+- The embedded `get_proposal` Revision canonical bytes already exactly matched
+  `contracts/p1a/fixtures/revision-v1.canonical.json`; its SHA-256 is
+  `sha256:114a02349dc027540bb0abd3947f20c5ef238ca9b917309910f17dd068270263`,
+  matching the linked Proposal current, RevisionLifecycle, and Approval hashes.
+  Therefore `protocol-v1.canonical.json` and its manifest remained unchanged.
+
+#### Terminal verdict
+
+- **PASS:** P1c now directly requires the embedded canonical Revision hash to
+  equal every current detail hash. No schema, generator, runtime, daemon,
+  bridge, GUI, commit, or push was changed.
+
+### 2026-07-22 — P1c public DTO/codegen and schema repair
+
+#### RED
+
+- `node contracts/p1c/verify.mjs --self-test` exited `1`: the new direct
+  Proposal timestamp schema test reported `Missing expected exception`, proving
+  the prior schema admitted an invalid UTC calendar timestamp.
+- `npm --prefix gui run test:renderer-public` exited `1`: the test could not
+  open the missing `renderer-public-proposal-list-input.ts` generated decoder.
+- `npm --prefix gui run test:renderer-public-privacy` exited `1`: injecting
+  `token` into `renderer-public-proposal-create-input.schema.json` left the
+  privacy check at status `0`, proving P1c schemas were absent from inventory.
+
+#### GREEN
+
+- `node contracts/p1c/verify.mjs && node contracts/p1c/verify.mjs --self-test`
+  exited `0`. The verifier confirmed 12 DTO schema targets; its self-test
+  rejected the Tauri-to-daemon typo and invalid P1a timestamp, UTF-8-byte,
+  Approval, and Revision semantics.
+- `npm --prefix gui run generate:renderer-public && npm --prefix gui run
+  check:renderer-public && npm --prefix gui run check:renderer-public-privacy`
+  exited `0` after generating all 11 P1c document DTOs plus embedded
+  `ProposalActivity` in Rust, TypeScript, and Rust module exports.
+- `npm --prefix gui run test:renderer-public && npm --prefix gui run
+  test:renderer-public-privacy` exited `0`; decoders accepted every canonical
+  P1c DTO and privacy injection was rejected for every P1c target.
+- `npm --prefix gui run typecheck` exited `0`; `cargo test` in `gui/src-tauri`
+  passed 19 tests across 3 suites.

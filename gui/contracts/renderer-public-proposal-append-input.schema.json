@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ananke.local/contracts/renderer-public-proposal-append-input.schema.json",
+  "title": "AppendProposalRevisionInput",
+  "description": "Public arguments of the Tauri append_proposal_revision command.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["idempotency_key", "proposal_id", "expected_current_revision", "expected_current_revision_hash", "revision_input"],
+  "properties": {
+    "idempotency_key": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,127}$" },
+    "proposal_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+    "expected_current_revision": { "type": "integer", "minimum": 1 },
+    "expected_current_revision_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "revision_input": {
+      "title": "AppendProposalRevisionInputBody",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task", "acceptance_criteria", "policy"],
+      "properties": {
+        "task": {
+          "title": "AppendProposalTask",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["title", "instructions"],
+          "properties": {
+            "title": { "type": "string", "minLength": 1, "maxLength": 160, "x-ananke-max-utf8-bytes": 160 },
+            "instructions": { "type": "string", "minLength": 1, "maxLength": 8000, "x-ananke-max-utf8-bytes": 8000 }
+          }
+        },
+        "acceptance_criteria": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": { "type": "string", "minLength": 1, "maxLength": 1000, "x-ananke-max-utf8-bytes": 1000 }
+        },
+        "policy": {
+          "title": "AppendProposalPolicy",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["adapter", "authority", "budget", "model_role"],
+          "properties": {
+            "adapter": {
+              "title": "AppendProposalAdapterPolicy",
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["access", "kind", "status"],
+              "properties": {
+                "access": { "const": "read_only" },
+                "kind": { "const": "omp_audit" },
+                "status": { "const": "future" }
+              }
+            },
+            "authority": { "const": "deterministic" },
+            "budget": {
+              "title": "AppendProposalBudgetPolicy",
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["dimensions", "status"],
+              "properties": {
+                "dimensions": {
+                  "type": "array",
+                  "minItems": 2,
+                  "maxItems": 2,
+                  "items": { "type": "string" },
+                  "prefixItems": [{ "const": "deadline" }, { "const": "attempt_cap" }]
+                },
+                "status": { "const": "future" }
+              }
+            },
+            "model_role": { "const": "advisory_only" }
+          }
+        }
+      }
+    }
+  }
+}

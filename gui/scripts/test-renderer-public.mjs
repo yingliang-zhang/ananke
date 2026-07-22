@@ -7,6 +7,9 @@ const guiDirectory = resolve(import.meta.dirname, "..");
 const fixture = JSON.parse(
   await readFile(resolve(guiDirectory, "contracts/fixtures/renderer-public-golden.json"), "utf8"),
 );
+const proposalFixture = JSON.parse(
+  await readFile(resolve(guiDirectory, "../contracts/p1c/fixtures/protocol-v1.canonical.json"), "utf8"),
+);
 
 async function loadGeneratedModule(name) {
   const source = await readFile(
@@ -49,4 +52,33 @@ assert.throws(() => decode(event.Convert, "toEvent", { seq: 1, type: "missing-pa
 assert.throws(() => decode(cancel.Convert, "toCancel", { accepted: "true", state: "cancelling" }));
 assert.throws(() => decode(health.Convert, "toHealth", { online: "true" }));
 
-console.log("Generated TypeScript decoders accepted public golden JSON and rejected malformed payloads.");
+const proposalDecoderSpecs = [
+  ["proposal-create-input", "toCreateProposalInput", proposalFixture.commands.create_proposal.input],
+  ["proposal-list-input", "toListProposalsInput", proposalFixture.commands.list_proposals.input],
+  ["proposal-get-input", "toGetProposalInput", proposalFixture.commands.get_proposal.input],
+  ["proposal-activity-list-input", "toListProposalActivityInput", proposalFixture.commands.list_proposal_activity.input],
+  ["proposal-append-input", "toAppendProposalRevisionInput", proposalFixture.commands.append_proposal_revision.input],
+  ["proposal-decision-input", "toDecideProposalApprovalInput", proposalFixture.commands.decide_proposal_approval.input],
+  ["proposal-withdraw-input", "toWithdrawProposalInput", proposalFixture.commands.withdraw_proposal.input],
+  ["proposal-mutation", "toProposalMutation", proposalFixture.commands.create_proposal.result],
+  ["proposal-list", "toProposalList", proposalFixture.commands.list_proposals.result],
+  ["proposal-detail", "toProposalDetail", proposalFixture.commands.get_proposal.result],
+  ["proposal-activity-list", "toProposalActivityList", proposalFixture.commands.list_proposal_activity.result],
+  ["proposal-activity", "toProposalActivity", proposalFixture.commands.list_proposal_activity.result.activity[0]],
+];
+const proposalDecoders = await Promise.all(
+  proposalDecoderSpecs.map(async ([name, method, value]) => ({
+    converter: (await loadGeneratedModule(name)).Convert,
+    method,
+    value,
+  })),
+);
+for (const { converter, method, value } of proposalDecoders) {
+  assert.deepEqual(decode(converter, method, value), value, `${method} accepts the canonical P1c DTO`);
+  assert.throws(
+    () => decode(converter, method, { ...value, unexpected_public: true }),
+    `${method} rejects unknown public fields`,
+  );
+}
+
+console.log("Generated TypeScript decoders accepted public golden JSON and every P1c DTO, while rejecting malformed payloads.");

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ananke.local/contracts/renderer-public-proposal-decision-input.schema.json",
+  "title": "DecideProposalApprovalInput",
+  "description": "Public arguments of the Tauri decide_proposal_approval command.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["idempotency_key", "approval_id", "proposal_id", "revision", "revision_hash", "decision", "reason"],
+  "properties": {
+    "idempotency_key": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,127}$" },
+    "approval_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+    "proposal_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "revision_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "decision": { "type": "string", "enum": ["approved", "rejected"] },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 1000, "x-ananke-max-utf8-bytes": 1000 }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ananke.local/contracts/renderer-public-proposal-withdraw-input.schema.json",
+  "title": "WithdrawProposalInput",
+  "description": "Public arguments of the Tauri withdraw_proposal command.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["idempotency_key", "proposal_id"],
+  "properties": {
+    "idempotency_key": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,127}$" },
+    "proposal_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" }
+  }
+}

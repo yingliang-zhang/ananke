@@ -15,6 +15,20 @@ const prohibitedFields = [
   "adapter_secret",
 ];
 
+const proposalPrivacyTargets = [
+  ["renderer-public-proposal-create-input.schema.json", (schema) => schema],
+  ["renderer-public-proposal-list-input.schema.json", (schema) => schema],
+  ["renderer-public-proposal-get-input.schema.json", (schema) => schema],
+  ["renderer-public-proposal-activity-list-input.schema.json", (schema) => schema],
+  ["renderer-public-proposal-append-input.schema.json", (schema) => schema],
+  ["renderer-public-proposal-decision-input.schema.json", (schema) => schema],
+  ["renderer-public-proposal-withdraw-input.schema.json", (schema) => schema],
+  ["renderer-public-proposal-mutation.schema.json", (schema) => schema],
+  ["renderer-public-proposal-list.schema.json", (schema) => schema],
+  ["renderer-public-proposal-detail.schema.json", (schema) => schema],
+  ["renderer-public-proposal-activity-list.schema.json", (schema) => schema],
+  ["renderer-public-proposal-activity-list.schema.json", (schema) => schema.properties.activity.items],
+];
 function checkPublicFields() {
   return spawnSync(process.execPath, [generatorPath, "--check-public-fields"], {
     cwd: guiDirectory,
@@ -48,4 +62,19 @@ try {
   await writeFile(schemaPath, originalSchema);
 }
 
-console.log("Renderer-public privacy denylist rejects every prohibited public field class.");
+for (const [name, select] of proposalPrivacyTargets) {
+  const path = resolve(guiDirectory, "contracts", name);
+  const original = await readFile(path, "utf8");
+  try {
+    const schema = JSON.parse(original);
+    select(schema).properties.token = { type: "string" };
+    await writeFile(path, JSON.stringify(schema));
+    const result = checkPublicFields();
+    assert.notEqual(result.status, 0, `${name} must reject a private field`);
+    assert.match(`${result.stdout}${result.stderr}`, /prohibited public field token/);
+  } finally {
+    await writeFile(path, original);
+  }
+}
+
+console.log("Renderer-public privacy denylist rejects every prohibited field class and every P1c DTO target.");

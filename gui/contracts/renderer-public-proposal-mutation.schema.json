@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ananke.local/contracts/renderer-public-proposal-mutation.schema.json",
+  "title": "ProposalMutation",
+  "description": "Public durable identity returned by a task-proposal mutation or idempotent replay.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["proposal_id", "revision", "revision_hash", "approval_id"],
+  "properties": {
+    "proposal_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "revision_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "approval_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" }
+  }
+}

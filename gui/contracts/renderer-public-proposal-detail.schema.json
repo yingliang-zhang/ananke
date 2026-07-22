@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ananke.local/contracts/renderer-public-proposal-detail.schema.json",
+  "title": "ProposalDetail",
+  "description": "Public result of the Tauri get_proposal command for the current revision and its paired records.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["proposal", "revision", "lifecycle", "approval"],
+  "properties": {
+    "proposal": {
+      "title": "ProposalDetailProposal",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["proposal_id", "project_id", "workstream_id", "created_at", "created_by", "state", "current_revision", "current_revision_hash"],
+      "properties": {
+        "proposal_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+        "project_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+        "workstream_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+        "created_at": { "type": "string", "x-ananke-utc-timestamp": true },
+        "created_by": { "const": "local_gui_operator" },
+        "state": { "type": "string", "enum": ["open", "approved", "withdrawn"] },
+        "current_revision": { "type": "integer", "minimum": 1 },
+        "current_revision_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "revision": {
+      "title": "Revision",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "proposal_id", "revision", "parent_revision", "parent_revision_hash", "created_at", "created_by", "idempotency_key", "task", "acceptance_criteria", "policy"],
+      "properties": {
+        "schema_version": { "const": "ananke.proposal-revision.v1" },
+        "proposal_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "parent_revision": { "type": ["integer", "null"], "minimum": 1 },
+        "parent_revision_hash": { "type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$" },
+        "created_at": { "type": "string", "x-ananke-utc-timestamp": true },
+        "created_by": { "const": "local_gui_operator" },
+        "idempotency_key": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,127}$" },
+        "task": {
+          "title": "ProposalTask",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["title", "instructions"],
+          "properties": {
+            "title": { "type": "string", "minLength": 1, "maxLength": 160, "x-ananke-max-utf8-bytes": 160 },
+            "instructions": { "type": "string", "minLength": 1, "maxLength": 8000, "x-ananke-max-utf8-bytes": 8000 }
+          }
+        },
+        "acceptance_criteria": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": { "type": "string", "minLength": 1, "maxLength": 1000, "x-ananke-max-utf8-bytes": 1000 }
+        },
+        "policy": {
+          "title": "ProposalPolicy",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["adapter", "authority", "budget", "model_role"],
+          "properties": {
+            "adapter": {
+              "title": "ProposalAdapterPolicy",
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["access", "kind", "status"],
+              "properties": {
+                "access": { "const": "read_only" },
+                "kind": { "const": "omp_audit" },
+                "status": { "const": "future" }
+              }
+            },
+            "authority": { "const": "deterministic" },
+            "budget": {
+              "title": "ProposalBudgetPolicy",
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["dimensions", "status"],
+              "properties": {
+                "dimensions": {
+                  "type": "array",
+                  "minItems": 2,
+                  "maxItems": 2,
+                  "items": { "type": "string" },
+                  "prefixItems": [{ "const": "deadline" }, { "const": "attempt_cap" }]
+                },
+                "status": { "const": "future" }
+              }
+            },
+            "model_role": { "const": "advisory_only" }
+          }
+        }
+      },
+      "x-ananke-revision-parent": true,
+      "allOf": [
+        {
+          "if": { "properties": { "revision": { "const": 1 } }, "required": ["revision"] },
+          "then": {
+            "properties": {
+              "parent_revision": { "const": null },
+              "parent_revision_hash": { "const": null }
+            }
+          },
+          "else": {
+            "properties": {
+              "parent_revision": { "type": "integer", "minimum": 1 },
+              "parent_revision_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+            }
+          }
+        }
+      ]
+    },
+    "lifecycle": {
+      "title": "RevisionLifecycle",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["proposal_id", "revision", "revision_hash", "approval_id", "state", "created_at", "updated_at", "version"],
+      "properties": {
+        "proposal_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "revision_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "approval_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+        "state": { "type": "string", "enum": ["pending", "approved", "rejected", "superseded", "withdrawn"] },
+        "created_at": { "type": "string", "x-ananke-utc-timestamp": true },
+        "updated_at": { "type": "string", "x-ananke-utc-timestamp": true },
+        "version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "approval": {
+      "title": "Approval",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approval_id", "proposal_id", "revision", "revision_hash", "created_at", "created_by", "state", "decided_at", "decided_by", "decision_idempotency_key", "reason"],
+      "properties": {
+        "approval_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+        "proposal_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "revision_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "created_at": { "type": "string", "x-ananke-utc-timestamp": true },
+        "created_by": { "const": "local_gui_operator" },
+        "state": { "type": "string", "enum": ["pending", "approved", "rejected", "superseded", "withdrawn"] },
+        "decided_at": { "type": ["string", "null"], "x-ananke-utc-timestamp": true },
+        "decided_by": { "type": ["string", "null"] },
+        "decision_idempotency_key": { "type": ["string", "null"], "pattern": "^[a-z][a-z0-9_]{2,127}$" },
+        "reason": { "type": ["string", "null"], "minLength": 1, "maxLength": 1000, "x-ananke-max-utf8-bytes": 1000 }
+      },
+      "x-ananke-approval-decision": true,
+      "allOf": [
+        {
+          "if": { "properties": { "state": { "enum": ["approved", "rejected"] } }, "required": ["state"] },
+          "then": {
+            "properties": {
+              "decided_at": { "type": "string", "x-ananke-utc-timestamp": true },
+              "decided_by": { "const": "local_gui_operator" },
+              "decision_idempotency_key": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,127}$" },
+              "reason": { "type": "string", "minLength": 1, "maxLength": 1000, "x-ananke-max-utf8-bytes": 1000 }
+            }
+          },
+          "else": {
+            "properties": {
+              "decided_at": { "const": null },
+              "decided_by": { "const": null },
+              "decision_idempotency_key": { "const": null },
+              "reason": { "const": null }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

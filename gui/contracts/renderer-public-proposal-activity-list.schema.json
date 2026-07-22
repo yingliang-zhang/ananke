@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ananke.local/contracts/renderer-public-proposal-activity-list.schema.json",
+  "title": "ProposalActivityList",
+  "description": "Public result of the Tauri list_proposal_activity command.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["activity"],
+  "properties": {
+    "activity": {
+      "type": "array",
+      "items": {
+        "title": "ProposalActivity",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["proposal_id", "sequence", "operation", "revision", "revision_hash", "approval_id", "written_at"],
+        "properties": {
+          "proposal_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+          "sequence": { "type": "integer", "minimum": 1 },
+          "operation": { "type": "string", "enum": ["create_proposal", "append_revision", "decide_approval", "withdraw_proposal"] },
+          "revision": { "type": "integer", "minimum": 1 },
+          "revision_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "approval_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+          "written_at": { "type": "string", "x-ananke-utc-timestamp": true }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ananke.local/contracts/renderer-public-proposal-list-input.schema.json",
+  "title": "ListProposalsInput",
+  "description": "Public arguments of the Tauri list_proposals command.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["project_id", "workstream_id"],
+  "properties": {
+    "project_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+    "workstream_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" }
+  }
+}

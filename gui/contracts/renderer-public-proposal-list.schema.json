@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ananke.local/contracts/renderer-public-proposal-list.schema.json",
+  "title": "ProposalList",
+  "description": "Public result of the Tauri list_proposals command.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["proposals"],
+  "properties": {
+    "proposals": {
+      "type": "array",
+      "items": {
+        "title": "Proposal",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["proposal_id", "project_id", "workstream_id", "created_at", "created_by", "state", "current_revision", "current_revision_hash"],
+        "properties": {
+          "proposal_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+          "project_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+          "workstream_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+          "created_at": { "type": "string", "x-ananke-utc-timestamp": true },
+          "created_by": { "const": "local_gui_operator" },
+          "state": { "type": "string", "enum": ["open", "approved", "withdrawn"] },
+          "current_revision": { "type": "integer", "minimum": 1 },
+          "current_revision_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+        }
+      }
+    }
+  }
+}

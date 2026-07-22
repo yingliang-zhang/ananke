@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ananke.local/contracts/renderer-public-proposal-get-input.schema.json",
+  "title": "GetProposalInput",
+  "description": "Public arguments of the Tauri get_proposal command.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["proposal_id"],
+  "properties": {
+    "proposal_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" }
+  }
+}
