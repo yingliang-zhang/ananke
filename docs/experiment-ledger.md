@@ -712,3 +712,45 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 - `go test ./... -count=1` passed (3 packages with tests; 3 packages without tests). `cargo test --manifest-path gui/src-tauri/Cargo.toml --all-targets` passed (20 tests across 2 suites).
 - `node contracts/p1c/verify.mjs`, its `--self-test`, renderer-public generation/check/privacy, TypeScript typecheck, run-state, renderer-public decoder, and renderer-public privacy tests all passed.
 - No commit or push command was run.
+
+### 2026-07-23 — P2a deterministic Grill contract / fixture gate
+
+#### Scope
+
+- Added only the frozen P2a contract artifacts: canonical Grill, adversarial,
+  and acceptance fixtures; their SHA-256 manifest; the dependency-free Node
+  verifier; the implementation TDD plan; and the contract documentation.
+- The fixture binds every Question, Answer, Default, and Override to the exact
+  P1a root Revision tuple and freezes `ananke.grill.rules.v1` with six rule
+  classes. It has no GUI, daemon, Tauri, store, claim, worker, adapter runtime,
+  model, approval mutation, or command-execution gate.
+
+#### Verification
+
+- `node --check contracts/p2a/verify.mjs && node contracts/p2a/verify.mjs && node contracts/p2a/verify.mjs --self-test` exited `0`.
+- The verifier printed that it verified six rule classes, revision-bound
+  append-only records, the five-question display bound, ten-question rewrite
+  cap, idempotent replay, and adversarial review-only inputs.
+- The self-test printed rejection of frozen-rule drift, command and approval
+  injection, unbounded attempt caps, and append-only question-sequence
+  tampering.
+- No commit or push command was run.
+
+#### Ten-question-cap repair (RED/GREEN)
+
+- RED: the independent review artifact
+  `artifacts/omp/p2a/independent-review-output.md` reproduced the pre-repair
+  boundary failure: nine prior Questions selected five new Questions, yielding
+  fourteen Question records instead of stopping at ten.
+- GREEN: `evaluate()` now bounds new Questions by
+  `min(5, 10 - priorQuestionCount)` before applying the display-slot bound. The
+  canonical acceptance sequence appends one Question at nine (total ten), then
+  returns `needs_rewrite` and no append at ten.
+- GREEN: the self-test consistently rehashes a copied acceptance fixture that
+  asks for five new Questions at nine prior Questions (fourteen total); with
+  only the hard digest pin waived, the evaluator/verifier rejects that forged
+  outcome.
+- `node --check contracts/p2a/verify.mjs`, `node contracts/p2a/verify.mjs`,
+  `node contracts/p2a/verify.mjs --self-test`, `node contracts/p1a/verify.mjs`,
+  and `node contracts/p1c/verify.mjs` each exited `0`.
+- No runtime, UI, daemon, store, model, or commit artifact was changed.
