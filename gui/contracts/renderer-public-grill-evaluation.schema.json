@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ananke.local/contracts/renderer-public-grill-evaluation.schema.json",
+  "title": "GrillEvaluation",
+  "description": "Public bounded result of evaluating one immutable proposal revision. It contains no declaration input, hash, rule-version, daemon envelope, or error detail.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["proposal_id", "revision", "revision_hash", "new_question_ids", "shown_questions", "deferred_rule_classes", "status", "new_records"],
+  "properties": {
+    "proposal_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "revision_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "new_question_ids": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 5,
+      "items": { "type": "string", "pattern": "^grill_question_(observable_outcome|scope_compatibility|acceptance_evidence|destructive_external_authorization|adapter_worktree_isolation|autonomy_budget)$" }
+    },
+    "shown_questions": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 5,
+      "items": {
+        "title": "GrillQuestion",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["proposal_id", "revision", "revision_hash", "question_id", "question_sequence", "record_sequence", "rule_class", "risk", "blocking", "waivable", "default", "remedial_step", "written_at", "written_by"],
+        "properties": {
+          "proposal_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+          "revision": { "type": "integer", "minimum": 1 },
+          "revision_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "question_id": { "type": "string", "pattern": "^grill_question_(observable_outcome|scope_compatibility|acceptance_evidence|destructive_external_authorization|adapter_worktree_isolation|autonomy_budget)$" },
+          "question_sequence": { "type": "integer", "minimum": 1, "maximum": 10 },
+          "record_sequence": { "type": "integer", "minimum": 1, "maximum": 40 },
+          "rule_class": { "type": "string", "enum": ["observable_outcome", "scope_compatibility", "acceptance_evidence", "destructive_external_authorization", "adapter_worktree_isolation", "autonomy_budget"] },
+          "risk": { "type": "string", "enum": ["medium", "high", "critical"] },
+          "blocking": { "const": true },
+          "waivable": { "type": "boolean" },
+          "default": { "type": "string", "enum": ["needs_rewrite", "deny"] },
+          "remedial_step": { "type": "string", "enum": ["declare_observable_outcome", "declare_scope_compatibility", "declare_acceptance_evidence", "record_local_authorization", "require_isolated_worktree", "set_deadline_attempt_cap"] },
+          "written_at": { "type": "string", "x-ananke-utc-timestamp": true },
+          "written_by": { "const": "deterministic_grill" }
+        }
+      }
+    },
+    "deferred_rule_classes": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 6,
+      "items": { "type": "string", "enum": ["observable_outcome", "scope_compatibility", "acceptance_evidence", "destructive_external_authorization", "adapter_worktree_isolation", "autonomy_budget"] }
+    },
+    "status": { "type": "string", "enum": ["clear", "blocked", "needs_rewrite"] },
+    "new_records": { "type": "integer", "minimum": 0, "maximum": 6 }
+  }
+}

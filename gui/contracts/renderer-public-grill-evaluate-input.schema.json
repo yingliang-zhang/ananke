@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ananke.local/contracts/renderer-public-grill-evaluate-input.schema.json",
+  "title": "EvaluateGrillInput",
+  "description": "Public arguments of the future Tauri evaluate_grill command. The bridge derives the private Grill declaration, hash, and rule version from the immutable revision.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["proposal_id", "revision", "revision_hash"],
+  "properties": {
+    "proposal_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "revision_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}

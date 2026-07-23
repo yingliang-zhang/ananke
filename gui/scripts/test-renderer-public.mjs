@@ -10,6 +10,9 @@ const fixture = JSON.parse(
 const proposalFixture = JSON.parse(
   await readFile(resolve(guiDirectory, "../contracts/p1c/fixtures/protocol-v1.canonical.json"), "utf8"),
 );
+const grillFixture = JSON.parse(
+  await readFile(resolve(guiDirectory, "../contracts/p2c/fixtures/protocol-v1.canonical.json"), "utf8"),
+);
 
 async function loadGeneratedModule(name) {
   const source = await readFile(
@@ -81,4 +84,117 @@ for (const { converter, method, value } of proposalDecoders) {
   );
 }
 
-console.log("Generated TypeScript decoders accepted public golden JSON and every P1c DTO, while rejecting malformed payloads.");
+const grillDecoderSpecs = [
+  ["grill-evaluate-input", "toEvaluateGrillInput", grillFixture.commands.evaluate_grill.input],
+  ["grill-record-default-input", "toRecordGrillDefaultInput", grillFixture.commands.record_grill_default.input],
+  ["grill-record-answer-input", "toRecordGrillAnswerInput", grillFixture.commands.record_grill_answer.input],
+  ["grill-record-override-input", "toRecordGrillOverrideInput", grillFixture.commands.record_grill_override.input],
+  ["grill-evaluation", "toGrillEvaluation", grillFixture.commands.evaluate_grill.result],
+  ["grill-question", "toGrillQuestion", grillFixture.commands.evaluate_grill.result.shown_questions[0]],
+  ["grill-default-record", "toGrillDefaultRecord", grillFixture.commands.record_grill_default.result],
+  ["grill-answer-record", "toGrillAnswerRecord", grillFixture.commands.record_grill_answer.result],
+  ["grill-override-record", "toGrillOverrideRecord", grillFixture.commands.record_grill_override.result],
+];
+const grillDecoders = await Promise.all(
+  grillDecoderSpecs.map(async ([name, method, value]) => ({
+    converter: (await loadGeneratedModule(name)).Convert,
+    method,
+    value,
+  })),
+);
+for (const { converter, method, value } of grillDecoders) {
+  assert.deepEqual(decode(converter, method, value), value, `${method} accepts the canonical P2c DTO`);
+  assert.throws(
+    () => decode(converter, method, { ...value, unexpected_public: true }),
+    `${method} rejects unknown public fields`,
+  );
+}
+
+const grillEvaluateConverter = grillDecoders.find(({ method }) => method === "toEvaluateGrillInput").converter;
+for (const field of ["cmd", "command", "model", "prose", "approval", "execution", "input_hash", "rule_version", "socket_path", "error"]) {
+  assert.throws(
+    () => decode(grillEvaluateConverter, "toEvaluateGrillInput", { ...grillFixture.commands.evaluate_grill.input, [field]: true }),
+    `toEvaluateGrillInput rejects renderer-supplied ${field}`,
+  );
+}
+const grillAnswerInputConverter = grillDecoders.find(({ method }) => method === "toRecordGrillAnswerInput").converter;
+assert.throws(
+  () => decode(grillAnswerInputConverter, "toRecordGrillAnswerInput", { ...grillFixture.commands.record_grill_answer.input, answer: "arbitrary prose" }),
+  "toRecordGrillAnswerInput rejects renderer-supplied answer content",
+);
+
+const grillConvertersByMethod = new Map(grillDecoders.map(({ converter, method }) => [method, converter]));
+function rejectGrillMutation(method, value, mutate, message) {
+  const invalid = structuredClone(value);
+  mutate(invalid);
+  assert.throws(() => decode(grillConvertersByMethod.get(method), method, invalid), message);
+}
+
+for (const { method, value } of grillDecoders) {
+  for (const [field, replacement] of [
+    ["proposal_id", "1"],
+    ["revision", 0],
+    ["revision_hash", "sha256:not-a-hash"],
+  ]) {
+    rejectGrillMutation(method, value, (invalid) => { invalid[field] = replacement; }, `${method} enforces ${field}`);
+  }
+}
+
+for (const method of ["toRecordGrillDefaultInput", "toRecordGrillAnswerInput", "toRecordGrillOverrideInput"]) {
+  const value = grillDecoders.find((decoder) => decoder.method === method).value;
+  rejectGrillMutation(method, value, (invalid) => { invalid.question_id = "grill_question_unknown"; }, `${method} enforces the Question ID pattern`);
+}
+
+const grillQuestion = grillFixture.commands.evaluate_grill.result.shown_questions[0];
+for (const [field, replacement] of [
+  ["question_id", "grill_question_autonomy_budget"],
+  ["question_sequence", 0],
+  ["record_sequence", 41],
+  ["blocking", false],
+  ["risk", "medium"],
+  ["written_at", "not-a-timestamp"],
+]) {
+  rejectGrillMutation("toGrillQuestion", grillQuestion, (invalid) => { invalid[field] = replacement; }, `toGrillQuestion enforces ${field}`);
+}
+
+const grillEvaluation = grillFixture.commands.evaluate_grill.result;
+rejectGrillMutation("toGrillEvaluation", grillEvaluation, (invalid) => {
+  invalid.shown_questions.push(structuredClone(invalid.shown_questions[4]));
+}, "toGrillEvaluation limits shown Questions to five");
+rejectGrillMutation("toGrillEvaluation", grillEvaluation, (invalid) => {
+  invalid.new_question_ids.push("grill_question_autonomy_budget");
+}, "toGrillEvaluation limits new Question IDs to five");
+rejectGrillMutation("toGrillEvaluation", grillEvaluation, (invalid) => {
+  invalid.deferred_rule_classes.push(...Array(6).fill("autonomy_budget"));
+}, "toGrillEvaluation limits deferred rule classes to six");
+rejectGrillMutation("toGrillEvaluation", grillEvaluation, (invalid) => { invalid.new_records = 7; }, "toGrillEvaluation limits new records to six");
+rejectGrillMutation("toGrillEvaluation", grillEvaluation, (invalid) => { invalid.shown_questions[0].revision = 2; }, "toGrillEvaluation matches Question Revision identity");
+rejectGrillMutation("toGrillEvaluation", grillEvaluation, (invalid) => { invalid.shown_questions[0].proposal_id = "proposal_p1a_002"; }, "toGrillEvaluation matches Question proposal identity");
+rejectGrillMutation("toGrillEvaluation", grillEvaluation, (invalid) => { invalid.shown_questions[0].revision_hash = `sha256:${"0".repeat(64)}`; }, "toGrillEvaluation matches Question revision hashes");
+rejectGrillMutation("toGrillEvaluation", grillEvaluation, (invalid) => { invalid.shown_questions[0].question_id = "grill_question_autonomy_budget"; }, "toGrillEvaluation matches Question IDs to rule classes");
+rejectGrillMutation("toGrillEvaluation", grillEvaluation, (invalid) => { invalid.shown_questions[0].blocking = false; }, "toGrillEvaluation rejects non-blocking Questions");
+rejectGrillMutation("toGrillEvaluation", grillEvaluation, (invalid) => {
+  [invalid.shown_questions[0], invalid.shown_questions[1]] = [invalid.shown_questions[1], invalid.shown_questions[0]];
+  [invalid.new_question_ids[0], invalid.new_question_ids[1]] = [invalid.new_question_ids[1], invalid.new_question_ids[0]];
+}, "toGrillEvaluation retains P2b priority order");
+rejectGrillMutation("toGrillEvaluation", grillEvaluation, (invalid) => { invalid.new_question_ids[0] = "grill_question_autonomy_budget"; }, "toGrillEvaluation preserves shown Question order for new IDs");
+rejectGrillMutation("toGrillEvaluation", grillEvaluation, (invalid) => { invalid.new_records = 5; }, "toGrillEvaluation matches new record count to Question IDs");
+rejectGrillMutation("toGrillEvaluation", grillEvaluation, (invalid) => { invalid.status = "clear"; }, "toGrillEvaluation permits clear only without active Questions");
+
+for (const method of ["toGrillDefaultRecord", "toGrillAnswerRecord", "toGrillOverrideRecord"]) {
+  const value = grillDecoders.find((decoder) => decoder.method === method).value;
+  for (const [field, replacement] of [["record_sequence", 0], ["record_sequence", 41], ["written_at", "not-a-timestamp"]]) {
+    rejectGrillMutation(method, value, (invalid) => { invalid[field] = replacement; }, `${method} enforces ${field}`);
+  }
+}
+for (const [method, field, replacement] of [
+  ["toGrillDefaultRecord", "default", "acknowledged"],
+  ["toGrillAnswerRecord", "answer", "needs_rewrite"],
+  ["toGrillOverrideRecord", "override", "acknowledged"],
+]) {
+  const value = grillDecoders.find((decoder) => decoder.method === method).value;
+  rejectGrillMutation(method, value, (invalid) => { invalid.question_id = "grill_question_unknown"; }, `${method} enforces the Question ID pattern`);
+  rejectGrillMutation(method, value, (invalid) => { invalid[field] = replacement; }, `${method} enforces its fixed record value`);
+}
+
+console.log("Generated TypeScript decoders accepted public golden JSON plus every P1c and P2c DTO, while rejecting malformed, private, and renderer-supplied Grill fields.");

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ananke.local/contracts/renderer-public-grill-record-answer-input.schema.json",
+  "title": "RecordGrillAnswerInput",
+  "description": "Public arguments of the future Tauri record_grill_answer command. The answer is the fixed acknowledgement selected by the bridge; callers cannot supply prose or an answer value.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["proposal_id", "revision", "revision_hash", "question_id"],
+  "properties": {
+    "proposal_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "revision_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "question_id": { "type": "string", "pattern": "^grill_question_(observable_outcome|scope_compatibility|acceptance_evidence|destructive_external_authorization|adapter_worktree_isolation|autonomy_budget)$" }
+  }
+}

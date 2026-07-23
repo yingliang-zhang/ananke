@@ -3,6 +3,15 @@
 pub mod renderer_public_bootstrap;
 pub mod renderer_public_cancel;
 pub mod renderer_public_event;
+pub mod renderer_public_grill_answer_record;
+pub mod renderer_public_grill_default_record;
+pub mod renderer_public_grill_evaluate_input;
+pub mod renderer_public_grill_evaluation;
+pub mod renderer_public_grill_override_record;
+pub mod renderer_public_grill_question;
+pub mod renderer_public_grill_record_answer_input;
+pub mod renderer_public_grill_record_default_input;
+pub mod renderer_public_grill_record_override_input;
 pub mod renderer_public_health;
 pub mod renderer_public_proposal_activity;
 pub mod renderer_public_proposal_activity_list;
@@ -17,3 +26,314 @@ pub mod renderer_public_proposal_list_input;
 pub mod renderer_public_proposal_mutation;
 pub mod renderer_public_proposal_withdraw_input;
 pub mod renderer_public_run;
+
+#[cfg(test)]
+mod grill_contract_tests {
+    use serde::de::DeserializeOwned;
+    use serde_json::{Value, json};
+
+    fn canonical_fixture() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../../contracts/p2c/fixtures/protocol-v1.canonical.json"
+        ))
+        .expect("decode canonical P2c fixture")
+    }
+
+    fn assert_rejected<T: DeserializeOwned>(value: Value, message: &str) {
+        assert!(serde_json::from_value::<T>(value).is_err(), "{message}");
+    }
+
+    fn assert_decoder<T: DeserializeOwned>(canonical: &Value) {
+        assert!(
+            serde_json::from_value::<T>(canonical.clone()).is_ok(),
+            "canonical P2c DTO must decode"
+        );
+        for field in [
+            "cmd",
+            "command",
+            "token",
+            "error",
+            "socket_path",
+            "identity",
+            "worker",
+            "process",
+            "pid",
+            "path",
+            "root",
+            "secret",
+            "credential",
+            "password",
+            "model",
+            "prompt",
+            "prose",
+            "approval",
+            "execution",
+            "execute",
+            "runtime",
+            "transport",
+            "input_hash",
+            "rule_version",
+            "declarations",
+            "raw",
+        ] {
+            let mut injected = canonical.clone();
+            injected[field] = json!(true);
+            assert_rejected::<T>(injected, "P2c DTO must reject private or unknown fields");
+        }
+        for (field, value) in [
+            ("proposal_id", json!("1")),
+            ("revision", json!(0)),
+            ("revision_hash", json!("sha256:not-a-hash")),
+        ] {
+            let mut invalid = canonical.clone();
+            invalid[field] = value;
+            assert_rejected::<T>(invalid, "P2c DTO must enforce the Revision identity schema");
+        }
+    }
+
+    #[test]
+    fn generated_grill_dto_decoders_enforce_the_p2c_contract() {
+        let fixture = canonical_fixture();
+        let evaluate_input = &fixture["commands"]["evaluate_grill"]["input"];
+        let evaluation = &fixture["commands"]["evaluate_grill"]["result"];
+        let question = &evaluation["shown_questions"][0];
+        let default_input = &fixture["commands"]["record_grill_default"]["input"];
+        let answer_input = &fixture["commands"]["record_grill_answer"]["input"];
+        let override_input = &fixture["commands"]["record_grill_override"]["input"];
+        let default_record = &fixture["commands"]["record_grill_default"]["result"];
+        let answer_record = &fixture["commands"]["record_grill_answer"]["result"];
+        let override_record = &fixture["commands"]["record_grill_override"]["result"];
+
+        assert_decoder::<super::renderer_public_grill_evaluate_input::EvaluateGrillInput>(
+            evaluate_input,
+        );
+        assert_decoder::<super::renderer_public_grill_record_default_input::RecordGrillDefaultInput>(
+            default_input,
+        );
+        assert_decoder::<super::renderer_public_grill_record_answer_input::RecordGrillAnswerInput>(
+            answer_input,
+        );
+        assert_decoder::<
+            super::renderer_public_grill_record_override_input::RecordGrillOverrideInput,
+        >(override_input);
+        assert_decoder::<super::renderer_public_grill_evaluation::GrillEvaluation>(evaluation);
+        assert_decoder::<super::renderer_public_grill_question::GrillQuestion>(question);
+        assert_decoder::<super::renderer_public_grill_default_record::GrillDefaultRecord>(
+            default_record,
+        );
+        assert_decoder::<super::renderer_public_grill_answer_record::GrillAnswerRecord>(
+            answer_record,
+        );
+        assert_decoder::<super::renderer_public_grill_override_record::GrillOverrideRecord>(
+            override_record,
+        );
+
+        for (canonical, decoder) in [
+            (
+                default_input,
+                assert_rejected::<
+                    super::renderer_public_grill_record_default_input::RecordGrillDefaultInput,
+                > as fn(Value, &str),
+            ),
+            (
+                answer_input,
+                assert_rejected::<
+                    super::renderer_public_grill_record_answer_input::RecordGrillAnswerInput,
+                > as fn(Value, &str),
+            ),
+            (
+                override_input,
+                assert_rejected::<
+                    super::renderer_public_grill_record_override_input::RecordGrillOverrideInput,
+                > as fn(Value, &str),
+            ),
+        ] {
+            let mut invalid = canonical.clone();
+            invalid["question_id"] = json!("grill_question_unknown");
+            decoder(invalid, "record input must enforce the Question ID pattern");
+        }
+
+        let mut invalid_question = question.clone();
+        invalid_question["question_id"] = json!("grill_question_autonomy_budget");
+        assert_rejected::<super::renderer_public_grill_question::GrillQuestion>(
+            invalid_question,
+            "Question ID must match its rule class",
+        );
+        let mut invalid_question = question.clone();
+        invalid_question["question_sequence"] = json!(0);
+        assert_rejected::<super::renderer_public_grill_question::GrillQuestion>(
+            invalid_question,
+            "Question sequence must stay in schema bounds",
+        );
+        let mut invalid_question = question.clone();
+        invalid_question["record_sequence"] = json!(41);
+        assert_rejected::<super::renderer_public_grill_question::GrillQuestion>(
+            invalid_question,
+            "Question record sequence must stay in schema bounds",
+        );
+        let mut invalid_question = question.clone();
+        invalid_question["blocking"] = json!(false);
+        assert_rejected::<super::renderer_public_grill_question::GrillQuestion>(
+            invalid_question,
+            "Question blocking must remain true",
+        );
+        let mut invalid_question = question.clone();
+        invalid_question["risk"] = json!("medium");
+        assert_rejected::<super::renderer_public_grill_question::GrillQuestion>(
+            invalid_question,
+            "Question rule properties must match the fixed P2b rule",
+        );
+        let mut invalid_question = question.clone();
+        invalid_question["written_at"] = json!("not-a-timestamp");
+        assert_rejected::<super::renderer_public_grill_question::GrillQuestion>(
+            invalid_question,
+            "Question timestamp must be semantic UTC",
+        );
+
+        let mut six_questions = evaluation.clone();
+        let extra_question = six_questions["shown_questions"][4].clone();
+        six_questions["shown_questions"]
+            .as_array_mut()
+            .expect("shown Questions array")
+            .push(extra_question);
+        assert_rejected::<super::renderer_public_grill_evaluation::GrillEvaluation>(
+            six_questions,
+            "Evaluation must show at most five Questions",
+        );
+        let mut six_question_ids = evaluation.clone();
+        six_question_ids["new_question_ids"]
+            .as_array_mut()
+            .expect("new Question IDs array")
+            .push(json!("grill_question_autonomy_budget"));
+        assert_rejected::<super::renderer_public_grill_evaluation::GrillEvaluation>(
+            six_question_ids,
+            "Evaluation must append at most five Question IDs",
+        );
+        let mut seven_deferred = evaluation.clone();
+        for _ in 0..6 {
+            seven_deferred["deferred_rule_classes"]
+                .as_array_mut()
+                .expect("deferred rule classes array")
+                .push(json!("autonomy_budget"));
+        }
+        assert_rejected::<super::renderer_public_grill_evaluation::GrillEvaluation>(
+            seven_deferred,
+            "Evaluation must bound deferred rule classes",
+        );
+        let mut seven_records = evaluation.clone();
+        seven_records["new_records"] = json!(7);
+        assert_rejected::<super::renderer_public_grill_evaluation::GrillEvaluation>(
+            seven_records,
+            "Evaluation must bound new records",
+        );
+        let mut mismatched_identity = evaluation.clone();
+        mismatched_identity["shown_questions"][0]["revision"] = json!(2);
+        assert_rejected::<super::renderer_public_grill_evaluation::GrillEvaluation>(
+            mismatched_identity,
+            "Question Revision identity must match Evaluation identity",
+        );
+        let mut mismatched_proposal = evaluation.clone();
+        mismatched_proposal["shown_questions"][0]["proposal_id"] = json!("proposal_p1a_002");
+        assert_rejected::<super::renderer_public_grill_evaluation::GrillEvaluation>(
+            mismatched_proposal,
+            "Question proposal identity must match Evaluation identity",
+        );
+        let mut mismatched_hash = evaluation.clone();
+        mismatched_hash["shown_questions"][0]["revision_hash"] =
+            json!(format!("sha256:{}", "0".repeat(64)));
+        assert_rejected::<super::renderer_public_grill_evaluation::GrillEvaluation>(
+            mismatched_hash,
+            "Question revision hash must match Evaluation identity",
+        );
+        let mut mismatched_question_id = evaluation.clone();
+        mismatched_question_id["shown_questions"][0]["question_id"] =
+            json!("grill_question_autonomy_budget");
+        assert_rejected::<super::renderer_public_grill_evaluation::GrillEvaluation>(
+            mismatched_question_id,
+            "Question ID must match its rule class",
+        );
+        let mut non_blocking_question = evaluation.clone();
+        non_blocking_question["shown_questions"][0]["blocking"] = json!(false);
+        assert_rejected::<super::renderer_public_grill_evaluation::GrillEvaluation>(
+            non_blocking_question,
+            "Evaluation must reject non-blocking Questions",
+        );
+        let mut reordered = evaluation.clone();
+        reordered["shown_questions"]
+            .as_array_mut()
+            .expect("shown Questions array")
+            .swap(0, 1);
+        reordered["new_question_ids"]
+            .as_array_mut()
+            .expect("new Question IDs array")
+            .swap(0, 1);
+        assert_rejected::<super::renderer_public_grill_evaluation::GrillEvaluation>(
+            reordered,
+            "Evaluation must retain P2b priority order",
+        );
+        let mut unmatched_new_id = evaluation.clone();
+        unmatched_new_id["new_question_ids"][0] = json!("grill_question_autonomy_budget");
+        assert_rejected::<super::renderer_public_grill_evaluation::GrillEvaluation>(
+            unmatched_new_id,
+            "new Question IDs must preserve shown Question order",
+        );
+        let mut inconsistent_new_records = evaluation.clone();
+        inconsistent_new_records["new_records"] = json!(5);
+        assert_rejected::<super::renderer_public_grill_evaluation::GrillEvaluation>(
+            inconsistent_new_records,
+            "new record count must match appended Question IDs",
+        );
+        let mut clear_with_questions = evaluation.clone();
+        clear_with_questions["status"] = json!("clear");
+        assert_rejected::<super::renderer_public_grill_evaluation::GrillEvaluation>(
+            clear_with_questions,
+            "clear Evaluation cannot retain active Questions",
+        );
+
+        for (canonical, decoder) in [
+            (
+                default_record,
+                assert_rejected::<super::renderer_public_grill_default_record::GrillDefaultRecord>
+                    as fn(Value, &str),
+            ),
+            (
+                answer_record,
+                assert_rejected::<super::renderer_public_grill_answer_record::GrillAnswerRecord>
+                    as fn(Value, &str),
+            ),
+            (
+                override_record,
+                assert_rejected::<super::renderer_public_grill_override_record::GrillOverrideRecord>
+                    as fn(Value, &str),
+            ),
+        ] {
+            let mut invalid = canonical.clone();
+            invalid["record_sequence"] = json!(0);
+            decoder(invalid, "record sequence must enforce the minimum");
+            let mut invalid = canonical.clone();
+            invalid["record_sequence"] = json!(41);
+            decoder(invalid, "record sequence must enforce the maximum");
+            let mut invalid = canonical.clone();
+            invalid["written_at"] = json!("not-a-timestamp");
+            decoder(invalid, "record timestamp must be semantic UTC");
+        }
+        let mut invalid_default = default_record.clone();
+        invalid_default["default"] = json!("acknowledged");
+        assert_rejected::<super::renderer_public_grill_default_record::GrillDefaultRecord>(
+            invalid_default,
+            "default record must enforce its enum",
+        );
+        let mut invalid_answer = answer_record.clone();
+        invalid_answer["answer"] = json!("needs_rewrite");
+        assert_rejected::<super::renderer_public_grill_answer_record::GrillAnswerRecord>(
+            invalid_answer,
+            "answer record must enforce its const",
+        );
+        let mut invalid_override = override_record.clone();
+        invalid_override["override"] = json!("acknowledged");
+        assert_rejected::<super::renderer_public_grill_override_record::GrillOverrideRecord>(
+            invalid_override,
+            "override record must enforce its const",
+        );
+    }
+}
