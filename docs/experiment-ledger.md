@@ -1309,3 +1309,191 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 - **PASS:** P3b now fails closed when any persisted active-fence materialization
   does not match its immutable sealed hash/nonce, with direct relational
   constraint and stale-write non-mutation coverage.
+
+### 2026-07-23 — P3c fenced launch recovery orchestration
+
+#### TDD RED
+
+- `go test ./internal/lifecycle -run '^TestP3C' -count=1` initially exited `1`:
+  the lifecycle package had no fenced-launch orchestrator, staged admission,
+  trusted-readiness, Run-intent, or recovery interfaces.
+
+#### GREEN
+
+- Added a private lifecycle orchestrator over P3b's durable store facts only.
+  Exact immutable launch-spec plus claim admission produces the materialization
+  obligation; an externally supplied trusted opaque materialization fact advances
+  only to Run-intent admission; the current-token `created` Run intent advances
+  only to process admission. The last action is returned, never executed.
+- Every write is re-read through the active full fence before returning an
+  action. Replays reconnect only to the same exact claim identity; a reclaimed,
+  same-ID/different-token, or other stale fence returns the original private
+  stale-fence error.
+- P3a fixture identities seed the exact P1 revision/approval tuple, closed
+  launch-spec hash, sealed hash/nonce, token, materialization ID, and Run ID.
+  Restart/crash-boundary tests construct a fresh private orchestrator over the
+  persisted journal at every stage; concurrent identical admission/readiness/
+  Run-intent calls converge to one durable fact per stage.
+- Unknown claims and corrupt persisted facts return a bounded
+  `waiting_for_human` action carrying the original private store error.
+  Unexpected terminal or evidence intent facts are likewise held for human
+  intervention; no terminal, evidence, materialization, Run, or process result
+  is guessed. Tests assert the existing real `runs` table remains empty.
+
+#### Verification
+
+- Passed:
+
+  ```sh
+  go test ./internal/lifecycle -run '^TestP3C' -count=1
+  go test -race ./internal/lifecycle -run '^TestP3C' -count=1
+  node --check contracts/p3a/verify.mjs
+  node contracts/p3a/verify.mjs
+  ```
+
+- The normal P3a gate verified its unchanged immutable P1-bound launch-spec,
+  closed fingerprints, stale-token denial, fail-closed intervention vectors,
+  and exact recovery identities. Its spawning `--self-test` was intentionally
+  not run in this no-subprocess slice.
+
+#### Scope
+
+- Added only private lifecycle orchestration and in-memory-journal lifecycle
+  tests. No store migration, public daemon command, Tauri/UI/renderer protocol,
+  real Run creation, worktree/filesystem materialization, adapter/OMP/process
+  launch, terminal/evidence settlement, or contract fixture/verifier change was
+  added. No commit or push command was run.
+
+#### Terminal verdict
+
+- **PASS:** P3c reconnects each fenced P3a/P3b admission boundary to its exact
+  next durable obligation and fails closed without inferring process, terminal,
+  or evidence outcomes.
+
+### 2026-07-23 — P3c aggregate recovery isolation repair
+
+#### TDD RED
+
+- The initial store aggregate test named the required per-active recovery result
+  and failed to build because `LaunchRecoveryResult`, its exact hash, boundary,
+  and cause did not exist.
+- After seeding distinct valid P1 revision/approval authorities for the two
+  active launch specs, `go test ./internal/lifecycle -run
+  '^TestP3CFencedLaunchAggregateRecoveryIsolatesCorruptBoundary$' -count=1`
+  failed with `launch admission record is corrupt: materialization does not
+  match sealed launch spec`. The corrupt active boundary suppressed the unrelated
+  valid retry action.
+
+#### GREEN
+
+- `ListLaunchRecoveryBoundaries` now emits one `LaunchRecoveryResult` per
+  active launch-spec hash in stable order. A result contains either its exact
+  durable boundary or the original private cause; a corrupt boundary no longer
+  discards valid aggregate results. Single-launch `GetLaunchRecoveryBoundary`
+  and lifecycle `recover` keep their existing error semantics.
+- `recoverAll` turns each per-boundary cause into an exact-hash
+  `waiting_for_human` action and continues every other boundary. Boundary
+  validation failures—including terminal or evidence intents—remain local
+  `waiting_for_human` actions; no terminal, evidence, process, filesystem, or
+  materialization outcome is inferred.
+- Store and lifecycle regressions seed valid and FK-valid corrupt active
+  boundaries together, retain the valid exact materialization retry, require a
+  corrupt action carrying private `ErrLaunchRecordCorrupt`, and assert the real
+  `runs` table remains empty. A separate evidence-intent recovery vector proves
+  it fails closed with the durable evidence intent present and no terminal
+  intent inferred.
+
+#### Verification
+
+- Passed:
+
+  ```sh
+  go test ./internal/store -run '^TestP3B' -count=1
+  go test ./internal/lifecycle -run '^TestP3C' -count=1
+  go test ./... -count=1 -timeout=180s
+  go test -race ./... -count=1 -timeout=180s
+  node --check contracts/p3a/verify.mjs
+  node contracts/p3a/verify.mjs
+  node contracts/p3a/verify.mjs --self-test
+  ```
+
+- The normal P3a gate verified the unchanged immutable P1-bound launch spec,
+  fencing, fail-closed intervention vectors, and exact recovery identities. Its
+  isolated copied-fixture self-test also rejected terminal, evidence, and
+  process-guess mutations.
+
+#### Scope
+
+- Changed only aggregate launch-recovery projection/orchestration, their
+  in-memory journal tests, and this ledger. No migration, public protocol,
+  daemon, Tauri/UI, renderer, real Run, worktree/filesystem materialization,
+  adapter/OMP invocation, terminal/evidence settlement, contract artifact, or
+  commit was added or run.
+
+#### Terminal verdict
+
+- **PASS:** P3c aggregate recovery now isolates corrupt active boundaries while
+  preserving every valid exact retry action and fails closed per corrupt hash.
+
+### 2026-07-23 — P3c aggregate recovery operational-error propagation repair
+
+#### TDD RED
+
+- Added an aggregate lifecycle regression that first obtains the real active
+  launch-spec hash, then injects either `context.Canceled` or a non-authority
+  read-failure sentinel as that hash's aggregate recovery cause. The initial
+  focused command exited `1` at build because the orchestrator accepted only a
+  concrete `*store.Store`; the new test double could not stand in for a
+  post-discovery store failure.
+
+#### GREEN
+
+- The private lifecycle journal boundary now admits the real journal and the
+  regression's delegating fault store without changing any public API.
+- `recoverAll` now applies the same `isFencedLaunchHumanIntervention`
+  classifier as single-launch `recover`: only a missing claim, missing launch
+  spec, or corrupt record becomes an exact-hash `waiting_for_human` action.
+  Every other per-hash cause returns unchanged as an operational error with no
+  aggregate action list.
+- The aggregate regression verifies both injected error identities with `==`,
+  confirms the real hash was discovered before injection, rejects any
+  `waiting_for_human` masking, and keeps the existing zero-real-Run assertion.
+  The pre-existing mixed valid-plus-corrupt aggregate vector still preserves
+  the valid retry while isolating only the corrupt hash.
+
+#### Verification
+
+- TDD red: `go test ./internal/lifecycle -run
+  '^TestP3CFencedLaunchAggregateRecoveryPropagatesOperationalErrors$' -count=1`
+  initially exited `1` with the concrete-store test-double type error above.
+- Passed:
+
+  ```sh
+  go test ./internal/lifecycle -run '^TestP3CFencedLaunchAggregateRecoveryPropagatesOperationalErrors$' -count=1
+  go test ./internal/lifecycle -run '^TestP3CFencedLaunchAggregateRecovery(IsolatesCorruptBoundary|PropagatesOperationalErrors)$' -count=1
+  go test ./internal/store -run '^TestP3B' -count=1
+  go test ./... -count=1 -timeout=180s
+  go test -race ./... -count=1 -timeout=180s
+  node --check contracts/p3a/verify.mjs
+  node contracts/p3a/verify.mjs
+  node contracts/p3a/verify.mjs --self-test
+  git diff --check
+  ```
+
+- The P3a contract gate verified immutable P1-bound read-only launch authority,
+  sealed materialization, fencing, intervention denial, and exact
+  crash-recovery identities. Its self-test rejected authority and
+  terminal/evidence/process-guess drift.
+
+#### Scope
+
+- Changed only private lifecycle recovery orchestration, lifecycle tests, and
+  this ledger. No migration, public protocol, daemon, Tauri/UI, renderer, real
+  Run, worktree/filesystem materialization, adapter/OMP invocation, or
+  process-launch behavior was added; no commit was run.
+
+#### Terminal verdict
+
+- **PASS:** P3c aggregate recovery preserves per-hash corrupt-authority
+  isolation while returning cancellation and other operational read failures
+  unchanged instead of masking them as `waiting_for_human`.

@@ -299,6 +299,15 @@ type LaunchRecoveryBoundary struct {
 	Action          LaunchRecoveryAction
 }
 
+// LaunchRecoveryResult preserves the exact active launch-spec identity even
+// when its durable boundary cannot be read. Boundary and Cause are mutually
+// exclusive; Cause is the original private read error and no state is inferred.
+type LaunchRecoveryResult struct {
+	LaunchSpecHash string
+	Boundary       *LaunchRecoveryBoundary
+	Cause          error
+}
+
 // HashLaunchSpec validates and hashes the closed P3a declaration using the
 // existing RFC 8785 JCS encoder shared with P1/P2.
 func HashLaunchSpec(spec LaunchSpec) (string, error) {
@@ -1321,8 +1330,10 @@ func (s *Store) GetLaunchRecoveryBoundary(ctx context.Context, launchSpecHash st
 }
 
 // ListLaunchRecoveryBoundaries returns every active durable launch boundary in
-// stable claim creation order. It does not retry, materialize, or launch.
-func (s *Store) ListLaunchRecoveryBoundaries(ctx context.Context) ([]LaunchRecoveryBoundary, error) {
+// stable claim creation order. A corrupt boundary retains its exact launch-spec
+// hash and private cause without suppressing unrelated active boundaries. It
+// does not retry, materialize, or launch.
+func (s *Store) ListLaunchRecoveryBoundaries(ctx context.Context) ([]LaunchRecoveryResult, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT head.launch_spec_hash FROM launch_claim_heads head
 		LEFT JOIN task_claims claim ON claim.launch_spec_hash = head.launch_spec_hash
 			AND claim.claim_id = head.claim_id AND claim.claim_token_hash = head.claim_token_hash
@@ -1346,13 +1357,16 @@ func (s *Store) ListLaunchRecoveryBoundaries(ctx context.Context) ([]LaunchRecov
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	boundaries := make([]LaunchRecoveryBoundary, 0, len(hashes))
+	results := make([]LaunchRecoveryResult, 0, len(hashes))
 	for _, hash := range hashes {
+		result := LaunchRecoveryResult{LaunchSpecHash: hash}
 		boundary, err := s.GetLaunchRecoveryBoundary(ctx, hash)
 		if err != nil {
-			return nil, err
+			result.Cause = err
+		} else {
+			result.Boundary = &boundary
 		}
-		boundaries = append(boundaries, boundary)
+		results = append(results, result)
 	}
-	return boundaries, nil
+	return results, nil
 }

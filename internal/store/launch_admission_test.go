@@ -467,8 +467,12 @@ func TestP3BRejectsCorruptP1AndLaunchAuthorityVectors(t *testing.T) {
 	if _, err := s.GetLaunchClaim(ctx, request.LaunchSpecHash); !errors.Is(err, ErrLaunchRecordCorrupt) {
 		t.Fatalf("GetLaunchClaim corrupt head error = %v, want %v", err, ErrLaunchRecordCorrupt)
 	}
-	if _, err := s.ListLaunchRecoveryBoundaries(ctx); !errors.Is(err, ErrLaunchRecordCorrupt) {
-		t.Fatalf("ListLaunchRecoveryBoundaries corrupt head error = %v, want %v", err, ErrLaunchRecordCorrupt)
+	results, err := s.ListLaunchRecoveryBoundaries(ctx)
+	if err != nil {
+		t.Fatalf("ListLaunchRecoveryBoundaries corrupt head error = %v, want isolated result", err)
+	}
+	if len(results) != 1 || results[0].LaunchSpecHash != request.LaunchSpecHash || results[0].Boundary != nil || !errors.Is(results[0].Cause, ErrLaunchRecordCorrupt) {
+		t.Fatalf("ListLaunchRecoveryBoundaries corrupt head result = %+v, want exact corrupt result", results)
 	}
 	if _, err := s.RecordLaunchMaterializationReady(ctx, LaunchMaterializationRequest{
 		Fence:               claim.Fence,
@@ -480,6 +484,52 @@ func TestP3BRejectsCorruptP1AndLaunchAuthorityVectors(t *testing.T) {
 	}
 }
 
+func TestP3BAggregateRecoveryPreservesValidAndCorruptActiveBoundaries(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	validRequest, _ := approvedLaunchAdmissionRequest(t, s)
+	corruptRequest := approvedP3BAggregateAdmissionRequest(t, s)
+	if _, err := s.StoreLaunchSpec(ctx, validRequest); err != nil {
+		t.Fatalf("store valid launch spec: %v", err)
+	}
+	validClaim := mustAcquireP3BClaim(t, s, validRequest.LaunchSpecHash, "claim_p3b_valid", "sha256:1111111111111111111111111111111111111111111111111111111111111111")
+	if _, err := s.StoreLaunchSpec(ctx, corruptRequest); err != nil {
+		t.Fatalf("store corrupt launch spec: %v", err)
+	}
+	corruptClaim := mustAcquireP3BClaim(t, s, corruptRequest.LaunchSpecHash, "claim_p3b_corrupt", "sha256:2222222222222222222222222222222222222222222222222222222222222222")
+	if _, err := s.DB().ExecContext(ctx, `INSERT INTO launch_materializations
+		(materialization_id, launch_spec_hash, claim_id, claim_token_hash, fence_generation, materialization_hash, nonce, state, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, "materialization_p3b_aggregate_corrupt", corruptClaim.LaunchSpecHash, corruptClaim.ClaimID, corruptClaim.ClaimTokenHash, corruptClaim.FenceGeneration,
+		"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "nonce:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", LaunchMaterializationStateReady, nowStamp()); err != nil {
+		t.Fatalf("seed corrupt materialization: %v", err)
+	}
+	if _, err := s.DB().ExecContext(ctx, `INSERT INTO launch_admission_outbox
+		(outbox_id, launch_spec_hash, claim_id, claim_token_hash, fence_generation, sequence, state, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, "outbox_p3b_aggregate_corrupt", corruptClaim.LaunchSpecHash, corruptClaim.ClaimID, corruptClaim.ClaimTokenHash, corruptClaim.FenceGeneration, 2, LaunchOutboxPendingRunAdmission, nowStamp()); err != nil {
+		t.Fatalf("seed corrupt outbox: %v", err)
+	}
+
+	results, err := s.ListLaunchRecoveryBoundaries(ctx)
+	if err != nil {
+		t.Fatalf("aggregate recovery boundaries: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("aggregate recovery result count = %d, want 2", len(results))
+	}
+	byHash := make(map[string]LaunchRecoveryResult, len(results))
+	for _, result := range results {
+		byHash[result.LaunchSpecHash] = result
+	}
+	valid, found := byHash[validRequest.LaunchSpecHash]
+	if !found || valid.Cause != nil || valid.Boundary == nil || valid.Boundary.LaunchSpecHash != validRequest.LaunchSpecHash || valid.Boundary.Claim != validClaim || valid.Boundary.Action != LaunchRecoveryRetryMaterialization {
+		t.Fatalf("valid aggregate recovery result = %+v, want exact materialization retry", valid)
+	}
+	corrupt, found := byHash[corruptRequest.LaunchSpecHash]
+	if !found || corrupt.Boundary != nil || !errors.Is(corrupt.Cause, ErrLaunchRecordCorrupt) {
+		t.Fatalf("corrupt aggregate recovery result = %+v, want exact hash and corrupt cause", corrupt)
+	}
+	assertP3BLaunchTableCount(t, s, "runs", 0)
+}
 func TestP3BFailsClosedOnFKValidSealedMaterializationCorruption(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -623,6 +673,30 @@ func approvedLaunchAdmissionRequest(t *testing.T, s *Store) (LaunchAdmissionRequ
 		ApprovedAt:   *approval.DecidedAt,
 		ApprovedBy:   *approval.DecidedBy,
 		State:        ApprovalStateApproved,
+	}
+}
+
+func approvedP3BAggregateAdmissionRequest(t *testing.T, s *Store) LaunchAdmissionRequest {
+	t.Helper()
+	ctx := context.Background()
+	create := createProposalRequestFromFixture(t)
+	create.IdempotencyKey = "create_p3b_aggregate_002"
+	created, err := s.CreateProposal(ctx, create)
+	if err != nil {
+		t.Fatalf("create alternate P1 proposal: %v", err)
+	}
+	decision := decisionProposalRequestFromFixture(t, created, ApprovalStateApproved)
+	decision.IdempotencyKey = "approve_p3b_aggregate_002"
+	if _, err := s.DecideProposalApproval(ctx, decision); err != nil {
+		t.Fatalf("approve alternate P1 proposal: %v", err)
+	}
+	fixture := readP3ALaunchAdmissionFixture(t)
+	spec := fixture.Admission.LaunchSpec
+	spec.Revision = LaunchRevisionIdentity{ProposalID: created.ProposalID, Revision: created.Revision, RevisionHash: created.RevisionHash}
+	return LaunchAdmissionRequest{
+		Spec:           spec,
+		LaunchSpecHash: mustHashLaunchSpec(t, spec),
+		ApprovalID:     created.ApprovalID,
 	}
 }
 
