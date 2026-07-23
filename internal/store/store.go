@@ -83,8 +83,9 @@ type migration struct {
 // the base journal; v2 adds supervisor identity; v3 adds outbox diagnostics;
 // v4 adds the durable transcript-finalization handoff; v5 adds durable
 // cancellation intent; v6 adds durable transcript file identity; v7 adds the
-// P1b durable task-proposal journal; v8 repairs v7 identity constraints; and
-// v9 makes the Approval and RevisionLifecycle pair reciprocal.
+// P1b durable task-proposal journal; v8 repairs v7 identity constraints; v9
+// makes the Approval and RevisionLifecycle pair reciprocal; and v10 adds the
+// P2b review-only Grill journal.
 var migrations = []migration{
 	{version: 1, up: migrateV1},
 	{version: 2, up: migrateV2},
@@ -95,6 +96,7 @@ var migrations = []migration{
 	{version: 7, up: migrateV7},
 	{version: 8, up: migrateV8},
 	{version: 9, up: migrateV9},
+	{version: 10, up: migrateV10},
 }
 
 // SchemaVersion reports the highest applied migration version.
@@ -723,6 +725,71 @@ func createTaskProposalSchemaV9(_ context.Context, tx *sql.Tx) error {
 	}
 	for _, statement := range statements {
 		if _, err := tx.Exec(statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateV10 creates the P2b review-only Grill journal. Records are insert-only
+// and sequences are scoped to the exact immutable P1 Revision tuple.
+func migrateV10(ctx context.Context, tx *sql.Tx) error {
+	statements := []string{
+		`CREATE TABLE grill_evaluations (
+			proposal_id TEXT NOT NULL,
+			revision INTEGER NOT NULL CHECK (revision > 0),
+			revision_hash TEXT NOT NULL,
+			rule_version TEXT NOT NULL,
+			input_hash TEXT NOT NULL,
+			input_json TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY (proposal_id, revision, revision_hash, rule_version, input_hash),
+			FOREIGN KEY (proposal_id, revision, revision_hash)
+				REFERENCES task_proposal_revisions(proposal_id, revision, revision_hash)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE grill_records (
+			proposal_id TEXT NOT NULL,
+			revision INTEGER NOT NULL CHECK (revision > 0),
+			revision_hash TEXT NOT NULL,
+			rule_version TEXT NOT NULL,
+			record_sequence INTEGER NOT NULL CHECK (record_sequence > 0),
+			schema_version TEXT NOT NULL CHECK (schema_version IN (
+				'ananke.grill.question.v1',
+				'ananke.grill.default.v1',
+				'ananke.grill.answer.v1',
+				'ananke.grill.override.v1'
+			)),
+			question_id TEXT,
+			question_sequence INTEGER CHECK (question_sequence IS NULL OR question_sequence > 0),
+			rule_class TEXT,
+			risk TEXT,
+			blocking INTEGER,
+			waivable INTEGER,
+			default_value TEXT,
+			remedial_step TEXT,
+			answer_value TEXT,
+			override_value TEXT,
+			written_at TEXT NOT NULL,
+			written_by TEXT NOT NULL CHECK (written_by IN ('deterministic_grill', 'local_gui_operator')),
+			PRIMARY KEY (proposal_id, revision, revision_hash, record_sequence),
+			UNIQUE (proposal_id, revision, revision_hash, question_sequence),
+			UNIQUE (proposal_id, revision, revision_hash, rule_version, schema_version, question_id),
+			FOREIGN KEY (proposal_id, revision, revision_hash)
+				REFERENCES task_proposal_revisions(proposal_id, revision, revision_hash)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE INDEX idx_grill_records_revision_question ON grill_records
+			(proposal_id, revision, revision_hash, schema_version, question_sequence)`,
+		`CREATE TRIGGER grill_records_insert_only_update
+			BEFORE UPDATE ON grill_records
+			BEGIN SELECT RAISE(ABORT, 'grill records are append-only'); END`,
+		`CREATE TRIGGER grill_records_insert_only_delete
+			BEFORE DELETE ON grill_records
+			BEGIN SELECT RAISE(ABORT, 'grill records are append-only'); END`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return err
 		}
 	}

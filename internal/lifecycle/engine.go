@@ -1587,6 +1587,7 @@ type apiRequest struct {
 	WorkerEnv    []string            `json:"worker_env,omitempty"`
 	AfterSeq     int64               `json:"after_seq,omitempty"`
 	Proposal     *apiProposalRequest `json:"proposal,omitempty"`
+	Grill        json.RawMessage     `json:"grill,omitempty"`
 }
 
 type apiResponse struct {
@@ -1601,6 +1602,7 @@ type apiResponse struct {
 	Proposals        *[]jsonProposal         `json:"proposals,omitempty"`
 	ProposalDetail   *jsonProposalDetail     `json:"proposal_detail,omitempty"`
 	ProposalActivity *[]jsonProposalActivity `json:"proposal_activity,omitempty"`
+	GrillEvaluation  *jsonGrillEvaluation    `json:"grill_evaluation,omitempty"`
 }
 
 type jsonRun struct {
@@ -1634,6 +1636,15 @@ type apiProposalRequest struct {
 	RevisionHash                string                   `json:"revision_hash,omitempty"`
 	Decision                    string                   `json:"decision,omitempty"`
 	Reason                      string                   `json:"reason,omitempty"`
+}
+
+// apiGrillIdentity is private daemon transport for an append-only Grill
+// operator record. It is deliberately independent of the renderer protocol.
+type apiGrillIdentity struct {
+	ProposalID   string `json:"proposal_id"`
+	Revision     int    `json:"revision"`
+	RevisionHash string `json:"revision_hash"`
+	QuestionID   string `json:"question_id"`
 }
 
 type apiProposalRevisionInput struct {
@@ -1762,6 +1773,34 @@ type jsonProposalActivity struct {
 	WrittenAt    string `json:"written_at"`
 }
 
+type jsonGrillEvaluation struct {
+	ProposalID          string   `json:"proposal_id"`
+	Revision            int      `json:"revision"`
+	RevisionHash        string   `json:"revision_hash"`
+	RuleVersion         string   `json:"rule_version"`
+	InputHash           string   `json:"input_hash"`
+	NewQuestionIDs      []string `json:"new_question_ids"`
+	ShownQuestionIDs    []string `json:"shown_question_ids"`
+	DeferredRuleClasses []string `json:"deferred_rule_classes"`
+	Status              string   `json:"status"`
+	NewRecords          int      `json:"new_records"`
+}
+
+func jsonGrillEvaluationFromStore(evaluation store.GrillEvaluation) *jsonGrillEvaluation {
+	return &jsonGrillEvaluation{
+		ProposalID:          evaluation.ProposalID,
+		Revision:            evaluation.Revision,
+		RevisionHash:        evaluation.RevisionHash,
+		RuleVersion:         evaluation.RuleVersion,
+		InputHash:           evaluation.InputHash,
+		NewQuestionIDs:      append([]string{}, evaluation.NewQuestionIDs...),
+		ShownQuestionIDs:    append([]string{}, evaluation.ShownQuestionIDs...),
+		DeferredRuleClasses: append([]string{}, evaluation.DeferredRuleClasses...),
+		Status:              string(evaluation.Status),
+		NewRecords:          evaluation.NewRecords,
+	}
+}
+
 func jsonProposalMutationFromStore(mutation store.ProposalMutation) *jsonProposalMutation {
 	return &jsonProposalMutation{
 		ProposalID: mutation.ProposalID, Revision: mutation.Revision, RevisionHash: mutation.RevisionHash, ApprovalID: mutation.ApprovalID,
@@ -1882,6 +1921,14 @@ func (e *Engine) handleCmd(ctx context.Context, req *apiRequest) apiResponse {
 		return e.handleDecideProposalApproval(ctx, req)
 	case "withdraw-proposal":
 		return e.handleWithdrawProposal(ctx, req)
+	case "evaluate-grill":
+		return e.handleEvaluateGrill(ctx, req)
+	case "record-grill-default":
+		return e.handleRecordGrillDefault(ctx, req)
+	case "record-grill-answer":
+		return e.handleRecordGrillAnswer(ctx, req)
+	case "record-grill-override":
+		return e.handleRecordGrillOverride(ctx, req)
 	default:
 		return apiResponse{OK: false, Error: "unknown command: " + req.Cmd}
 	}
@@ -2021,6 +2068,62 @@ func (e *Engine) handleWithdrawProposal(ctx context.Context, req *apiRequest) ap
 		return apiResponse{OK: false, Error: err.Error()}
 	}
 	return apiResponse{OK: true, ProposalMutation: jsonProposalMutationFromStore(mutation)}
+}
+
+// decodeGrillPayload rejects unknown fields recursively before any store call.
+// The daemon's ordinary request envelope is intentionally extensible; the P2a
+// Grill object is closed and must fail raw Revision-prose injection.
+func decodeGrillPayload(req *apiRequest, destination any) apiResponse {
+	const invalidGrillRequestError = "invalid grill request"
+	if len(req.Grill) == 0 {
+		return apiResponse{OK: false, Error: "grill request required"}
+	}
+	decoder := json.NewDecoder(bytes.NewReader(req.Grill))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return apiResponse{OK: false, Error: invalidGrillRequestError}
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return apiResponse{OK: false, Error: invalidGrillRequestError}
+	}
+	return apiResponse{}
+}
+
+func (e *Engine) handleEvaluateGrill(ctx context.Context, req *apiRequest) apiResponse {
+	var input store.GrillEvaluationRequest
+	if invalid := decodeGrillPayload(req, &input); invalid.Error != "" {
+		return invalid
+	}
+	evaluation, err := e.store.EvaluateGrill(ctx, input)
+	if err != nil {
+		return apiResponse{OK: false, Error: err.Error()}
+	}
+	return apiResponse{OK: true, GrillEvaluation: jsonGrillEvaluationFromStore(evaluation)}
+}
+
+func (e *Engine) handleRecordGrillDefault(ctx context.Context, req *apiRequest) apiResponse {
+	return e.handleRecordGrill(ctx, req, e.store.RecordGrillDefault)
+}
+
+func (e *Engine) handleRecordGrillAnswer(ctx context.Context, req *apiRequest) apiResponse {
+	return e.handleRecordGrill(ctx, req, e.store.RecordGrillAnswer)
+}
+
+func (e *Engine) handleRecordGrillOverride(ctx context.Context, req *apiRequest) apiResponse {
+	return e.handleRecordGrill(ctx, req, e.store.RecordGrillOverride)
+}
+
+func (e *Engine) handleRecordGrill(ctx context.Context, req *apiRequest, record func(context.Context, store.GrillRevisionIdentity, string) (bool, error)) apiResponse {
+	var input apiGrillIdentity
+	if invalid := decodeGrillPayload(req, &input); invalid.Error != "" {
+		return invalid
+	}
+	if _, err := record(ctx, store.GrillRevisionIdentity{
+		ProposalID: input.ProposalID, Revision: input.Revision, RevisionHash: input.RevisionHash,
+	}, input.QuestionID); err != nil {
+		return apiResponse{OK: false, Error: err.Error()}
+	}
+	return apiResponse{OK: true}
 }
 
 func (e *Engine) handleLaunchRun(ctx context.Context, req *apiRequest) apiResponse {

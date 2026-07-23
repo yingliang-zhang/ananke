@@ -754,3 +754,91 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
   `node contracts/p2a/verify.mjs --self-test`, `node contracts/p1a/verify.mjs`,
   and `node contracts/p1c/verify.mjs` each exited `0`.
 - No runtime, UI, daemon, store, model, or commit artifact was changed.
+
+### 2026-07-23 — P2b deterministic Grill runtime
+
+#### Scope
+
+- Added the review-only Grill store implementation in `internal/store/grill.go`
+  and schema migration v10. The evaluator uses the frozen
+  `ananke.grill.rules.v1` table, hashes only the closed declaration input, and
+  stores the exact P1 Revision tuple verbatim.
+- Added insert-only `grill_evaluations` and `grill_records` tables. Question
+  records have contiguous per-Revision record/question sequences; Default,
+  Answer, and the sole scope/compatibility Override are append-only and
+  idempotent on replay. SQLite triggers reject update and delete.
+- Added private daemon commands `evaluate-grill`, `record-grill-default`,
+  `record-grill-answer`, and `record-grill-override`. The nested `grill`
+  payload is decoded with `DisallowUnknownFields`, so raw Revision prose and
+  other non-contract properties fail before reaching the store.
+- Added the matching private native/Tauri daemon-wire types and bridge methods.
+  No generated renderer-public DTO, registered Tauri command, renderer UI,
+  model call, claim, worker, adapter, approval mutation, or execution path was
+  added.
+
+#### TDD and verification
+
+- Focused: `go test ./internal/store ./internal/lifecycle -run Grill` exited
+  `0` (both packages passed). The Store cases cover canonical JCS hashing,
+  all six rules, replay/restart, append-only operator rows, waivers,
+  concurrent evaluation, ten-question capacity, identity/input-hash failures,
+  and migration from the P1b head. The lifecycle case exercises the live
+  private daemon commands and rejects injected `task` prose.
+- Focused native boundary: `cargo test --manifest-path
+  gui/src-tauri/Cargo.toml private_grill_wire_is_closed_and_not_renderer_public`
+  exited `0`; it proves the private wire has only the closed Grill input and no
+  renderer-public proposal fields or forbidden review/execution fields.
+- Full Go: `go test ./...` exited `0` (3 packages passed; 3 packages had no
+  tests). The historical v7 migration test now asserts the migration-list head
+  and verifies v8, v9, and v10 history rows rather than retaining an obsolete
+  hard-coded v9 head.
+- Full Rust: `cargo test --manifest-path gui/src-tauri/Cargo.toml` exited `0`
+  (21 tests across 3 suites).
+- Full TypeScript/public-contract gates all exited `0`: `npm run typecheck`,
+  `check:renderer-public`, `check:renderer-public-privacy`, `test:state`,
+  `test:renderer-public`, and `test:renderer-public-privacy`.
+- Contract gates all exited `0`: `node --check contracts/p2a/verify.mjs`, both
+  P2a verifier modes, `node contracts/p1a/verify.mjs`, and
+  `node contracts/p1c/verify.mjs`. The P2a self-test rejected frozen-rule
+  drift, command/approval injection, unbounded attempt caps, record-sequence
+  tampering, and a forged nine-to-fourteen question overrun.
+- No commit or push command was run.
+
+### 2026-07-23 — P2b M1 Grill decoder privacy repair
+
+#### Scope
+
+- Repaired only the private lifecycle Grill decoder and its live daemon-socket
+  regression in `internal/lifecycle/engine.go` and
+  `internal/lifecycle/grill_api_test.go`.
+- `DisallowUnknownFields` remains enabled. Every failed first or trailing
+  `json.Decoder.Decode` now returns the fixed daemon error `invalid grill
+  request`; no parser error is concatenated into the response.
+- No UI, model, worker, claim, execution, approval, or renderer-public code
+  was changed. No commit or push command was run.
+
+#### TDD and verification
+
+- RED: `go test ./internal/lifecycle -run
+  '^TestGrillCommandsServeFrozenPrivateReviewProtocol$' -count=1 -timeout
+  120s` exited `1`: the live daemon response exposed `json: unknown field
+  "raw_revision_prose_secret"` instead of the required stable error.
+- GREEN: the same command exited `0` after the decoder repair. The regression
+  injects nested `raw_revision_prose_secret` with a sentinel value, asserts a
+  rejected response with no `grill_evaluation`, requires the exact stable
+  error, and inspects the daemon's serialized JSON to deny the field name,
+  value, and `json: unknown field` diagnostic.
+- `gofmt -d internal/lifecycle/engine.go
+  internal/lifecycle/grill_api_test.go` produced no output.
+- Focused Grill Go: `go test ./internal/store ./internal/lifecycle -run Grill
+  -count=1 -timeout 120s` exited `0` (both packages passed).
+- Full Go: `go test ./... -count=1 -timeout 300s` exited `0` (3 packages
+  passed; 3 packages had no tests).
+- Full native boundary: `cargo test --manifest-path gui/src-tauri/Cargo.toml`
+  exited `0` (21 tests across 3 suites).
+- GUI public gates all exited `0`: `npm --prefix gui run typecheck`,
+  `check:renderer-public`, `check:renderer-public-privacy`, `test:state`,
+  `test:renderer-public`, and `test:renderer-public-privacy`.
+- Contract gates all exited `0`: `node --check contracts/p2a/verify.mjs`, P2a
+  verifier and self-test, P1a verifier and self-test, and P1c verifier and
+  self-test.

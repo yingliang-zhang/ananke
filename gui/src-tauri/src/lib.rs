@@ -43,6 +43,16 @@ const DATA_SOCKET_ALIAS_NAME: &str = "data";
 const TOKEN_FILE_NAME: &str = "daemon-token";
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(5);
 const API_TIMEOUT: Duration = Duration::from_secs(5);
+#[allow(
+    dead_code,
+    reason = "P2b reserves this private native/daemon protocol without a renderer call site"
+)]
+const GRILL_RULE_VERSION: &str = "ananke.grill.rules.v1";
+#[allow(
+    dead_code,
+    reason = "P2b reserves this private native/daemon protocol without a renderer call site"
+)]
+const GRILL_INPUT_SCHEMA_VERSION: &str = "ananke.grill.input.v1";
 
 #[derive(Debug)]
 enum BridgeError {
@@ -347,6 +357,8 @@ struct GoRequest<'a> {
     after_seq: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     proposal: Option<GoProposalRequest<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grill: Option<GoGrillRequest<'a>>,
 }
 
 impl<'a> GoRequest<'a> {
@@ -364,6 +376,7 @@ impl<'a> GoRequest<'a> {
             worker_env: None,
             after_seq: None,
             proposal: None,
+            grill: None,
         }
     }
 }
@@ -391,6 +404,12 @@ struct GoResponse {
     proposal_detail: Option<serde_json::Value>,
     #[serde(default)]
     proposal_activity: Option<serde_json::Value>,
+    #[serde(default)]
+    #[allow(
+        dead_code,
+        reason = "P2b private response is intentionally not a renderer model"
+    )]
+    grill_evaluation: Option<serde_json::Value>,
 }
 // GoProposalRequest and its nested records are private bridge transport.
 // Generated renderer-public types are converted at the Tauri edge below.
@@ -420,6 +439,74 @@ struct GoProposalRequest<'a> {
     decision: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'a str>,
+}
+
+// GoGrillRequest and its nested records are private native/daemon transport.
+// No generated renderer-public type or Tauri command exposes this review-only
+// protocol.
+#[allow(dead_code, reason = "P2b private protocol has no renderer call site")]
+#[derive(Serialize)]
+#[serde(untagged)]
+enum GoGrillRequest<'a> {
+    Evaluate(GoGrillEvaluationRequest<'a>),
+    Record(GoGrillRecordRequest<'a>),
+}
+
+#[derive(Serialize)]
+struct GoGrillEvaluationRequest<'a> {
+    input: GoGrillInput<'a>,
+    input_hash: &'a str,
+    rule_version: &'static str,
+}
+
+#[derive(Serialize)]
+struct GoGrillInput<'a> {
+    schema_version: &'static str,
+    proposal_id: &'a str,
+    revision: i64,
+    revision_hash: &'a str,
+    declarations: GoGrillDeclarations<'a>,
+}
+
+#[derive(Serialize)]
+struct GoGrillDeclarations<'a> {
+    observable_outcome: &'a str,
+    scope_compatibility: &'a str,
+    acceptance_evidence: &'a str,
+    destructive_external: &'a str,
+    local_authorization: &'a str,
+    adapter_mode: &'a str,
+    worktree_isolation: &'a str,
+    autonomy: GoGrillAutonomy<'a>,
+}
+
+#[derive(Serialize)]
+struct GoGrillAutonomy<'a> {
+    deadline: Option<&'a str>,
+    attempt_cap: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct GoGrillRecordRequest<'a> {
+    proposal_id: &'a str,
+    revision: i64,
+    revision_hash: &'a str,
+    question_id: &'a str,
+}
+
+#[allow(dead_code, reason = "P2b private protocol has no renderer call site")]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct GoGrillEvaluation {
+    proposal_id: String,
+    revision: i64,
+    revision_hash: String,
+    rule_version: String,
+    input_hash: String,
+    new_question_ids: Vec<String>,
+    shown_question_ids: Vec<String>,
+    deferred_rule_classes: Vec<String>,
+    status: String,
+    new_records: i64,
 }
 
 #[derive(Serialize)]
@@ -872,6 +959,70 @@ impl Backend {
         decode_proposal_result(self.request(request)?.proposal_mutation)
     }
 
+    #[allow(
+        dead_code,
+        reason = "P2b private bridge is intentionally not a renderer command"
+    )]
+    fn evaluate_grill(
+        &mut self,
+        input: GoGrillInput<'_>,
+        input_hash: &str,
+    ) -> Result<GoGrillEvaluation, BridgeError> {
+        self.ensure_daemon()?;
+        let mut request = GoRequest::new("evaluate-grill", &self.token);
+        request.grill = Some(GoGrillRequest::Evaluate(GoGrillEvaluationRequest {
+            input,
+            input_hash,
+            rule_version: GRILL_RULE_VERSION,
+        }));
+        decode_grill_result(self.request(request)?.grill_evaluation)
+    }
+
+    #[allow(
+        dead_code,
+        reason = "P2b private bridge is intentionally not a renderer command"
+    )]
+    fn record_grill_default(
+        &mut self,
+        record: GoGrillRecordRequest<'_>,
+    ) -> Result<(), BridgeError> {
+        self.record_grill("record-grill-default", record)
+    }
+
+    #[allow(
+        dead_code,
+        reason = "P2b private bridge is intentionally not a renderer command"
+    )]
+    fn record_grill_answer(&mut self, record: GoGrillRecordRequest<'_>) -> Result<(), BridgeError> {
+        self.record_grill("record-grill-answer", record)
+    }
+
+    #[allow(
+        dead_code,
+        reason = "P2b private bridge is intentionally not a renderer command"
+    )]
+    fn record_grill_override(
+        &mut self,
+        record: GoGrillRecordRequest<'_>,
+    ) -> Result<(), BridgeError> {
+        self.record_grill("record-grill-override", record)
+    }
+
+    #[allow(
+        dead_code,
+        reason = "P2b private bridge is intentionally not a renderer command"
+    )]
+    fn record_grill(
+        &mut self,
+        command: &str,
+        record: GoGrillRecordRequest<'_>,
+    ) -> Result<(), BridgeError> {
+        self.ensure_daemon()?;
+        let mut request = GoRequest::new(command, &self.token);
+        request.grill = Some(GoGrillRequest::Record(record));
+        self.request(request).map(|_| ())
+    }
+
     #[cfg(test)]
     fn shutdown_for_test(&mut self) {
         if let Some(mut child) = self.spawned_daemon.take() {
@@ -885,6 +1036,14 @@ impl Backend {
 fn decode_proposal_result<T: DeserializeOwned>(
     value: Option<serde_json::Value>,
 ) -> Result<T, BridgeError> {
+    serde_json::from_value(value.ok_or(BridgeError::Protocol)?).map_err(BridgeError::from)
+}
+
+#[allow(
+    dead_code,
+    reason = "P2b private bridge is intentionally not a renderer command"
+)]
+fn decode_grill_result(value: Option<serde_json::Value>) -> Result<GoGrillEvaluation, BridgeError> {
     serde_json::from_value(value.ok_or(BridgeError::Protocol)?).map_err(BridgeError::from)
 }
 
@@ -1107,6 +1266,63 @@ mod tests {
         let root = PathBuf::from(format!("/tmp/ananke-gui-{label}-{}", test_nonce()));
         ensure_private_runtime_dir(&root).expect("create private test runtime directory");
         TestEnvironment { root }
+    }
+
+    #[test]
+    fn private_grill_wire_is_closed_and_not_renderer_public() {
+        let mut request = GoRequest::new("evaluate-grill", "a-token");
+        request.grill = Some(GoGrillRequest::Evaluate(GoGrillEvaluationRequest {
+            input: GoGrillInput {
+                schema_version: GRILL_INPUT_SCHEMA_VERSION,
+                proposal_id: "proposal_p2b_001",
+                revision: 1,
+                revision_hash: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                declarations: GoGrillDeclarations {
+                    observable_outcome: "declared",
+                    scope_compatibility: "declared",
+                    acceptance_evidence: "declared",
+                    destructive_external: "none",
+                    local_authorization: "not_required",
+                    adapter_mode: "none",
+                    worktree_isolation: "not_applicable",
+                    autonomy: GoGrillAutonomy {
+                        deadline: Some("2026-12-31T23:59:59Z"),
+                        attempt_cap: Some(3),
+                    },
+                },
+            },
+            input_hash: "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            rule_version: GRILL_RULE_VERSION,
+        }));
+        let wire = serde_json::to_value(request).expect("serialize private Grill request");
+        assert_eq!(
+            wire.as_object()
+                .expect("private Grill request object")
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["cmd", "grill", "token"],
+            "Grill transport must stay separate from renderer-public proposal fields"
+        );
+        assert_eq!(
+            wire["grill"]["input"]["schema_version"],
+            GRILL_INPUT_SCHEMA_VERSION
+        );
+        assert_eq!(wire["grill"]["rule_version"], GRILL_RULE_VERSION);
+        for forbidden in [
+            "task",
+            "approval",
+            "command",
+            "model_output",
+            "worker",
+            "execution",
+        ] {
+            assert!(
+                wire["grill"].get(forbidden).is_none()
+                    && wire["grill"]["input"].get(forbidden).is_none(),
+                "private Grill wire leaked forbidden field {forbidden}"
+            );
+        }
     }
 
     #[test]

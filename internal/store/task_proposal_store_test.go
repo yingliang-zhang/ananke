@@ -413,10 +413,10 @@ func TestProposalV7DataUpgradesToCompositeIdentityForeignKeys(t *testing.T) {
 		t.Fatalf("upgrade v7 fixture: %v", err)
 	}
 	defer s.Close()
-	if version, err := s.SchemaVersion(ctx); err != nil || version != 9 {
-		t.Fatalf("SchemaVersion after v7 upgrade = %d, %v; want 9, nil", version, err)
+	if version, err := s.SchemaVersion(ctx); err != nil || version != len(migrations) {
+		t.Fatalf("SchemaVersion after v7 upgrade = %d, %v; want %d, nil", version, err, len(migrations))
 	}
-	for _, version := range []int{8, 9} {
+	for version := 8; version <= len(migrations); version++ {
 		var count int
 		if err := s.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_version WHERE version = ?`, version).Scan(&count); err != nil {
 			t.Fatalf("count schema version %d: %v", version, err)
