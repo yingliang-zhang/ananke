@@ -529,6 +529,54 @@ func (s *Store) GetProposal(ctx context.Context, proposalID string) (Proposal, e
 	return proposal, nil
 }
 
+// ListProposalsByTarget returns Proposal summaries for one logical target in
+// stable creation order. Proposal IDs break timestamp ties so reconnecting
+// callers observe a deterministic sequence.
+func (s *Store) ListProposalsByTarget(ctx context.Context, projectID, workstreamID string) ([]Proposal, error) {
+	if err := validateIdentifier(projectID, "project id"); err != nil {
+		return nil, err
+	}
+	if err := validateIdentifier(workstreamID, "workstream id"); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT proposal_id, project_id, workstream_id, created_at, created_by,
+		state, current_revision, current_revision_hash
+		FROM task_proposals WHERE project_id = ? AND workstream_id = ?
+		ORDER BY created_at ASC, proposal_id ASC`, projectID, workstreamID)
+	if err != nil {
+		return nil, err
+	}
+
+	proposals := make([]Proposal, 0)
+	for rows.Next() {
+		var (
+			proposal Proposal
+			created  string
+		)
+		if err := rows.Scan(&proposal.ProposalID, &proposal.ProjectID, &proposal.WorkstreamID, &created, &proposal.CreatedBy,
+			&proposal.State, &proposal.CurrentRevision, &proposal.CurrentRevisionHash); err != nil {
+			return nil, err
+		}
+		if proposal.CreatedAt, err = parseStamp(created); err != nil {
+			return nil, fmt.Errorf("parse proposal created_at: %w", err)
+		}
+		proposals = append(proposals, proposal)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, proposal := range proposals {
+		if err := validateRevisionIdentity(ctx, s.db, proposal.ProposalID, proposal.CurrentRevision, proposal.CurrentRevisionHash); err != nil {
+			return nil, err
+		}
+	}
+	return proposals, nil
+}
+
 // GetRevision returns an immutable revision snapshot after proving its stored
 // bytes remain canonical and match the durable revision hash.
 func (s *Store) GetRevision(ctx context.Context, proposalID string, revisionNumber int) (Revision, error) {
@@ -637,6 +685,15 @@ func (s *Store) GetApproval(ctx context.Context, approvalID string) (Approval, e
 
 // ListProposalActivity returns the proposal's append-only mutation history.
 func (s *Store) ListProposalActivity(ctx context.Context, proposalID string) ([]ProposalActivity, error) {
+	if err := validateIdentifier(proposalID, "proposal id"); err != nil {
+		return nil, ErrProposalNotFound
+	}
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM task_proposals WHERE proposal_id = ?`, proposalID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrProposalNotFound
+	} else if err != nil {
+		return nil, err
+	}
 	rows, err := s.db.QueryContext(ctx, `SELECT proposal_id, sequence, operation, revision, revision_hash, approval_id, written_at
 		FROM task_proposal_activity WHERE proposal_id = ? ORDER BY sequence ASC`, proposalID)
 	if err != nil {

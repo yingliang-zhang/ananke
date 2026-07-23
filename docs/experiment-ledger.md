@@ -690,3 +690,25 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
   P1c DTO and privacy injection was rejected for every P1c target.
 - `npm --prefix gui run typecheck` exited `0`; `cargo test` in `gui/src-tauri`
   passed 19 tests across 3 suites.
+
+### 2026-07-23 — P1c missing proposal activity repair
+
+#### TDD RED
+
+- `go test ./internal/store -run '^TestListProposalActivityRejectsInvalidAndUnknownProposalIDs$' -count=1` exited `1`: `ListProposalActivity("proposal_missing")` returned a nil error.
+- `go test ./internal/lifecycle -run '^TestListProposalActivityMissingProposalRetainsPrivateNotFoundError$' -count=1` exited `1`: the private daemon response was `ok:true` with `proposal_activity:[]`.
+- `cargo test --manifest-path gui/src-tauri/Cargo.toml bridge_proposals_serialize_public_wire_replay_conflicts_and_reconnect` failed: missing activity returned `ProposalActivityList { activity: [] }` instead of an error.
+
+#### GREEN
+
+- `ListProposalActivity` now maps invalid identifiers and absent `task_proposals` rows to `store.ErrProposalNotFound` before querying activity.
+- Store coverage exercises invalid and unknown IDs; lifecycle coverage requires the private daemon `proposal_missing` response to retain `error:"proposal not found"` and omit `proposal_activity`.
+- The real bridge coverage requires missing activity to return a private `BridgeError::DaemonRejected("proposal not found")`, rejects an empty public list, and verifies the existing public message remains `The daemon rejected this request.` without raw daemon details.
+
+#### Verification
+
+- Focused store and lifecycle regressions passed; `go test ./internal/store ./internal/lifecycle -count=1` passed.
+- `npm --prefix gui run build:go && cargo test --manifest-path gui/src-tauri/Cargo.toml bridge_proposals_serialize_public_wire_replay_conflicts_and_reconnect` passed (1 test); `cargo fmt --manifest-path gui/src-tauri/Cargo.toml --check` passed.
+- `go test ./... -count=1` passed (3 packages with tests; 3 packages without tests). `cargo test --manifest-path gui/src-tauri/Cargo.toml --all-targets` passed (20 tests across 2 suites).
+- `node contracts/p1c/verify.mjs`, its `--self-test`, renderer-public generation/check/privacy, TypeScript typecheck, run-state, renderer-public decoder, and renderer-public privacy tests all passed.
+- No commit or push command was run.

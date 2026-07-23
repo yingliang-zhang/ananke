@@ -75,6 +75,17 @@ func TestCreateProposalCreatesDurablePendingPair(t *testing.T) {
 	}
 }
 
+func TestListProposalActivityRejectsInvalidAndUnknownProposalIDs(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	for _, proposalID := range []string{"proposal_missing", "proposal-missing"} {
+		if _, err := s.ListProposalActivity(ctx, proposalID); !errors.Is(err, ErrProposalNotFound) {
+			t.Fatalf("ListProposalActivity(%q) error = %v, want %v", proposalID, err, ErrProposalNotFound)
+		}
+	}
+}
+
 func TestAppendProposalRevisionSupersedesPendingPairAtomically(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -1410,5 +1421,54 @@ func readP1AJSONFixture(t *testing.T, name string, target any) {
 	}
 	if err := json.Unmarshal(bytes, target); err != nil {
 		t.Fatalf("decode fixture %s: %v", name, err)
+	}
+}
+
+func TestListProposalsByTargetFiltersAndOrdersByCreationThenID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	firstRequest := createProposalRequestFromFixture(t)
+	firstRequest.IdempotencyKey = "create_list_a"
+	first, err := s.CreateProposal(ctx, firstRequest)
+	if err != nil {
+		t.Fatalf("CreateProposal first: %v", err)
+	}
+	secondRequest := createProposalRequestFromFixture(t)
+	secondRequest.IdempotencyKey = "create_list_b"
+	second, err := s.CreateProposal(ctx, secondRequest)
+	if err != nil {
+		t.Fatalf("CreateProposal second: %v", err)
+	}
+	otherRequest := createProposalRequestFromFixture(t)
+	otherRequest.IdempotencyKey = "create_list_other"
+	otherRequest.ProjectID = "project_other"
+	if _, err := s.CreateProposal(ctx, otherRequest); err != nil {
+		t.Fatalf("CreateProposal other target: %v", err)
+	}
+
+	if _, err := s.DB().ExecContext(ctx, `UPDATE task_proposals SET created_at = ?
+		WHERE proposal_id IN (?, ?)`, "2026-07-23T00:00:00Z", first.ProposalID, second.ProposalID); err != nil {
+		t.Fatalf("tie proposal creation timestamps: %v", err)
+	}
+
+	proposals, err := s.ListProposalsByTarget(ctx, firstRequest.ProjectID, firstRequest.WorkstreamID)
+	if err != nil {
+		t.Fatalf("ListProposalsByTarget: %v", err)
+	}
+	if len(proposals) != 2 {
+		t.Fatalf("ListProposalsByTarget count = %d, want 2", len(proposals))
+	}
+	wantFirst, wantSecond := first.ProposalID, second.ProposalID
+	if wantFirst > wantSecond {
+		wantFirst, wantSecond = wantSecond, wantFirst
+	}
+	if proposals[0].ProposalID != wantFirst || proposals[1].ProposalID != wantSecond {
+		t.Fatalf("ListProposalsByTarget order = [%q, %q], want [%q, %q]", proposals[0].ProposalID, proposals[1].ProposalID, wantFirst, wantSecond)
+	}
+	for _, proposal := range proposals {
+		if proposal.ProjectID != firstRequest.ProjectID || proposal.WorkstreamID != firstRequest.WorkstreamID {
+			t.Fatalf("ListProposalsByTarget leaked another target: %+v", proposal)
+		}
 	}
 }

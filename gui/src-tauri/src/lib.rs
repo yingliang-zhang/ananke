@@ -5,9 +5,22 @@ use generated::{
     renderer_public_cancel::Cancel,
     renderer_public_event::Event,
     renderer_public_health::Health,
+    renderer_public_proposal_activity_list::ProposalActivityList,
+    renderer_public_proposal_activity_list_input::ListProposalActivityInput,
+    renderer_public_proposal_append_input::{
+        AppendProposalRevisionInput, AppendProposalRevisionInputBody,
+    },
+    renderer_public_proposal_create_input::{CreateProposalInput, CreateProposalRevisionInput},
+    renderer_public_proposal_decision_input::{DecideProposalApprovalInput, Decision},
+    renderer_public_proposal_detail::ProposalDetail,
+    renderer_public_proposal_get_input::GetProposalInput,
+    renderer_public_proposal_list::ProposalList,
+    renderer_public_proposal_list_input::ListProposalsInput,
+    renderer_public_proposal_mutation::ProposalMutation,
+    renderer_public_proposal_withdraw_input::WithdrawProposalInput,
     renderer_public_run::{Run, RunDiagnostics},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::symlink;
@@ -332,6 +345,8 @@ struct GoRequest<'a> {
     worker_env: Option<&'a [String]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     after_seq: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proposal: Option<GoProposalRequest<'a>>,
 }
 
 impl<'a> GoRequest<'a> {
@@ -348,6 +363,7 @@ impl<'a> GoRequest<'a> {
             worker_args: None,
             worker_env: None,
             after_seq: None,
+            proposal: None,
         }
     }
 }
@@ -367,6 +383,175 @@ struct GoResponse {
     events: Vec<EventDto>,
     #[serde(default)]
     accepted: bool,
+    #[serde(default)]
+    proposal_mutation: Option<serde_json::Value>,
+    #[serde(default)]
+    proposals: Option<serde_json::Value>,
+    #[serde(default)]
+    proposal_detail: Option<serde_json::Value>,
+    #[serde(default)]
+    proposal_activity: Option<serde_json::Value>,
+}
+// GoProposalRequest and its nested records are private bridge transport.
+// Generated renderer-public types are converted at the Tauri edge below.
+#[derive(Serialize)]
+struct GoProposalRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    idempotency_key: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workstream_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proposal_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_current_revision: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_current_revision_hash: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revision_input: Option<GoProposalRevisionInput<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    approval_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revision: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revision_hash: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decision: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct GoProposalRevisionInput<'a> {
+    task: GoProposalTask<'a>,
+    acceptance_criteria: &'a [String],
+    policy: GoProposalPolicy<'a>,
+}
+
+#[derive(Serialize)]
+struct GoProposalTask<'a> {
+    title: &'a str,
+    instructions: &'a str,
+}
+
+#[derive(Serialize)]
+struct GoProposalPolicy<'a> {
+    adapter: GoProposalAdapterPolicy,
+    authority: &'static str,
+    budget: GoProposalBudgetPolicy<'a>,
+    model_role: &'static str,
+}
+
+#[derive(Serialize)]
+struct GoProposalAdapterPolicy {
+    access: &'static str,
+    kind: &'static str,
+    status: &'static str,
+}
+
+#[derive(Serialize)]
+struct GoProposalBudgetPolicy<'a> {
+    dimensions: &'a [String],
+    status: &'static str,
+}
+
+impl<'a> GoProposalRequest<'a> {
+    fn empty() -> Self {
+        Self {
+            idempotency_key: None,
+            project_id: None,
+            workstream_id: None,
+            proposal_id: None,
+            expected_current_revision: None,
+            expected_current_revision_hash: None,
+            revision_input: None,
+            approval_id: None,
+            revision: None,
+            revision_hash: None,
+            decision: None,
+            reason: None,
+        }
+    }
+}
+
+fn create_proposal_request(input: &CreateProposalInput) -> GoProposalRequest<'_> {
+    let mut request = GoProposalRequest::empty();
+    request.idempotency_key = Some(&input.idempotency_key);
+    request.project_id = Some(&input.project_id);
+    request.workstream_id = Some(&input.workstream_id);
+    request.revision_input = Some(create_revision_input(&input.revision_input));
+    request
+}
+
+fn append_proposal_request(input: &AppendProposalRevisionInput) -> GoProposalRequest<'_> {
+    let mut request = GoProposalRequest::empty();
+    request.idempotency_key = Some(&input.idempotency_key);
+    request.proposal_id = Some(&input.proposal_id);
+    request.expected_current_revision = Some(input.expected_current_revision);
+    request.expected_current_revision_hash = Some(&input.expected_current_revision_hash);
+    request.revision_input = Some(append_revision_input(&input.revision_input));
+    request
+}
+
+fn decision_proposal_request(input: &DecideProposalApprovalInput) -> GoProposalRequest<'_> {
+    let mut request = GoProposalRequest::empty();
+    request.idempotency_key = Some(&input.idempotency_key);
+    request.approval_id = Some(&input.approval_id);
+    request.proposal_id = Some(&input.proposal_id);
+    request.revision = Some(input.revision);
+    request.revision_hash = Some(&input.revision_hash);
+    request.decision = Some(match &input.decision {
+        Decision::Approved => "approved",
+        Decision::Rejected => "rejected",
+    });
+    request.reason = Some(&input.reason);
+    request
+}
+fn create_revision_input(input: &CreateProposalRevisionInput) -> GoProposalRevisionInput<'_> {
+    GoProposalRevisionInput {
+        task: GoProposalTask {
+            title: &input.task.title,
+            instructions: &input.task.instructions,
+        },
+        acceptance_criteria: &input.acceptance_criteria,
+        policy: GoProposalPolicy {
+            adapter: GoProposalAdapterPolicy {
+                access: "read_only",
+                kind: "omp_audit",
+                status: "future",
+            },
+            authority: "deterministic",
+            budget: GoProposalBudgetPolicy {
+                dimensions: &input.policy.budget.dimensions,
+                status: "future",
+            },
+            model_role: "advisory_only",
+        },
+    }
+}
+
+fn append_revision_input(input: &AppendProposalRevisionInputBody) -> GoProposalRevisionInput<'_> {
+    GoProposalRevisionInput {
+        task: GoProposalTask {
+            title: &input.task.title,
+            instructions: &input.task.instructions,
+        },
+        acceptance_criteria: &input.acceptance_criteria,
+        policy: GoProposalPolicy {
+            adapter: GoProposalAdapterPolicy {
+                access: "read_only",
+                kind: "omp_audit",
+                status: "future",
+            },
+            authority: "deterministic",
+            budget: GoProposalBudgetPolicy {
+                dimensions: &input.policy.budget.dimensions,
+                status: "future",
+            },
+            model_role: "advisory_only",
+        },
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -609,6 +794,84 @@ impl Backend {
         })
     }
 
+    fn create_proposal(
+        &mut self,
+        input: CreateProposalInput,
+    ) -> Result<ProposalMutation, BridgeError> {
+        self.ensure_daemon()?;
+        let mut request = GoRequest::new("create-proposal", &self.token);
+        request.proposal = Some(create_proposal_request(&input));
+        decode_proposal_result(self.request(request)?.proposal_mutation)
+    }
+
+    fn list_proposals(&mut self, input: ListProposalsInput) -> Result<ProposalList, BridgeError> {
+        self.ensure_daemon()?;
+        let mut proposal = GoProposalRequest::empty();
+        proposal.project_id = Some(&input.project_id);
+        proposal.workstream_id = Some(&input.workstream_id);
+        let mut request = GoRequest::new("list-proposals", &self.token);
+        request.proposal = Some(proposal);
+        Ok(ProposalList {
+            proposals: decode_proposal_result(self.request(request)?.proposals)?,
+        })
+    }
+
+    fn get_proposal(&mut self, input: GetProposalInput) -> Result<ProposalDetail, BridgeError> {
+        self.ensure_daemon()?;
+        let mut proposal = GoProposalRequest::empty();
+        proposal.proposal_id = Some(&input.proposal_id);
+        let mut request = GoRequest::new("get-proposal", &self.token);
+        request.proposal = Some(proposal);
+        decode_proposal_result(self.request(request)?.proposal_detail)
+    }
+
+    fn list_proposal_activity(
+        &mut self,
+        input: ListProposalActivityInput,
+    ) -> Result<ProposalActivityList, BridgeError> {
+        self.ensure_daemon()?;
+        let mut proposal = GoProposalRequest::empty();
+        proposal.proposal_id = Some(&input.proposal_id);
+        let mut request = GoRequest::new("list-proposal-activity", &self.token);
+        request.proposal = Some(proposal);
+        Ok(ProposalActivityList {
+            activity: decode_proposal_result(self.request(request)?.proposal_activity)?,
+        })
+    }
+
+    fn append_proposal_revision(
+        &mut self,
+        input: AppendProposalRevisionInput,
+    ) -> Result<ProposalMutation, BridgeError> {
+        self.ensure_daemon()?;
+        let mut request = GoRequest::new("append-proposal-revision", &self.token);
+        request.proposal = Some(append_proposal_request(&input));
+        decode_proposal_result(self.request(request)?.proposal_mutation)
+    }
+
+    fn decide_proposal_approval(
+        &mut self,
+        input: DecideProposalApprovalInput,
+    ) -> Result<ProposalMutation, BridgeError> {
+        self.ensure_daemon()?;
+        let mut request = GoRequest::new("decide-proposal-approval", &self.token);
+        request.proposal = Some(decision_proposal_request(&input));
+        decode_proposal_result(self.request(request)?.proposal_mutation)
+    }
+
+    fn withdraw_proposal(
+        &mut self,
+        input: WithdrawProposalInput,
+    ) -> Result<ProposalMutation, BridgeError> {
+        self.ensure_daemon()?;
+        let mut proposal = GoProposalRequest::empty();
+        proposal.idempotency_key = Some(&input.idempotency_key);
+        proposal.proposal_id = Some(&input.proposal_id);
+        let mut request = GoRequest::new("withdraw-proposal", &self.token);
+        request.proposal = Some(proposal);
+        decode_proposal_result(self.request(request)?.proposal_mutation)
+    }
+
     #[cfg(test)]
     fn shutdown_for_test(&mut self) {
         if let Some(mut child) = self.spawned_daemon.take() {
@@ -617,6 +880,12 @@ impl Backend {
         }
         let _ = remove_known_stale_socket(&self.paths.runtime_dir, &self.paths.socket);
     }
+}
+
+fn decode_proposal_result<T: DeserializeOwned>(
+    value: Option<serde_json::Value>,
+) -> Result<T, BridgeError> {
+    serde_json::from_value(value.ok_or(BridgeError::Protocol)?).map_err(BridgeError::from)
 }
 
 fn accept_existing_response(response: Result<GoResponse, BridgeError>) -> Result<(), BridgeError> {
@@ -723,6 +992,62 @@ fn cancel_run(state: State<'_, BridgeState>, run_id: String) -> Result<Cancel, S
     use_backend(state, |backend| backend.cancel_run(&run_id))
 }
 
+#[tauri::command]
+fn create_proposal(
+    state: State<'_, BridgeState>,
+    input: CreateProposalInput,
+) -> Result<ProposalMutation, String> {
+    use_backend(state, |backend| backend.create_proposal(input))
+}
+
+#[tauri::command]
+fn list_proposals(
+    state: State<'_, BridgeState>,
+    input: ListProposalsInput,
+) -> Result<ProposalList, String> {
+    use_backend(state, |backend| backend.list_proposals(input))
+}
+
+#[tauri::command]
+fn get_proposal(
+    state: State<'_, BridgeState>,
+    input: GetProposalInput,
+) -> Result<ProposalDetail, String> {
+    use_backend(state, |backend| backend.get_proposal(input))
+}
+
+#[tauri::command]
+fn list_proposal_activity(
+    state: State<'_, BridgeState>,
+    input: ListProposalActivityInput,
+) -> Result<ProposalActivityList, String> {
+    use_backend(state, |backend| backend.list_proposal_activity(input))
+}
+
+#[tauri::command]
+fn append_proposal_revision(
+    state: State<'_, BridgeState>,
+    input: AppendProposalRevisionInput,
+) -> Result<ProposalMutation, String> {
+    use_backend(state, |backend| backend.append_proposal_revision(input))
+}
+
+#[tauri::command]
+fn decide_proposal_approval(
+    state: State<'_, BridgeState>,
+    input: DecideProposalApprovalInput,
+) -> Result<ProposalMutation, String> {
+    use_backend(state, |backend| backend.decide_proposal_approval(input))
+}
+
+#[tauri::command]
+fn withdraw_proposal(
+    state: State<'_, BridgeState>,
+    input: WithdrawProposalInput,
+) -> Result<ProposalMutation, String> {
+    use_backend(state, |backend| backend.withdraw_proposal(input))
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -740,7 +1065,14 @@ pub fn run() {
             launch_fixture,
             get_run,
             list_events,
-            cancel_run
+            cancel_run,
+            create_proposal,
+            list_proposals,
+            get_proposal,
+            list_proposal_activity,
+            append_proposal_revision,
+            decide_proposal_approval,
+            withdraw_proposal
         ])
         .run(tauri::generate_context!())
         .expect("error while running Ananke desktop application");
@@ -1427,5 +1759,331 @@ EOF
             .mode()
             & 0o777;
         assert_eq!(app_data_mode, 0o700);
+    }
+
+    #[test]
+    fn bridge_proposals_serialize_public_wire_replay_conflicts_and_reconnect() {
+        let mut first = new_test_backend();
+        let project_id = "project_p1c";
+        let workstream_id = "workstream_p1c";
+
+        let create_a = proposal_create_input(
+            "proposal_bridge_create_a",
+            project_id,
+            workstream_id,
+            "Approve through bridge",
+        );
+        let created_a = first
+            .backend
+            .create_proposal(create_a.clone())
+            .expect("create proposal through the real bridge");
+        assert_public_object(
+            &serde_json::to_value(&created_a).expect("serialize created proposal mutation"),
+            &["approval_id", "proposal_id", "revision", "revision_hash"],
+        );
+        let replayed_a = first
+            .backend
+            .create_proposal(create_a.clone())
+            .expect("replay created proposal through the real bridge");
+        assert_eq!(
+            replayed_a, created_a,
+            "same proposal input must replay its durable identity"
+        );
+        let conflict = first
+            .backend
+            .create_proposal(proposal_create_input(
+                "proposal_bridge_create_a",
+                project_id,
+                workstream_id,
+                "Conflicting bridge proposal",
+            ))
+            .expect_err("same key with a different body must conflict");
+        assert_sanitized_proposal_error(&conflict);
+
+        let initial_detail = first
+            .backend
+            .get_proposal(
+                generated::renderer_public_proposal_get_input::GetProposalInput {
+                    proposal_id: created_a.proposal_id.clone(),
+                },
+            )
+            .expect("get created proposal through the real bridge");
+        let initial_detail_wire =
+            serde_json::to_value(&initial_detail).expect("serialize proposal detail");
+        assert_public_object(
+            &initial_detail_wire,
+            &["approval", "lifecycle", "proposal", "revision"],
+        );
+        assert_eq!(initial_detail_wire["proposal"]["state"], "open");
+        assert_eq!(initial_detail_wire["revision"]["revision"], 1);
+
+        let appended_a = first
+            .backend
+            .append_proposal_revision(proposal_append_input(
+                "proposal_bridge_append_a",
+                &created_a,
+                "Approve appended bridge revision",
+            ))
+            .expect("append proposal revision through the real bridge");
+        let approved_a = first
+            .backend
+            .decide_proposal_approval(proposal_decision_input(
+                "proposal_bridge_approve_a",
+                &appended_a,
+                "approved",
+                "Meets the reviewed bridge contract.",
+            ))
+            .expect("approve appended proposal through the real bridge");
+        assert_eq!(approved_a, appended_a);
+
+        let create_b = first
+            .backend
+            .create_proposal(proposal_create_input(
+                "proposal_bridge_create_b",
+                project_id,
+                workstream_id,
+                "Reject through bridge",
+            ))
+            .expect("create rejection proposal through the real bridge");
+        first
+            .backend
+            .decide_proposal_approval(proposal_decision_input(
+                "proposal_bridge_reject_b",
+                &create_b,
+                "rejected",
+                "Needs a narrower reviewed task.",
+            ))
+            .expect("reject proposal through the real bridge");
+
+        let create_c = first
+            .backend
+            .create_proposal(proposal_create_input(
+                "proposal_bridge_create_c",
+                project_id,
+                workstream_id,
+                "Withdraw through bridge",
+            ))
+            .expect("create withdrawal proposal through the real bridge");
+        let withdrawn_c = first
+            .backend
+            .withdraw_proposal(
+                generated::renderer_public_proposal_withdraw_input::WithdrawProposalInput {
+                    idempotency_key: "proposal_bridge_withdraw_c".into(),
+                    proposal_id: create_c.proposal_id.clone(),
+                },
+            )
+            .expect("withdraw proposal through the real bridge");
+        assert_eq!(withdrawn_c, create_c);
+
+        let list_input = generated::renderer_public_proposal_list_input::ListProposalsInput {
+            project_id: project_id.into(),
+            workstream_id: workstream_id.into(),
+        };
+        let listed = first
+            .backend
+            .list_proposals(list_input.clone())
+            .expect("list proposal summaries through the real bridge");
+        let listed_wire = serde_json::to_value(&listed).expect("serialize proposal list");
+        assert_public_object(&listed_wire, &["proposals"]);
+        let proposals = listed_wire["proposals"]
+            .as_array()
+            .expect("proposal summaries array");
+        assert_eq!(proposals.len(), 3);
+        assert_eq!(proposals[0]["proposal_id"], created_a.proposal_id);
+        assert_eq!(proposals[1]["proposal_id"], create_b.proposal_id);
+        assert_eq!(proposals[2]["proposal_id"], create_c.proposal_id);
+        for proposal in proposals {
+            assert_public_object(
+                proposal,
+                &[
+                    "created_at",
+                    "created_by",
+                    "current_revision",
+                    "current_revision_hash",
+                    "project_id",
+                    "proposal_id",
+                    "state",
+                    "workstream_id",
+                ],
+            );
+        }
+
+        let activity_a = first
+            .backend
+            .list_proposal_activity(generated::renderer_public_proposal_activity_list_input::ListProposalActivityInput {
+                proposal_id: created_a.proposal_id.clone(),
+            })
+            .expect("list approved proposal activity through the real bridge");
+        let activity_a_wire =
+            serde_json::to_value(&activity_a).expect("serialize approved proposal activity");
+        assert_public_object(&activity_a_wire, &["activity"]);
+        assert_eq!(
+            activity_a_wire["activity"]
+                .as_array()
+                .expect("approved activity array")
+                .iter()
+                .map(|activity| activity["operation"].as_str().expect("activity operation"))
+                .collect::<Vec<_>>(),
+            vec!["create_proposal", "append_revision", "decide_approval"],
+        );
+
+        let rejected_detail = first
+            .backend
+            .get_proposal(
+                generated::renderer_public_proposal_get_input::GetProposalInput {
+                    proposal_id: create_b.proposal_id.clone(),
+                },
+            )
+            .expect("get rejected proposal through the real bridge");
+        assert_eq!(
+            serde_json::to_value(rejected_detail).expect("serialize rejected detail")["approval"]["state"],
+            "rejected"
+        );
+        let withdrawn_detail = first
+            .backend
+            .get_proposal(
+                generated::renderer_public_proposal_get_input::GetProposalInput {
+                    proposal_id: create_c.proposal_id.clone(),
+                },
+            )
+            .expect("get withdrawn proposal through the real bridge");
+        assert_eq!(
+            serde_json::to_value(withdrawn_detail).expect("serialize withdrawn detail")["proposal"]
+                ["state"],
+            "withdrawn"
+        );
+
+        let not_found = first
+            .backend
+            .get_proposal(
+                generated::renderer_public_proposal_get_input::GetProposalInput {
+                    proposal_id: "proposal_missing".into(),
+                },
+            )
+            .expect_err("missing proposal must fail through the bridge");
+        assert_sanitized_proposal_error(&not_found);
+
+        let missing_activity = first
+            .backend
+            .list_proposal_activity(
+                generated::renderer_public_proposal_activity_list_input::ListProposalActivityInput {
+                    proposal_id: "proposal_missing".into(),
+                },
+            )
+            .expect_err("missing proposal activity must not expose an empty public activity list");
+        assert!(matches!(
+            &missing_activity,
+            BridgeError::DaemonRejected(message) if message == "proposal not found"
+        ));
+        assert_sanitized_proposal_error(&missing_activity);
+
+        let mut reconnected =
+            Backend::new(first.backend.paths.clone()).expect("construct reconnecting bridge");
+        let reconnected_wire = serde_json::to_value(
+            reconnected
+                .list_proposals(list_input)
+                .expect("list persisted proposal summaries through reconnecting bridge"),
+        )
+        .expect("serialize reconnected proposal list");
+        assert_eq!(reconnected_wire, listed_wire);
+    }
+
+    fn proposal_create_input(
+        idempotency_key: &str,
+        project_id: &str,
+        workstream_id: &str,
+        title: &str,
+    ) -> generated::renderer_public_proposal_create_input::CreateProposalInput {
+        serde_json::from_value(serde_json::json!({
+            "idempotency_key": idempotency_key,
+            "project_id": project_id,
+            "workstream_id": workstream_id,
+            "revision_input": proposal_revision_input(title),
+        }))
+        .expect("decode generated create proposal input")
+    }
+
+    fn proposal_append_input(
+        idempotency_key: &str,
+        mutation: &generated::renderer_public_proposal_mutation::ProposalMutation,
+        title: &str,
+    ) -> generated::renderer_public_proposal_append_input::AppendProposalRevisionInput {
+        serde_json::from_value(serde_json::json!({
+            "idempotency_key": idempotency_key,
+            "proposal_id": mutation.proposal_id,
+            "expected_current_revision": mutation.revision,
+            "expected_current_revision_hash": mutation.revision_hash,
+            "revision_input": proposal_revision_input(title),
+        }))
+        .expect("decode generated append proposal input")
+    }
+
+    fn proposal_decision_input(
+        idempotency_key: &str,
+        mutation: &generated::renderer_public_proposal_mutation::ProposalMutation,
+        decision: &str,
+        reason: &str,
+    ) -> generated::renderer_public_proposal_decision_input::DecideProposalApprovalInput {
+        serde_json::from_value(serde_json::json!({
+            "idempotency_key": idempotency_key,
+            "approval_id": mutation.approval_id,
+            "proposal_id": mutation.proposal_id,
+            "revision": mutation.revision,
+            "revision_hash": mutation.revision_hash,
+            "decision": decision,
+            "reason": reason,
+        }))
+        .expect("decode generated approval decision input")
+    }
+
+    fn proposal_revision_input(title: &str) -> serde_json::Value {
+        serde_json::json!({
+            "task": {
+                "title": title,
+                "instructions": "Preserve the frozen proposal boundary without execution."
+            },
+            "acceptance_criteria": ["Use only durable proposal records."],
+            "policy": {
+                "adapter": {"access": "read_only", "kind": "omp_audit", "status": "future"},
+                "authority": "deterministic",
+                "budget": {"dimensions": ["deadline", "attempt_cap"], "status": "future"},
+                "model_role": "advisory_only"
+            }
+        })
+    }
+
+    fn assert_public_object(value: &serde_json::Value, expected_keys: &[&str]) {
+        let object = value.as_object().expect("generated public wire object");
+        let mut actual = object.keys().map(String::as_str).collect::<Vec<_>>();
+        actual.sort_unstable();
+        let mut expected = expected_keys.to_vec();
+        expected.sort_unstable();
+        assert_eq!(actual, expected, "public wire fields must be exact");
+        for forbidden in [
+            "cmd", "token", "ok", "error", "socket", "path", "root", "worker", "pid",
+        ] {
+            assert!(
+                !object.contains_key(forbidden),
+                "public wire object leaked private field {forbidden}: {value}"
+            );
+        }
+    }
+
+    fn assert_sanitized_proposal_error(error: &BridgeError) {
+        let message = error.public_message();
+        assert_eq!(message, "The daemon rejected this request.");
+        for private in [
+            "idempotency_conflict",
+            "proposal not found",
+            "cmd",
+            "token",
+            "socket",
+            "path",
+        ] {
+            assert!(
+                !message.contains(private),
+                "public error leaked private daemon data {private}: {message}"
+            );
+        }
     }
 }

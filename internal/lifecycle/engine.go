@@ -1575,27 +1575,32 @@ func (e *Engine) tailTranscript(ctx context.Context, runID, path string) {
 // --- API server ---
 
 type apiRequest struct {
-	Cmd          string   `json:"cmd"`
-	Token        string   `json:"token"`
-	ID           string   `json:"id,omitempty"`
-	Name         string   `json:"name,omitempty"`
-	Root         string   `json:"root,omitempty"`
-	ProjectID    string   `json:"project_id,omitempty"`
-	WorkstreamID string   `json:"workstream_id,omitempty"`
-	WorkerPath   string   `json:"worker_path,omitempty"`
-	WorkerArgs   []string `json:"worker_args,omitempty"`
-	WorkerEnv    []string `json:"worker_env,omitempty"`
-	AfterSeq     int64    `json:"after_seq,omitempty"`
+	Cmd          string              `json:"cmd"`
+	Token        string              `json:"token"`
+	ID           string              `json:"id,omitempty"`
+	Name         string              `json:"name,omitempty"`
+	Root         string              `json:"root,omitempty"`
+	ProjectID    string              `json:"project_id,omitempty"`
+	WorkstreamID string              `json:"workstream_id,omitempty"`
+	WorkerPath   string              `json:"worker_path,omitempty"`
+	WorkerArgs   []string            `json:"worker_args,omitempty"`
+	WorkerEnv    []string            `json:"worker_env,omitempty"`
+	AfterSeq     int64               `json:"after_seq,omitempty"`
+	Proposal     *apiProposalRequest `json:"proposal,omitempty"`
 }
 
 type apiResponse struct {
-	OK       bool        `json:"ok"`
-	Error    string      `json:"error,omitempty"`
-	State    string      `json:"state,omitempty"`
-	Run      *jsonRun    `json:"run,omitempty"`
-	Runs     []jsonRun   `json:"runs,omitempty"`
-	Events   []jsonEvent `json:"events,omitempty"`
-	Accepted bool        `json:"accepted,omitempty"`
+	OK               bool                    `json:"ok"`
+	Error            string                  `json:"error,omitempty"`
+	State            string                  `json:"state,omitempty"`
+	Run              *jsonRun                `json:"run,omitempty"`
+	Runs             []jsonRun               `json:"runs,omitempty"`
+	Events           []jsonEvent             `json:"events,omitempty"`
+	Accepted         bool                    `json:"accepted,omitempty"`
+	ProposalMutation *jsonProposalMutation   `json:"proposal_mutation,omitempty"`
+	Proposals        *[]jsonProposal         `json:"proposals,omitempty"`
+	ProposalDetail   *jsonProposalDetail     `json:"proposal_detail,omitempty"`
+	ProposalActivity *[]jsonProposalActivity `json:"proposal_activity,omitempty"`
 }
 
 type jsonRun struct {
@@ -1612,6 +1617,213 @@ type jsonEvent struct {
 	Seq     int64           `json:"seq"`
 	Type    string          `json:"type"`
 	Payload json.RawMessage `json:"payload"`
+}
+
+// apiProposalRequest is private daemon transport. The renderer never sees the
+// daemon envelope or these adapter shapes.
+type apiProposalRequest struct {
+	IdempotencyKey              string                   `json:"idempotency_key,omitempty"`
+	ProjectID                   string                   `json:"project_id,omitempty"`
+	WorkstreamID                string                   `json:"workstream_id,omitempty"`
+	ProposalID                  string                   `json:"proposal_id,omitempty"`
+	ExpectedCurrentRevision     int                      `json:"expected_current_revision,omitempty"`
+	ExpectedCurrentRevisionHash string                   `json:"expected_current_revision_hash,omitempty"`
+	RevisionInput               apiProposalRevisionInput `json:"revision_input,omitempty"`
+	ApprovalID                  string                   `json:"approval_id,omitempty"`
+	Revision                    int                      `json:"revision,omitempty"`
+	RevisionHash                string                   `json:"revision_hash,omitempty"`
+	Decision                    string                   `json:"decision,omitempty"`
+	Reason                      string                   `json:"reason,omitempty"`
+}
+
+type apiProposalRevisionInput struct {
+	Task               apiProposalTask   `json:"task"`
+	AcceptanceCriteria []string          `json:"acceptance_criteria"`
+	Policy             apiProposalPolicy `json:"policy"`
+}
+
+type apiProposalTask struct {
+	Title        string `json:"title"`
+	Instructions string `json:"instructions"`
+}
+
+type apiProposalPolicy struct {
+	Adapter   apiProposalAdapterPolicy `json:"adapter"`
+	Authority string                   `json:"authority"`
+	Budget    apiProposalBudgetPolicy  `json:"budget"`
+	ModelRole string                   `json:"model_role"`
+}
+
+type apiProposalAdapterPolicy struct {
+	Access string `json:"access"`
+	Kind   string `json:"kind"`
+	Status string `json:"status"`
+}
+
+type apiProposalBudgetPolicy struct {
+	Dimensions []string `json:"dimensions"`
+	Status     string   `json:"status"`
+}
+
+func (input apiProposalRevisionInput) toStore() store.RevisionInput {
+	return store.RevisionInput{
+		Task: store.ProposalTask{
+			Title:        input.Task.Title,
+			Instructions: input.Task.Instructions,
+		},
+		AcceptanceCriteria: input.AcceptanceCriteria,
+		Policy: store.ProposalPolicy{
+			Adapter: store.ProposalAdapterPolicy{
+				Access: input.Policy.Adapter.Access,
+				Kind:   input.Policy.Adapter.Kind,
+				Status: input.Policy.Adapter.Status,
+			},
+			Authority: input.Policy.Authority,
+			Budget: store.ProposalBudgetPolicy{
+				Dimensions: input.Policy.Budget.Dimensions,
+				Status:     input.Policy.Budget.Status,
+			},
+			ModelRole: input.Policy.ModelRole,
+		},
+	}
+}
+
+type jsonProposalMutation struct {
+	ProposalID   string `json:"proposal_id"`
+	Revision     int    `json:"revision"`
+	RevisionHash string `json:"revision_hash"`
+	ApprovalID   string `json:"approval_id"`
+}
+
+type jsonProposal struct {
+	ProposalID          string `json:"proposal_id"`
+	ProjectID           string `json:"project_id"`
+	WorkstreamID        string `json:"workstream_id"`
+	CreatedAt           string `json:"created_at"`
+	CreatedBy           string `json:"created_by"`
+	State               string `json:"state"`
+	CurrentRevision     int    `json:"current_revision"`
+	CurrentRevisionHash string `json:"current_revision_hash"`
+}
+
+type jsonProposalRevision struct {
+	SchemaVersion      string            `json:"schema_version"`
+	ProposalID         string            `json:"proposal_id"`
+	Revision           int               `json:"revision"`
+	ParentRevision     *int              `json:"parent_revision"`
+	ParentRevisionHash *string           `json:"parent_revision_hash"`
+	CreatedAt          string            `json:"created_at"`
+	CreatedBy          string            `json:"created_by"`
+	IdempotencyKey     string            `json:"idempotency_key"`
+	Task               apiProposalTask   `json:"task"`
+	AcceptanceCriteria []string          `json:"acceptance_criteria"`
+	Policy             apiProposalPolicy `json:"policy"`
+}
+
+type jsonRevisionLifecycle struct {
+	ProposalID   string `json:"proposal_id"`
+	Revision     int    `json:"revision"`
+	RevisionHash string `json:"revision_hash"`
+	ApprovalID   string `json:"approval_id"`
+	State        string `json:"state"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
+	Version      int    `json:"version"`
+}
+
+type jsonProposalApproval struct {
+	ApprovalID             string  `json:"approval_id"`
+	ProposalID             string  `json:"proposal_id"`
+	Revision               int     `json:"revision"`
+	RevisionHash           string  `json:"revision_hash"`
+	CreatedAt              string  `json:"created_at"`
+	CreatedBy              string  `json:"created_by"`
+	State                  string  `json:"state"`
+	DecidedAt              *string `json:"decided_at"`
+	DecidedBy              *string `json:"decided_by"`
+	DecisionIdempotencyKey *string `json:"decision_idempotency_key"`
+	Reason                 *string `json:"reason"`
+}
+
+type jsonProposalDetail struct {
+	Proposal  jsonProposal          `json:"proposal"`
+	Revision  jsonProposalRevision  `json:"revision"`
+	Lifecycle jsonRevisionLifecycle `json:"lifecycle"`
+	Approval  jsonProposalApproval  `json:"approval"`
+}
+
+type jsonProposalActivity struct {
+	ProposalID   string `json:"proposal_id"`
+	Sequence     int    `json:"sequence"`
+	Operation    string `json:"operation"`
+	Revision     int    `json:"revision"`
+	RevisionHash string `json:"revision_hash"`
+	ApprovalID   string `json:"approval_id"`
+	WrittenAt    string `json:"written_at"`
+}
+
+func jsonProposalMutationFromStore(mutation store.ProposalMutation) *jsonProposalMutation {
+	return &jsonProposalMutation{
+		ProposalID: mutation.ProposalID, Revision: mutation.Revision, RevisionHash: mutation.RevisionHash, ApprovalID: mutation.ApprovalID,
+	}
+}
+
+func jsonProposalFromStore(proposal store.Proposal) jsonProposal {
+	return jsonProposal{
+		ProposalID: proposal.ProposalID, ProjectID: proposal.ProjectID, WorkstreamID: proposal.WorkstreamID,
+		CreatedAt: proposal.CreatedAt.UTC().Format(time.RFC3339Nano), CreatedBy: proposal.CreatedBy, State: string(proposal.State),
+		CurrentRevision: proposal.CurrentRevision, CurrentRevisionHash: proposal.CurrentRevisionHash,
+	}
+}
+
+func jsonProposalRevisionFromStore(revision store.Revision) jsonProposalRevision {
+	return jsonProposalRevision{
+		SchemaVersion: revision.SchemaVersion, ProposalID: revision.ProposalID, Revision: revision.Revision,
+		ParentRevision: revision.ParentRevision, ParentRevisionHash: revision.ParentRevisionHash,
+		CreatedAt: revision.CreatedAt.UTC().Format(time.RFC3339Nano), CreatedBy: revision.CreatedBy,
+		IdempotencyKey:     revision.IdempotencyKey,
+		Task:               apiProposalTask{Title: revision.Task.Title, Instructions: revision.Task.Instructions},
+		AcceptanceCriteria: revision.AcceptanceCriteria,
+		Policy: apiProposalPolicy{
+			Adapter:   apiProposalAdapterPolicy{Access: revision.Policy.Adapter.Access, Kind: revision.Policy.Adapter.Kind, Status: revision.Policy.Adapter.Status},
+			Authority: revision.Policy.Authority,
+			Budget:    apiProposalBudgetPolicy{Dimensions: revision.Policy.Budget.Dimensions, Status: revision.Policy.Budget.Status},
+			ModelRole: revision.Policy.ModelRole,
+		},
+	}
+}
+
+func jsonRevisionLifecycleFromStore(lifecycle store.RevisionLifecycle) jsonRevisionLifecycle {
+	return jsonRevisionLifecycle{
+		ProposalID: lifecycle.ProposalID, Revision: lifecycle.Revision, RevisionHash: lifecycle.RevisionHash,
+		ApprovalID: lifecycle.ApprovalID, State: string(lifecycle.State),
+		CreatedAt: lifecycle.CreatedAt.UTC().Format(time.RFC3339Nano), UpdatedAt: lifecycle.UpdatedAt.UTC().Format(time.RFC3339Nano), Version: lifecycle.Version,
+	}
+}
+
+func jsonProposalApprovalFromStore(approval store.Approval) jsonProposalApproval {
+	return jsonProposalApproval{
+		ApprovalID: approval.ApprovalID, ProposalID: approval.ProposalID, Revision: approval.Revision, RevisionHash: approval.RevisionHash,
+		CreatedAt: approval.CreatedAt.UTC().Format(time.RFC3339Nano), CreatedBy: approval.CreatedBy, State: string(approval.State),
+		DecidedAt: jsonTimePointer(approval.DecidedAt), DecidedBy: approval.DecidedBy,
+		DecisionIdempotencyKey: approval.DecisionIdempotencyKey, Reason: approval.Reason,
+	}
+}
+
+func jsonTimePointer(value *time.Time) *string {
+	if value == nil {
+		return nil
+	}
+	text := value.UTC().Format(time.RFC3339Nano)
+	return &text
+}
+
+func jsonProposalActivityFromStore(activity store.ProposalActivity) jsonProposalActivity {
+	return jsonProposalActivity{
+		ProposalID: activity.ProposalID, Sequence: activity.Sequence, Operation: activity.Operation,
+		Revision: activity.Revision, RevisionHash: activity.RevisionHash, ApprovalID: activity.ApprovalID,
+		WrittenAt: activity.WrittenAt.UTC().Format(time.RFC3339Nano),
+	}
 }
 
 func (e *Engine) handleAPIConn(ctx context.Context, conn net.Conn) {
@@ -1656,9 +1868,159 @@ func (e *Engine) handleCmd(ctx context.Context, req *apiRequest) apiResponse {
 		return e.handleListEvents(ctx, req)
 	case "cancel-run":
 		return e.handleCancelRun(ctx, req)
+	case "create-proposal":
+		return e.handleCreateProposal(ctx, req)
+	case "list-proposals":
+		return e.handleListProposals(ctx, req)
+	case "get-proposal":
+		return e.handleGetProposal(ctx, req)
+	case "list-proposal-activity":
+		return e.handleListProposalActivity(ctx, req)
+	case "append-proposal-revision":
+		return e.handleAppendProposalRevision(ctx, req)
+	case "decide-proposal-approval":
+		return e.handleDecideProposalApproval(ctx, req)
+	case "withdraw-proposal":
+		return e.handleWithdrawProposal(ctx, req)
 	default:
 		return apiResponse{OK: false, Error: "unknown command: " + req.Cmd}
 	}
+}
+
+func requireProposalRequest(req *apiRequest) (*apiProposalRequest, apiResponse) {
+	if req.Proposal == nil {
+		return nil, apiResponse{OK: false, Error: "proposal request required"}
+	}
+	return req.Proposal, apiResponse{}
+}
+
+func (e *Engine) handleCreateProposal(ctx context.Context, req *apiRequest) apiResponse {
+	proposal, invalid := requireProposalRequest(req)
+	if invalid.Error != "" {
+		return invalid
+	}
+	mutation, err := e.store.CreateProposal(ctx, store.CreateProposalRequest{
+		IdempotencyKey: proposal.IdempotencyKey,
+		ProjectID:      proposal.ProjectID,
+		WorkstreamID:   proposal.WorkstreamID,
+		RevisionInput:  proposal.RevisionInput.toStore(),
+	})
+	if err != nil {
+		return apiResponse{OK: false, Error: err.Error()}
+	}
+	return apiResponse{OK: true, ProposalMutation: jsonProposalMutationFromStore(mutation)}
+}
+
+func (e *Engine) handleListProposals(ctx context.Context, req *apiRequest) apiResponse {
+	proposal, invalid := requireProposalRequest(req)
+	if invalid.Error != "" {
+		return invalid
+	}
+	records, err := e.store.ListProposalsByTarget(ctx, proposal.ProjectID, proposal.WorkstreamID)
+	if err != nil {
+		return apiResponse{OK: false, Error: err.Error()}
+	}
+	proposals := make([]jsonProposal, len(records))
+	for index, record := range records {
+		proposals[index] = jsonProposalFromStore(record)
+	}
+	return apiResponse{OK: true, Proposals: &proposals}
+}
+
+func (e *Engine) handleGetProposal(ctx context.Context, req *apiRequest) apiResponse {
+	input, invalid := requireProposalRequest(req)
+	if invalid.Error != "" {
+		return invalid
+	}
+	proposal, err := e.store.GetProposal(ctx, input.ProposalID)
+	if err != nil {
+		return apiResponse{OK: false, Error: err.Error()}
+	}
+	revision, err := e.store.GetRevision(ctx, proposal.ProposalID, proposal.CurrentRevision)
+	if err != nil {
+		return apiResponse{OK: false, Error: err.Error()}
+	}
+	lifecycle, err := e.store.GetRevisionLifecycle(ctx, proposal.ProposalID, proposal.CurrentRevision)
+	if err != nil {
+		return apiResponse{OK: false, Error: err.Error()}
+	}
+	approval, err := e.store.GetApproval(ctx, lifecycle.ApprovalID)
+	if err != nil {
+		return apiResponse{OK: false, Error: err.Error()}
+	}
+	return apiResponse{OK: true, ProposalDetail: &jsonProposalDetail{
+		Proposal: jsonProposalFromStore(proposal), Revision: jsonProposalRevisionFromStore(revision),
+		Lifecycle: jsonRevisionLifecycleFromStore(lifecycle), Approval: jsonProposalApprovalFromStore(approval),
+	}}
+}
+
+func (e *Engine) handleListProposalActivity(ctx context.Context, req *apiRequest) apiResponse {
+	proposal, invalid := requireProposalRequest(req)
+	if invalid.Error != "" {
+		return invalid
+	}
+	records, err := e.store.ListProposalActivity(ctx, proposal.ProposalID)
+	if err != nil {
+		return apiResponse{OK: false, Error: err.Error()}
+	}
+	activity := make([]jsonProposalActivity, len(records))
+	for index, record := range records {
+		activity[index] = jsonProposalActivityFromStore(record)
+	}
+	return apiResponse{OK: true, ProposalActivity: &activity}
+}
+
+func (e *Engine) handleAppendProposalRevision(ctx context.Context, req *apiRequest) apiResponse {
+	proposal, invalid := requireProposalRequest(req)
+	if invalid.Error != "" {
+		return invalid
+	}
+	mutation, err := e.store.AppendProposalRevision(ctx, store.AppendProposalRevisionRequest{
+		IdempotencyKey:              proposal.IdempotencyKey,
+		ProposalID:                  proposal.ProposalID,
+		ExpectedCurrentRevision:     proposal.ExpectedCurrentRevision,
+		ExpectedCurrentRevisionHash: proposal.ExpectedCurrentRevisionHash,
+		RevisionInput:               proposal.RevisionInput.toStore(),
+	})
+	if err != nil {
+		return apiResponse{OK: false, Error: err.Error()}
+	}
+	return apiResponse{OK: true, ProposalMutation: jsonProposalMutationFromStore(mutation)}
+}
+
+func (e *Engine) handleDecideProposalApproval(ctx context.Context, req *apiRequest) apiResponse {
+	proposal, invalid := requireProposalRequest(req)
+	if invalid.Error != "" {
+		return invalid
+	}
+	mutation, err := e.store.DecideProposalApproval(ctx, store.DecideProposalApprovalRequest{
+		IdempotencyKey: proposal.IdempotencyKey,
+		ApprovalID:     proposal.ApprovalID,
+		ProposalID:     proposal.ProposalID,
+		Revision:       proposal.Revision,
+		RevisionHash:   proposal.RevisionHash,
+		Decision:       store.ApprovalState(proposal.Decision),
+		Reason:         proposal.Reason,
+	})
+	if err != nil {
+		return apiResponse{OK: false, Error: err.Error()}
+	}
+	return apiResponse{OK: true, ProposalMutation: jsonProposalMutationFromStore(mutation)}
+}
+
+func (e *Engine) handleWithdrawProposal(ctx context.Context, req *apiRequest) apiResponse {
+	proposal, invalid := requireProposalRequest(req)
+	if invalid.Error != "" {
+		return invalid
+	}
+	mutation, err := e.store.WithdrawProposal(ctx, store.WithdrawProposalRequest{
+		IdempotencyKey: proposal.IdempotencyKey,
+		ProposalID:     proposal.ProposalID,
+	})
+	if err != nil {
+		return apiResponse{OK: false, Error: err.Error()}
+	}
+	return apiResponse{OK: true, ProposalMutation: jsonProposalMutationFromStore(mutation)}
 }
 
 func (e *Engine) handleLaunchRun(ctx context.Context, req *apiRequest) apiResponse {
