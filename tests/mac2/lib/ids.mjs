@@ -10,4 +10,5 @@ export const PREFLIGHT_ACCESSIBILITY_IDS = Object.freeze([
   ACCESSIBILITY_IDS.refresh,
   ACCESSIBILITY_IDS.runList,
   ACCESSIBILITY_IDS.launchFixture,
+  ACCESSIBILITY_IDS.grillReview,
 ]);

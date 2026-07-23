@@ -1053,3 +1053,54 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 - `go test ./... -count=1 -timeout=300s`, renderer generator/privacy/decoder,
   TypeScript typecheck/state, and P2a/P2c plus P1a/P1c verifier and self-test
   gates each exited `0`.
+
+### 2026-07-23 — P2e minimal deterministic Grill renderer review
+
+#### Scope
+
+- Added a persistent, guarded Grill panel to the existing renderer. It derives
+  the current Revision tuple only from the existing public Proposal list/detail
+  DTOs, requires every Proposal/Lifecycle/Approval identity to agree, and shows
+  the immutable Proposal ID, Revision, Revision hash, and review status.
+- The panel uses the generated P2c TypeScript inputs/results for its only Grill
+  actions: `evaluate_grill`, `record_grill_default`,
+  `record_grill_answer`, and `record_grill_override`. It sends no answer prose,
+  declaration, hash derivation, private bridge/wire field, model, worker,
+  claim, approval, or execution input.
+- It renders at most five sequence-ordered Questions with risk, default,
+  remedial-step, and waiver context. Every Question permits only Default or
+  Acknowledge; a Waive control is exposed solely for the exact
+  scope-compatibility Question. Pending operations disable all Grill controls,
+  then re-evaluate on successful record. Errors use a fixed renderer message.
+- Added the static Grill accessibility selector to the existing Mac harness
+  contract. No backend command, daemon wire, generated model, worker, claim,
+  execution path, commit, or push was added or run.
+
+#### TDD and verification
+
+- RED: `node gui/scripts/test-grill-review.mjs` initially exited `1` because
+  `gui/src/grill-review.ts` did not exist. The state/DOM contract was written
+  first for guarded visibility, tuple display, five-question ordering,
+  scope-only waiver, pending controls, re-evaluation, and sanitized failures.
+- RED: the disabled-control interaction regression initially exited `1` because
+  a disabled DOM button could still invoke the review action handler. The
+  handler now rejects `button.disabled` before dispatch.
+- GREEN: `npm --prefix gui run test:grill-review` and `npm --prefix gui run
+  typecheck` exited `0`. The test uses the canonical P2c response fixture and
+  asserts exact action input, no non-scope Override dispatch, and raw-error
+  denial.
+- Browser smoke: the Vite renderer at `http://127.0.0.1:1420/` visibly rendered
+  the `ananke-grill-review` ARIA region with the guarded current-Revision state
+  and disabled Refresh control when no Tauri-backed Revision is available.
+- Final TypeScript/web gates exited `0`: `npm --prefix gui run typecheck`,
+  `web:build`, `test:state`, `test:grill-review`,
+  `check:renderer-public`, `check:renderer-public-privacy`,
+  `test:renderer-public`, and `test:renderer-public-privacy`.
+- Full native and core gates exited `0`: `cargo test --manifest-path
+  gui/src-tauri/Cargo.toml` (25 tests) and `go test ./...` (3 packages passed;
+  3 packages had no tests).
+- Contract verifiers exited `0`: `node contracts/p1a/verify.mjs`,
+  `contracts/p1c/verify.mjs`, `contracts/p2a/verify.mjs`, and
+  `contracts/p2c/verify.mjs`. `npm --prefix tests/mac2 test` also exited `0`
+  with seven harness tests, including the Grill accessibility preflight.
+- No commit or push command was run.

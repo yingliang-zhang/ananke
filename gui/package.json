@@ -17,6 +17,7 @@
     "check:renderer-public": "node scripts/generate-renderer-public.mjs --check",
     "check:renderer-public-privacy": "node scripts/generate-renderer-public.mjs --check-public-fields",
     "test:state": "node scripts/test-run-state.mjs",
+    "test:grill-review": "node scripts/test-grill-review.mjs",
     "test:renderer-public": "node scripts/test-renderer-public.mjs",
     "test:renderer-public-privacy": "node scripts/test-renderer-public-privacy.mjs",
     "tauri": "npm run build:go && tauri",

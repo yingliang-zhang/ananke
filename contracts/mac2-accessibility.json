@@ -9,6 +9,7 @@
     "launchFixture": "ananke-launch-fixture",
     "selectedRunId": "ananke-selected-run-id",
     "selectedRunState": "ananke-selected-run-state",
-    "cancelRun": "ananke-cancel-run"
+    "cancelRun": "ananke-cancel-run",
+    "grillReview": "ananke-grill-review"
   }
 }

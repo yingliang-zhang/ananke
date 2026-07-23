@@ -185,6 +185,7 @@ test("Mac2 selector contract uses explicit non-visual ARIA labels", () => {
     selectedRunId: "ananke-selected-run-id",
     selectedRunState: "ananke-selected-run-state",
     cancelRun: "ananke-cancel-run",
+    grillReview: "ananke-grill-review",
   });
   assert.deepEqual(PREFLIGHT_ACCESSIBILITY_IDS, [
     ACCESSIBILITY_IDS.bootstrapState,
@@ -192,6 +193,7 @@ test("Mac2 selector contract uses explicit non-visual ARIA labels", () => {
     ACCESSIBILITY_IDS.refresh,
     ACCESSIBILITY_IDS.runList,
     ACCESSIBILITY_IDS.launchFixture,
+    ACCESSIBILITY_IDS.grillReview,
   ]);
 });
 
