@@ -1104,3 +1104,79 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
   `contracts/p2c/verify.mjs`. `npm --prefix tests/mac2 test` also exited `0`
   with seven harness tests, including the Grill accessibility preflight.
 - No commit or push command was run.
+
+### 2026-07-23 — P3a fenced launch-admission contract / fixture gate
+
+#### Scope
+
+- Added only the frozen P3a canonical launch-admission, adversarial, and
+  recovery fixtures; their SHA-256 manifest; the dependency-free Node verifier
+  and self-test; the implementation TDD plan; and the contract document.
+- The immutable vector binds the exact P1 root Revision tuple/hash, local
+  approved eligibility, explicit provider/model, deadline, bounded attempt cap,
+  read-only sealed-contract scope, materialization hash/nonce, HostSpec
+  fingerprints/capabilities, shape-only transcript dialect, and a read-only
+  verification-command fingerprint.
+- `task_claim`, materialization, launch outbox, and Run are distinct fenced
+  facts. The golden stale-token cases deny Run creation, terminal facts, and
+  evidence settlement. No SQLite/schema/runtime/daemon/Tauri/UI/claim/worktree/
+  adapter/OMP process implementation, command or prompt execution, commit, or
+  push was added.
+
+#### Verification
+
+- `node --check contracts/p3a/verify.mjs`, `node contracts/p3a/verify.mjs`, and
+  `node contracts/p3a/verify.mjs --self-test` exited `0`.
+- The P3a self-test rejected consistently rehashed launch-spec drift, raw
+  command/prompt authority, P1 identity and local-approval mismatch, unverified
+  materialization, writable scope, stale-token impersonation, unknown-dialect
+  success inference, and recovery terminal guessing.
+- `node contracts/p1a/verify.mjs`, `node contracts/p1c/verify.mjs`,
+  `node contracts/p2a/verify.mjs`, `node contracts/p2c/verify.mjs`, and
+  `node contracts/p3a/verify.mjs` each exited `0`.
+- Only contract checks were run. No build, database, GUI, daemon, adapter,
+  browser, OMP, or process command was run. No commit or push command was run.
+
+### 2026-07-23 — P3a hard-review contract repair
+
+#### Scope
+
+- Read `artifacts/omp/p3a/independent-review-output.md` and repaired only P3a
+  contract fixtures, manifest/hard digests, verifier, contract/plan documents,
+  and this ledger.
+- Approval eligibility now repeats and is checked against the exact frozen P1
+  `(proposal_id, revision, revision_hash)` tuple. `HostSpec` has an opaque
+  `transcript_source_fingerprint`; its self-excluding JCS SHA-256 binds that
+  source without carrying a raw path.
+- Recovery vectors encode explicit absent identities or exact ready
+  materialization ID/hash/nonce and Run ID/materialization/current-token
+  `created`-fact identities. Staleness is any mismatch from the active
+  `(claim_token_hash, fence_generation)` tuple, including same-generation/
+  different-token and lower-generation vectors for every fenced write.
+- Every fail-closed `waiting_for_human` outcome carries the frozen abstract
+  `(run_id, tool_call_id)` reference. No terminal, evidence, or process fact is
+  inferred. `--self-test` alone may spawn a copied Node verifier; it never
+  launches an adapter or contract-defined process.
+
+#### Verification
+
+- Passed exactly:
+
+  ```sh
+  node --check contracts/p3a/verify.mjs &&
+  node contracts/p1a/verify.mjs &&
+  node contracts/p1c/verify.mjs &&
+  node contracts/p2a/verify.mjs &&
+  node contracts/p2c/verify.mjs &&
+  node contracts/p3a/verify.mjs &&
+  node contracts/p3a/verify.mjs --self-test
+  ```
+
+- The rehashed copied-fixture self-test rejected raw transcript paths, approval
+  tuple, transcript source, same-generation and lower-generation stale
+  authority, intervention, recovery materialization/Run/current-token identity,
+  and terminal/evidence/process-guess mutations, in addition to the existing
+  hard-digest and fail-closed probes.
+- Only contract verifier checks ran. No build, database, GUI, daemon, adapter,
+  browser, OMP, SQLite, runtime, or contract-defined process was launched. No
+  commit or push command was run.
