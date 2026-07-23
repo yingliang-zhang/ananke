@@ -1180,3 +1180,132 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 - Only contract verifier checks ran. No build, database, GUI, daemon, adapter,
   browser, OMP, SQLite, runtime, or contract-defined process was launched. No
   commit or push command was run.
+
+### 2026-07-23 — P3b SQLite fenced launch-admission authority
+
+#### TDD RED
+
+- `go test ./internal/store -run '^TestP3B' -count=1` initially exited `1`:
+  the new P3b tests failed to build because `LaunchSpec`,
+  `LaunchApprovalEligibility`, fenced-claim types, recovery types, and their
+  store APIs did not yet exist.
+
+#### GREEN
+
+- Migration v11 adds immutable canonical `launch_specs`, append-only claim,
+  materialization, outbox, run-intent/state-fact, terminal-intent, and
+  evidence-intent tables. A mutable `launch_claim_heads` row selects exactly
+  one immutable claim generation; composite foreign keys bind each projection
+  to its full `(launch_spec_hash, claim_id, claim_token_hash,
+  fence_generation)` identity. Insert-only triggers protect every fact table.
+- `StoreLaunchSpec` validates the complete P3a closed spec and JCS hash, then
+  atomically derives an exact canonical P1 Revision plus reciprocal approved
+  local-operator Approval/Lifecycle tuple. It stores the immutable eligibility
+  fact; no Grill record, mutable approval copy, task prose, command, path, or
+  prompt is accepted.
+- Claim acquire/reclaim writes a new immutable generation and durable first
+  outbox stage atomically. Materialization readiness verifies only the sealed
+  hash/nonce identity. Run, terminal, and evidence APIs record fenced model
+  intents/facts only: P3b never calls `CreateRun`, starts a process, opens or
+  creates a worktree, materializes files, invokes an adapter/OMP, or executes a
+  verification command.
+- Recovery reads exact durable boundaries only: materialization absent → retry
+  materialization; ready materialization/no Run intent → retry Run admission;
+  ready materialization/current-token `created` Run intent → retry process
+  admission. It returns no inferred process, terminal, or evidence outcome.
+- Store tests preserve P3a fixture parity, P2-head migration, immutable and
+  eligible admission, restart boundaries, atomic cross-handle reclaim,
+  same-generation wrong-token and lower-generation denials for every fenced
+  write, corrupted P1/claim-head vectors, and a zero-row assertion against the
+  existing `runs` table.
+
+#### Verification
+
+- Focused P3b and full-store gates passed:
+
+  ```sh
+  go test ./internal/store -run '^TestP3B' -count=1
+  go test ./internal/store -count=1 -timeout=180s
+  ```
+
+- Full Go and race gates passed:
+
+  ```sh
+  go test ./... -count=1 -timeout=180s
+  go test -race ./internal/store -count=1 -timeout=180s
+  ```
+
+- P1a, P1c, P2a, P2c, and P3a normal and `--self-test` verifier gates all
+  passed. The P3a gate confirmed its unchanged canonical fixture hash plus
+  rejection of stale authority and recovery process/terminal/evidence guesses.
+
+#### Scope
+
+- No daemon, Tauri/UI, renderer protocol, adapter, OMP, worker, real Run,
+  worktree/materialization filesystem action, process launch, command/prompt/
+  verification execution, commit, or push was added or run. No P3a fixture or
+  verifier bytes were changed.
+
+#### Terminal verdict
+
+- **PASS:** P3b persists only fenced launch-admission authority and recovery
+  facts, with complete active token-plus-generation checks at every modeled
+  write boundary.
+
+### 2026-07-23 — P3b independent-review durability repair
+
+#### TDD RED
+
+- `go test ./internal/store -run '^TestP3B' -count=1` initially exited `1`.
+  `TestP3BFailsClosedOnFKValidSealedMaterializationCorruption` observed an
+  idempotent materialization reload return
+  `ErrLaunchMaterializationConflict` instead of `ErrLaunchRecordCorrupt` for
+  an FK-valid active-fence record with a different valid hash/nonce.
+
+#### GREEN
+
+- Every P3b durable materialization read used by idempotent readiness reload,
+  Run-intent admission, and recovery now compares hash/nonce with the immutable
+  `StoredLaunchSpec.Spec.SealedContract` before it can return a projection or
+  select a recovery action. A mismatch returns `ErrLaunchRecordCorrupt`.
+  Recovery additionally verifies that a durable Run intent names the recovered
+  exact materialization ID.
+- The regression inserts an FK-valid active-fence materialization and sequence-2
+  outbox fact containing a different valid sealed hash/nonce. Readiness reload,
+  `GetLaunchRecoveryBoundary`, and `CreateLaunchRunIntent` each fail closed;
+  the Run-intent table remains empty.
+- Same-generation wrong-token and lower-generation vectors now cover both
+  `RecordLaunchMaterializationReady` and `ReclaimLaunchClaim`, proving no
+  materialization, claim, outbox, or active-head mutation.
+- Direct SQLite migration-constraint tests reject forged materialization,
+  outbox, and Run-intent child fences via foreign keys; they reject duplicate
+  claim generation, outbox stage, materialization identity/generation, and
+  Run-intent ID/generation via unique constraints.
+
+#### Verification
+
+- Passed after formatting the two changed Go files:
+
+  ```sh
+  go test ./internal/store -run '^TestP3B' -count=1
+  go test ./internal/store -count=1 -timeout=180s
+  go test ./... -count=1 -timeout=180s
+  go test -race ./internal/store -count=1 -timeout=180s
+  go test ./internal/store -run '^TestP3BClaimReclamationIsAtomicAcrossStoreHandles$' -count=100
+  ```
+
+- The normal and `--self-test` contract gates passed for `contracts/p1a`,
+  `p1c`, `p2a`, `p2c`, and `p3a`.
+
+#### Scope
+
+- This repair changed launch-admission persistence, its P3b tests, and this
+  ledger; it introduced no daemon, Tauri/UI, worktree/materialization filesystem
+  action, real Run, process, adapter, OMP, commit, or contract fixture/verifier
+  change.
+
+#### Terminal verdict
+
+- **PASS:** P3b now fails closed when any persisted active-fence materialization
+  does not match its immutable sealed hash/nonce, with direct relational
+  constraint and stale-write non-mutation coverage.

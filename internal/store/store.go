@@ -84,8 +84,9 @@ type migration struct {
 // v4 adds the durable transcript-finalization handoff; v5 adds durable
 // cancellation intent; v6 adds durable transcript file identity; v7 adds the
 // P1b durable task-proposal journal; v8 repairs v7 identity constraints; v9
-// makes the Approval and RevisionLifecycle pair reciprocal; and v10 adds the
-// P2b review-only Grill journal.
+// makes the Approval and RevisionLifecycle pair reciprocal; v10 adds the
+// P2b review-only Grill journal; and v11 adds P3b's fenced, model-only
+// launch-admission authority.
 var migrations = []migration{
 	{version: 1, up: migrateV1},
 	{version: 2, up: migrateV2},
@@ -97,6 +98,7 @@ var migrations = []migration{
 	{version: 8, up: migrateV8},
 	{version: 9, up: migrateV9},
 	{version: 10, up: migrateV10},
+	{version: 11, up: migrateV11},
 }
 
 // SchemaVersion reports the highest applied migration version.
@@ -787,6 +789,181 @@ func migrateV10(ctx context.Context, tx *sql.Tx) error {
 		`CREATE TRIGGER grill_records_insert_only_delete
 			BEFORE DELETE ON grill_records
 			BEGIN SELECT RAISE(ABORT, 'grill records are append-only'); END`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateV11 creates the P3b model-only launch-admission authority. Every
+// projection fact is insert-only; the sole mutable table is the active claim
+// head, which atomically selects one immutable claim generation.
+func migrateV11(ctx context.Context, tx *sql.Tx) error {
+	statements := []string{
+		`CREATE TABLE launch_specs (
+			launch_spec_hash TEXT PRIMARY KEY,
+			proposal_id TEXT NOT NULL,
+			revision INTEGER NOT NULL CHECK (revision > 0),
+			revision_hash TEXT NOT NULL,
+			approval_id TEXT NOT NULL,
+			approved_at TEXT NOT NULL,
+			approved_by TEXT NOT NULL CHECK (approved_by = 'local_gui_operator'),
+			approval_state TEXT NOT NULL CHECK (approval_state = 'approved'),
+			spec_json TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			UNIQUE (proposal_id, revision, revision_hash, approval_id),
+			FOREIGN KEY (proposal_id, revision, revision_hash)
+				REFERENCES task_proposal_revisions(proposal_id, revision, revision_hash)
+				DEFERRABLE INITIALLY DEFERRED,
+			FOREIGN KEY (proposal_id, revision, revision_hash, approval_id)
+				REFERENCES task_proposal_revision_lifecycles(proposal_id, revision, revision_hash, approval_id)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE task_claims (
+			claim_id TEXT PRIMARY KEY,
+			launch_spec_hash TEXT NOT NULL,
+			claim_token_hash TEXT NOT NULL,
+			fence_generation INTEGER NOT NULL CHECK (fence_generation > 0),
+			owner_id TEXT NOT NULL,
+			attempt INTEGER NOT NULL CHECK (attempt > 0),
+			created_at TEXT NOT NULL,
+			UNIQUE (launch_spec_hash, fence_generation),
+			UNIQUE (launch_spec_hash, claim_id, claim_token_hash, fence_generation),
+			FOREIGN KEY (launch_spec_hash) REFERENCES launch_specs(launch_spec_hash)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE launch_claim_heads (
+			launch_spec_hash TEXT PRIMARY KEY,
+			claim_id TEXT NOT NULL,
+			claim_token_hash TEXT NOT NULL,
+			fence_generation INTEGER NOT NULL CHECK (fence_generation > 0),
+			FOREIGN KEY (launch_spec_hash, claim_id, claim_token_hash, fence_generation)
+				REFERENCES task_claims(launch_spec_hash, claim_id, claim_token_hash, fence_generation)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE launch_materializations (
+			materialization_id TEXT PRIMARY KEY,
+			launch_spec_hash TEXT NOT NULL,
+			claim_id TEXT NOT NULL,
+			claim_token_hash TEXT NOT NULL,
+			fence_generation INTEGER NOT NULL CHECK (fence_generation > 0),
+			materialization_hash TEXT NOT NULL,
+			nonce TEXT NOT NULL,
+			state TEXT NOT NULL CHECK (state = 'ready'),
+			created_at TEXT NOT NULL,
+			UNIQUE (launch_spec_hash, fence_generation),
+			UNIQUE (launch_spec_hash, materialization_id, claim_id, claim_token_hash, fence_generation),
+			FOREIGN KEY (launch_spec_hash, claim_id, claim_token_hash, fence_generation)
+				REFERENCES task_claims(launch_spec_hash, claim_id, claim_token_hash, fence_generation)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE launch_admission_outbox (
+			outbox_id TEXT PRIMARY KEY,
+			launch_spec_hash TEXT NOT NULL,
+			claim_id TEXT NOT NULL,
+			claim_token_hash TEXT NOT NULL,
+			fence_generation INTEGER NOT NULL CHECK (fence_generation > 0),
+			sequence INTEGER NOT NULL CHECK (sequence IN (1, 2, 3)),
+			state TEXT NOT NULL CHECK (
+				(sequence = 1 AND state = 'pending_materialization') OR
+				(sequence = 2 AND state = 'pending_run_admission') OR
+				(sequence = 3 AND state = 'pending_process_admission')
+			),
+			created_at TEXT NOT NULL,
+			UNIQUE (launch_spec_hash, fence_generation, sequence),
+			FOREIGN KEY (launch_spec_hash, claim_id, claim_token_hash, fence_generation)
+				REFERENCES task_claims(launch_spec_hash, claim_id, claim_token_hash, fence_generation)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE launch_run_intents (
+			run_id TEXT PRIMARY KEY,
+			launch_spec_hash TEXT NOT NULL,
+			claim_id TEXT NOT NULL,
+			claim_token_hash TEXT NOT NULL,
+			fence_generation INTEGER NOT NULL CHECK (fence_generation > 0),
+			materialization_id TEXT NOT NULL,
+			attempt INTEGER NOT NULL CHECK (attempt > 0),
+			created_at TEXT NOT NULL,
+			UNIQUE (launch_spec_hash, fence_generation),
+			UNIQUE (run_id, claim_id, claim_token_hash, fence_generation),
+			FOREIGN KEY (launch_spec_hash, claim_id, claim_token_hash, fence_generation)
+				REFERENCES task_claims(launch_spec_hash, claim_id, claim_token_hash, fence_generation)
+				DEFERRABLE INITIALLY DEFERRED,
+			FOREIGN KEY (launch_spec_hash, materialization_id, claim_id, claim_token_hash, fence_generation)
+				REFERENCES launch_materializations(launch_spec_hash, materialization_id, claim_id, claim_token_hash, fence_generation)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE launch_run_state_facts (
+			run_id TEXT NOT NULL,
+			sequence INTEGER NOT NULL CHECK (sequence = 1),
+			kind TEXT NOT NULL CHECK (kind = 'created'),
+			token_hash TEXT NOT NULL,
+			written_at TEXT NOT NULL,
+			PRIMARY KEY (run_id, sequence),
+			FOREIGN KEY (run_id) REFERENCES launch_run_intents(run_id)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE launch_terminal_intents (
+			intent_id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL UNIQUE,
+			claim_id TEXT NOT NULL,
+			claim_token_hash TEXT NOT NULL,
+			fence_generation INTEGER NOT NULL CHECK (fence_generation > 0),
+			created_at TEXT NOT NULL,
+			FOREIGN KEY (run_id, claim_id, claim_token_hash, fence_generation)
+				REFERENCES launch_run_intents(run_id, claim_id, claim_token_hash, fence_generation)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE TABLE launch_evidence_intents (
+			intent_id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL UNIQUE,
+			claim_id TEXT NOT NULL,
+			claim_token_hash TEXT NOT NULL,
+			fence_generation INTEGER NOT NULL CHECK (fence_generation > 0),
+			state TEXT NOT NULL CHECK (state = 'settled'),
+			created_at TEXT NOT NULL,
+			FOREIGN KEY (run_id, claim_id, claim_token_hash, fence_generation)
+				REFERENCES launch_run_intents(run_id, claim_id, claim_token_hash, fence_generation)
+				DEFERRABLE INITIALLY DEFERRED
+		)`,
+		`CREATE INDEX idx_launch_outbox_active_stage ON launch_admission_outbox
+			(launch_spec_hash, fence_generation, sequence DESC)`,
+		`CREATE INDEX idx_launch_claims_created ON task_claims (created_at, launch_spec_hash)`,
+		`CREATE TRIGGER launch_specs_insert_only_update BEFORE UPDATE ON launch_specs
+			BEGIN SELECT RAISE(ABORT, 'launch specs are append-only'); END`,
+		`CREATE TRIGGER launch_specs_insert_only_delete BEFORE DELETE ON launch_specs
+			BEGIN SELECT RAISE(ABORT, 'launch specs are append-only'); END`,
+		`CREATE TRIGGER task_claims_insert_only_update BEFORE UPDATE ON task_claims
+			BEGIN SELECT RAISE(ABORT, 'task claims are append-only'); END`,
+		`CREATE TRIGGER task_claims_insert_only_delete BEFORE DELETE ON task_claims
+			BEGIN SELECT RAISE(ABORT, 'task claims are append-only'); END`,
+		`CREATE TRIGGER launch_materializations_insert_only_update BEFORE UPDATE ON launch_materializations
+			BEGIN SELECT RAISE(ABORT, 'launch materializations are append-only'); END`,
+		`CREATE TRIGGER launch_materializations_insert_only_delete BEFORE DELETE ON launch_materializations
+			BEGIN SELECT RAISE(ABORT, 'launch materializations are append-only'); END`,
+		`CREATE TRIGGER launch_outbox_insert_only_update BEFORE UPDATE ON launch_admission_outbox
+			BEGIN SELECT RAISE(ABORT, 'launch outbox is append-only'); END`,
+		`CREATE TRIGGER launch_outbox_insert_only_delete BEFORE DELETE ON launch_admission_outbox
+			BEGIN SELECT RAISE(ABORT, 'launch outbox is append-only'); END`,
+		`CREATE TRIGGER launch_run_intents_insert_only_update BEFORE UPDATE ON launch_run_intents
+			BEGIN SELECT RAISE(ABORT, 'launch run intents are append-only'); END`,
+		`CREATE TRIGGER launch_run_intents_insert_only_delete BEFORE DELETE ON launch_run_intents
+			BEGIN SELECT RAISE(ABORT, 'launch run intents are append-only'); END`,
+		`CREATE TRIGGER launch_run_state_facts_insert_only_update BEFORE UPDATE ON launch_run_state_facts
+			BEGIN SELECT RAISE(ABORT, 'launch run state facts are append-only'); END`,
+		`CREATE TRIGGER launch_run_state_facts_insert_only_delete BEFORE DELETE ON launch_run_state_facts
+			BEGIN SELECT RAISE(ABORT, 'launch run state facts are append-only'); END`,
+		`CREATE TRIGGER launch_terminal_intents_insert_only_update BEFORE UPDATE ON launch_terminal_intents
+			BEGIN SELECT RAISE(ABORT, 'launch terminal intents are append-only'); END`,
+		`CREATE TRIGGER launch_terminal_intents_insert_only_delete BEFORE DELETE ON launch_terminal_intents
+			BEGIN SELECT RAISE(ABORT, 'launch terminal intents are append-only'); END`,
+		`CREATE TRIGGER launch_evidence_intents_insert_only_update BEFORE UPDATE ON launch_evidence_intents
+			BEGIN SELECT RAISE(ABORT, 'launch evidence intents are append-only'); END`,
+		`CREATE TRIGGER launch_evidence_intents_insert_only_delete BEFORE DELETE ON launch_evidence_intents
+			BEGIN SELECT RAISE(ABORT, 'launch evidence intents are append-only'); END`,
 	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
