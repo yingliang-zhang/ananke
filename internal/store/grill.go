@@ -627,6 +627,10 @@ func (s *Store) recordGrillOperatorAction(ctx context.Context, identity GrillRev
 	if maxRecord.Valid {
 		recordSequence = int(maxRecord.Int64) + 1
 	}
+	writer := localGUIOperator
+	if schemaVersion == GrillDefaultSchemaVersion {
+		writer = deterministicGrillWriter
+	}
 	var answer, override any
 	if schemaVersion == GrillAnswerSchemaVersion {
 		answer = "acknowledged"
@@ -640,7 +644,7 @@ func (s *Store) recordGrillOperatorAction(ctx context.Context, identity GrillRev
 		 remedial_step, answer_value, override_value, written_at, written_by)
 		VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?, NULL, ?, ?, ?, ?)`,
 		identity.ProposalID, identity.Revision, identity.RevisionHash, ruleVersion, recordSequence, schemaVersion,
-		questionID, nullableGrillDefault(schemaVersion, defaultValue), answer, override, nowStamp(), localGUIOperator)
+		questionID, nullableGrillDefault(schemaVersion, defaultValue), answer, override, nowStamp(), writer)
 	if err != nil {
 		return false, fmt.Errorf("insert Grill review record: %w", err)
 	}

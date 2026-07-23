@@ -412,14 +412,16 @@ fn p2c_validate_evaluation(value: &GrillEvaluation) -> Result<(), &'static str> 
         }
         previous_deferred_priority = priority;
     }
-    if value.new_records != 0 && value.new_records != value.new_question_ids.len() as i32 + 1 {
-        return Err("new_records must include one Evaluation plus each new Question");
+    let question_record_count = value.new_question_ids.len() as i32;
+    if value.new_records < question_record_count || value.new_records > question_record_count + 1 {
+        return Err(
+            "new_records must account for each appended Question and an optional Evaluation record",
+        );
     }
     if value.status == Status::Clear
         && (!value.shown_questions.is_empty()
             || !value.new_question_ids.is_empty()
-            || !value.deferred_rule_classes.is_empty()
-            || value.new_records != 0)
+            || !value.deferred_rule_classes.is_empty())
     {
         return Err("clear Evaluation cannot retain active or appended Questions");
     }

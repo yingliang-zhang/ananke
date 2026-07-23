@@ -4,6 +4,14 @@ use generated::{
     renderer_public_bootstrap::{Bootstrap, Project, Workstream},
     renderer_public_cancel::Cancel,
     renderer_public_event::Event,
+    renderer_public_grill_answer_record::GrillAnswerRecord,
+    renderer_public_grill_default_record::GrillDefaultRecord,
+    renderer_public_grill_evaluate_input::EvaluateGrillInput,
+    renderer_public_grill_evaluation::GrillEvaluation,
+    renderer_public_grill_override_record::GrillOverrideRecord,
+    renderer_public_grill_record_answer_input::RecordGrillAnswerInput,
+    renderer_public_grill_record_default_input::RecordGrillDefaultInput,
+    renderer_public_grill_record_override_input::RecordGrillOverrideInput,
     renderer_public_health::Health,
     renderer_public_proposal_activity_list::ProposalActivityList,
     renderer_public_proposal_activity_list_input::ListProposalActivityInput,
@@ -21,6 +29,7 @@ use generated::{
     renderer_public_run::{Run, RunDiagnostics},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::symlink;
@@ -43,16 +52,11 @@ const DATA_SOCKET_ALIAS_NAME: &str = "data";
 const TOKEN_FILE_NAME: &str = "daemon-token";
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(5);
 const API_TIMEOUT: Duration = Duration::from_secs(5);
-#[allow(
-    dead_code,
-    reason = "P2b reserves this private native/daemon protocol without a renderer call site"
-)]
 const GRILL_RULE_VERSION: &str = "ananke.grill.rules.v1";
-#[allow(
-    dead_code,
-    reason = "P2b reserves this private native/daemon protocol without a renderer call site"
-)]
 const GRILL_INPUT_SCHEMA_VERSION: &str = "ananke.grill.input.v1";
+const GRILL_DEFAULT_SCHEMA_VERSION: &str = "ananke.grill.default.v1";
+const GRILL_ANSWER_SCHEMA_VERSION: &str = "ananke.grill.answer.v1";
+const GRILL_OVERRIDE_SCHEMA_VERSION: &str = "ananke.grill.override.v1";
 
 #[derive(Debug)]
 enum BridgeError {
@@ -405,11 +409,9 @@ struct GoResponse {
     #[serde(default)]
     proposal_activity: Option<serde_json::Value>,
     #[serde(default)]
-    #[allow(
-        dead_code,
-        reason = "P2b private response is intentionally not a renderer model"
-    )]
     grill_evaluation: Option<serde_json::Value>,
+    #[serde(default)]
+    grill_record: Option<serde_json::Value>,
 }
 // GoProposalRequest and its nested records are private bridge transport.
 // Generated renderer-public types are converted at the Tauri edge below.
@@ -442,9 +444,7 @@ struct GoProposalRequest<'a> {
 }
 
 // GoGrillRequest and its nested records are private native/daemon transport.
-// No generated renderer-public type or Tauri command exposes this review-only
-// protocol.
-#[allow(dead_code, reason = "P2b private protocol has no renderer call site")]
+// The generated renderer DTOs below receive an explicit allowlisted projection.
 #[derive(Serialize)]
 #[serde(untagged)]
 enum GoGrillRequest<'a> {
@@ -494,8 +494,25 @@ struct GoGrillRecordRequest<'a> {
     question_id: &'a str,
 }
 
-#[allow(dead_code, reason = "P2b private protocol has no renderer call site")]
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Copy)]
+struct GrillRevisionIdentity<'a> {
+    proposal_id: &'a str,
+    revision: i64,
+    revision_hash: &'a str,
+}
+
+impl<'a> GrillRevisionIdentity<'a> {
+    fn new(proposal_id: &'a str, revision: i64, revision_hash: &'a str) -> Self {
+        Self {
+            proposal_id,
+            revision,
+            revision_hash,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GoGrillEvaluation {
     proposal_id: String,
     revision: i64,
@@ -504,9 +521,49 @@ struct GoGrillEvaluation {
     input_hash: String,
     new_question_ids: Vec<String>,
     shown_question_ids: Vec<String>,
+    shown_questions: Vec<GoGrillQuestion>,
     deferred_rule_classes: Vec<String>,
     status: String,
     new_records: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoGrillQuestion {
+    blocking: bool,
+    #[serde(rename = "default")]
+    grill_default: String,
+    proposal_id: String,
+    question_id: String,
+    question_sequence: i64,
+    record_sequence: i64,
+    remedial_step: String,
+    revision: i64,
+    revision_hash: String,
+    risk: String,
+    rule_class: String,
+    waivable: bool,
+    written_at: String,
+    written_by: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoGrillRecord {
+    proposal_id: String,
+    revision: i64,
+    revision_hash: String,
+    rule_version: String,
+    schema_version: String,
+    question_id: String,
+    record_sequence: i64,
+    #[serde(rename = "default")]
+    grill_default: Option<String>,
+    answer: Option<String>,
+    #[serde(rename = "override")]
+    grill_override: Option<String>,
+    written_at: String,
+    written_by: String,
 }
 
 #[derive(Serialize)]
@@ -959,68 +1016,123 @@ impl Backend {
         decode_proposal_result(self.request(request)?.proposal_mutation)
     }
 
-    #[allow(
-        dead_code,
-        reason = "P2b private bridge is intentionally not a renderer command"
-    )]
     fn evaluate_grill(
         &mut self,
-        input: GoGrillInput<'_>,
-        input_hash: &str,
-    ) -> Result<GoGrillEvaluation, BridgeError> {
+        input: EvaluateGrillInput,
+    ) -> Result<GrillEvaluation, BridgeError> {
         self.ensure_daemon()?;
+        let expected_identity =
+            GrillRevisionIdentity::new(&input.proposal_id, input.revision, &input.revision_hash);
+        let grill_input = private_grill_input(&input);
+        let input_hash = hash_grill_input(&grill_input)?;
         let mut request = GoRequest::new("evaluate-grill", &self.token);
         request.grill = Some(GoGrillRequest::Evaluate(GoGrillEvaluationRequest {
-            input,
-            input_hash,
+            input: grill_input,
+            input_hash: &input_hash,
             rule_version: GRILL_RULE_VERSION,
         }));
-        decode_grill_result(self.request(request)?.grill_evaluation)
+        project_grill_evaluation(
+            self.request(request)?.grill_evaluation,
+            expected_identity,
+            &input_hash,
+        )
     }
 
-    #[allow(
-        dead_code,
-        reason = "P2b private bridge is intentionally not a renderer command"
-    )]
     fn record_grill_default(
         &mut self,
-        record: GoGrillRecordRequest<'_>,
-    ) -> Result<(), BridgeError> {
-        self.record_grill("record-grill-default", record)
+        input: RecordGrillDefaultInput,
+    ) -> Result<GrillDefaultRecord, BridgeError> {
+        let expected_identity =
+            GrillRevisionIdentity::new(&input.proposal_id, input.revision, &input.revision_hash);
+        self.record_grill(
+            "record-grill-default",
+            expected_identity,
+            &input.question_id,
+            GRILL_DEFAULT_SCHEMA_VERSION,
+            &[
+                "default",
+                "proposal_id",
+                "question_id",
+                "record_sequence",
+                "revision",
+                "revision_hash",
+                "written_at",
+                "written_by",
+            ],
+        )
     }
 
-    #[allow(
-        dead_code,
-        reason = "P2b private bridge is intentionally not a renderer command"
-    )]
-    fn record_grill_answer(&mut self, record: GoGrillRecordRequest<'_>) -> Result<(), BridgeError> {
-        self.record_grill("record-grill-answer", record)
+    fn record_grill_answer(
+        &mut self,
+        input: RecordGrillAnswerInput,
+    ) -> Result<GrillAnswerRecord, BridgeError> {
+        let expected_identity =
+            GrillRevisionIdentity::new(&input.proposal_id, input.revision, &input.revision_hash);
+        self.record_grill(
+            "record-grill-answer",
+            expected_identity,
+            &input.question_id,
+            GRILL_ANSWER_SCHEMA_VERSION,
+            &[
+                "answer",
+                "proposal_id",
+                "question_id",
+                "record_sequence",
+                "revision",
+                "revision_hash",
+                "written_at",
+                "written_by",
+            ],
+        )
     }
 
-    #[allow(
-        dead_code,
-        reason = "P2b private bridge is intentionally not a renderer command"
-    )]
     fn record_grill_override(
         &mut self,
-        record: GoGrillRecordRequest<'_>,
-    ) -> Result<(), BridgeError> {
-        self.record_grill("record-grill-override", record)
+        input: RecordGrillOverrideInput,
+    ) -> Result<GrillOverrideRecord, BridgeError> {
+        let expected_identity =
+            GrillRevisionIdentity::new(&input.proposal_id, input.revision, &input.revision_hash);
+        self.record_grill(
+            "record-grill-override",
+            expected_identity,
+            &input.question_id,
+            GRILL_OVERRIDE_SCHEMA_VERSION,
+            &[
+                "override",
+                "proposal_id",
+                "question_id",
+                "record_sequence",
+                "revision",
+                "revision_hash",
+                "written_at",
+                "written_by",
+            ],
+        )
     }
 
-    #[allow(
-        dead_code,
-        reason = "P2b private bridge is intentionally not a renderer command"
-    )]
-    fn record_grill(
+    fn record_grill<T: DeserializeOwned>(
         &mut self,
         command: &str,
-        record: GoGrillRecordRequest<'_>,
-    ) -> Result<(), BridgeError> {
+        expected_identity: GrillRevisionIdentity<'_>,
+        expected_question_id: &str,
+        expected_schema_version: &str,
+        public_fields: &[&str],
+    ) -> Result<T, BridgeError> {
         self.ensure_daemon()?;
         let mut request = GoRequest::new(command, &self.token);
-        request.grill = Some(GoGrillRequest::Record(record));
-        self.request(request).map(|_| ())
+        request.grill = Some(GoGrillRequest::Record(private_grill_record(
+            expected_identity.proposal_id,
+            expected_identity.revision,
+            expected_identity.revision_hash,
+            expected_question_id,
+        )));
+        project_grill_record(
+            self.request(request)?.grill_record,
+            expected_identity,
+            expected_question_id,
+            expected_schema_version,
+            public_fields,
+        )
     }
 
     #[cfg(test)]
@@ -1033,17 +1145,200 @@ impl Backend {
     }
 }
 
+fn private_grill_input(input: &EvaluateGrillInput) -> GoGrillInput<'_> {
+    GoGrillInput {
+        schema_version: GRILL_INPUT_SCHEMA_VERSION,
+        proposal_id: &input.proposal_id,
+        revision: input.revision,
+        revision_hash: &input.revision_hash,
+        declarations: GoGrillDeclarations {
+            observable_outcome: "absent",
+            scope_compatibility: "absent",
+            acceptance_evidence: "absent",
+            destructive_external: "declared",
+            local_authorization: "unrecorded",
+            adapter_mode: "read_only",
+            worktree_isolation: "not_isolated",
+            autonomy: GoGrillAutonomy {
+                deadline: None,
+                attempt_cap: None,
+            },
+        },
+    }
+}
+
+fn private_grill_record<'a>(
+    proposal_id: &'a str,
+    revision: i64,
+    revision_hash: &'a str,
+    question_id: &'a str,
+) -> GoGrillRecordRequest<'a> {
+    GoGrillRecordRequest {
+        proposal_id,
+        revision,
+        revision_hash,
+        question_id,
+    }
+}
+
+fn hash_grill_input(input: &GoGrillInput<'_>) -> Result<String, BridgeError> {
+    let value = serde_json::to_value(input)?;
+    let canonical = canonical_json(&value)?;
+    Ok(format!("sha256:{:x}", Sha256::digest(canonical.as_bytes())))
+}
+
+fn canonical_json(value: &serde_json::Value) -> Result<String, BridgeError> {
+    fn append(value: &serde_json::Value, output: &mut String) -> Result<(), BridgeError> {
+        match value {
+            serde_json::Value::Null => output.push_str("null"),
+            serde_json::Value::Bool(value) => {
+                output.push_str(if *value { "true" } else { "false" })
+            }
+            serde_json::Value::Number(value) => output.push_str(&value.to_string()),
+            serde_json::Value::String(value) => output.push_str(&serde_json::to_string(value)?),
+            serde_json::Value::Array(values) => {
+                output.push('[');
+                for (index, value) in values.iter().enumerate() {
+                    if index != 0 {
+                        output.push(',');
+                    }
+                    append(value, output)?;
+                }
+                output.push(']');
+            }
+            serde_json::Value::Object(values) => {
+                let mut keys = values.keys().collect::<Vec<_>>();
+                keys.sort_unstable();
+                output.push('{');
+                for (index, key) in keys.into_iter().enumerate() {
+                    if index != 0 {
+                        output.push(',');
+                    }
+                    output.push_str(&serde_json::to_string(key)?);
+                    output.push(':');
+                    append(&values[key], output)?;
+                }
+                output.push('}');
+            }
+        }
+        Ok(())
+    }
+
+    let mut output = String::new();
+    append(value, &mut output)?;
+    Ok(output)
+}
+
+fn project_grill_evaluation(
+    value: Option<serde_json::Value>,
+    expected_identity: GrillRevisionIdentity<'_>,
+    expected_input_hash: &str,
+) -> Result<GrillEvaluation, BridgeError> {
+    let evaluation: GoGrillEvaluation = serde_json::from_value(value.ok_or(BridgeError::Protocol)?)
+        .map_err(|_| BridgeError::Protocol)?;
+    if evaluation.proposal_id != expected_identity.proposal_id
+        || evaluation.revision != expected_identity.revision
+        || evaluation.revision_hash != expected_identity.revision_hash
+        || evaluation.rule_version != GRILL_RULE_VERSION
+        || evaluation.input_hash != expected_input_hash
+        || evaluation.shown_questions.iter().any(|question| {
+            question.proposal_id != expected_identity.proposal_id
+                || question.revision != expected_identity.revision
+                || question.revision_hash != expected_identity.revision_hash
+        })
+        || evaluation.shown_question_ids
+            != evaluation
+                .shown_questions
+                .iter()
+                .map(|question| question.question_id.clone())
+                .collect::<Vec<_>>()
+    {
+        return Err(BridgeError::Protocol);
+    }
+    let shown_questions = evaluation
+        .shown_questions
+        .into_iter()
+        .map(|question| {
+            serde_json::json!({
+                "blocking": question.blocking,
+                "default": question.grill_default,
+                "proposal_id": question.proposal_id,
+                "question_id": question.question_id,
+                "question_sequence": question.question_sequence,
+                "record_sequence": question.record_sequence,
+                "remedial_step": question.remedial_step,
+                "revision": question.revision,
+                "revision_hash": question.revision_hash,
+                "risk": question.risk,
+                "rule_class": question.rule_class,
+                "waivable": question.waivable,
+                "written_at": question.written_at,
+                "written_by": question.written_by,
+            })
+        })
+        .collect::<Vec<_>>();
+    decode_public_grill_result(serde_json::json!({
+        "deferred_rule_classes": evaluation.deferred_rule_classes,
+        "new_question_ids": evaluation.new_question_ids,
+        "new_records": evaluation.new_records,
+        "proposal_id": evaluation.proposal_id,
+        "revision": evaluation.revision,
+        "revision_hash": evaluation.revision_hash,
+        "shown_questions": shown_questions,
+        "status": evaluation.status,
+    }))
+}
+
+fn project_grill_record<T: DeserializeOwned>(
+    value: Option<serde_json::Value>,
+    expected_identity: GrillRevisionIdentity<'_>,
+    expected_question_id: &str,
+    expected_schema_version: &str,
+    public_fields: &[&str],
+) -> Result<T, BridgeError> {
+    let record: GoGrillRecord = serde_json::from_value(value.ok_or(BridgeError::Protocol)?)
+        .map_err(|_| BridgeError::Protocol)?;
+    if record.proposal_id != expected_identity.proposal_id
+        || record.revision != expected_identity.revision
+        || record.revision_hash != expected_identity.revision_hash
+        || record.question_id != expected_question_id
+        || record.rule_version != GRILL_RULE_VERSION
+        || record.schema_version != expected_schema_version
+    {
+        return Err(BridgeError::Protocol);
+    }
+    let fields = serde_json::json!({
+        "default": record.grill_default,
+        "answer": record.answer,
+        "override": record.grill_override,
+        "proposal_id": record.proposal_id,
+        "question_id": record.question_id,
+        "record_sequence": record.record_sequence,
+        "revision": record.revision,
+        "revision_hash": record.revision_hash,
+        "written_at": record.written_at,
+        "written_by": record.written_by,
+    });
+    let source = fields.as_object().ok_or(BridgeError::Protocol)?;
+    let mut public = serde_json::Map::new();
+    for field in public_fields {
+        public.insert(
+            (*field).to_owned(),
+            source.get(*field).cloned().ok_or(BridgeError::Protocol)?,
+        );
+    }
+    decode_public_grill_result(serde_json::Value::Object(public))
+}
+
+fn decode_public_grill_result<T: DeserializeOwned>(
+    value: serde_json::Value,
+) -> Result<T, BridgeError> {
+    serde_json::from_value(value).map_err(|_| BridgeError::Protocol)
+}
+
 fn decode_proposal_result<T: DeserializeOwned>(
     value: Option<serde_json::Value>,
 ) -> Result<T, BridgeError> {
-    serde_json::from_value(value.ok_or(BridgeError::Protocol)?).map_err(BridgeError::from)
-}
-
-#[allow(
-    dead_code,
-    reason = "P2b private bridge is intentionally not a renderer command"
-)]
-fn decode_grill_result(value: Option<serde_json::Value>) -> Result<GoGrillEvaluation, BridgeError> {
     serde_json::from_value(value.ok_or(BridgeError::Protocol)?).map_err(BridgeError::from)
 }
 
@@ -1207,6 +1502,38 @@ fn withdraw_proposal(
     use_backend(state, |backend| backend.withdraw_proposal(input))
 }
 
+#[tauri::command]
+fn evaluate_grill(
+    state: State<'_, BridgeState>,
+    input: EvaluateGrillInput,
+) -> Result<GrillEvaluation, String> {
+    use_backend(state, |backend| backend.evaluate_grill(input))
+}
+
+#[tauri::command]
+fn record_grill_default(
+    state: State<'_, BridgeState>,
+    input: RecordGrillDefaultInput,
+) -> Result<GrillDefaultRecord, String> {
+    use_backend(state, |backend| backend.record_grill_default(input))
+}
+
+#[tauri::command]
+fn record_grill_answer(
+    state: State<'_, BridgeState>,
+    input: RecordGrillAnswerInput,
+) -> Result<GrillAnswerRecord, String> {
+    use_backend(state, |backend| backend.record_grill_answer(input))
+}
+
+#[tauri::command]
+fn record_grill_override(
+    state: State<'_, BridgeState>,
+    input: RecordGrillOverrideInput,
+) -> Result<GrillOverrideRecord, String> {
+    use_backend(state, |backend| backend.record_grill_override(input))
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -1231,7 +1558,11 @@ pub fn run() {
             list_proposal_activity,
             append_proposal_revision,
             decide_proposal_approval,
-            withdraw_proposal
+            withdraw_proposal,
+            evaluate_grill,
+            record_grill_default,
+            record_grill_answer,
+            record_grill_override,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Ananke desktop application");
@@ -1975,6 +2306,786 @@ EOF
             .mode()
             & 0o777;
         assert_eq!(app_data_mode, 0o700);
+    }
+
+    #[test]
+    fn bridge_grill_projects_p2c_oracle_through_sidecar_and_sanitizes_failures() {
+        let fixture = p2c_grill_fixture();
+        let oracle = &fixture["commands"];
+        let mut first = new_test_backend();
+        let created = first
+            .backend
+            .create_proposal(proposal_create_input(
+                "p2d_grill_create",
+                "project_p2d",
+                "workstream_p2d",
+                "Project frozen public Grill results through the real sidecar.",
+            ))
+            .expect("create Grill target through the real bridge");
+        let evaluation_input = grill_evaluate_input(&created);
+
+        let initial = first
+            .backend
+            .evaluate_grill(evaluation_input.clone())
+            .expect("evaluate Grill through the real sidecar");
+        let initial_wire =
+            serde_json::to_value(&initial).expect("serialize public Grill evaluation");
+        assert_grill_evaluation_matches_oracle(
+            &initial_wire,
+            &oracle["evaluate_grill"]["result"],
+            &created,
+        );
+
+        let default_input = grill_default_input(&created, "grill_question_scope_compatibility");
+        let default = first
+            .backend
+            .record_grill_default(default_input.clone())
+            .expect("record deterministic Grill default through the real sidecar");
+        let default_wire = serde_json::to_value(&default).expect("serialize public Grill default");
+        assert_grill_record_matches_oracle(
+            &default_wire,
+            &oracle["record_grill_default"]["result"],
+            &created,
+        );
+        assert_eq!(
+            first
+                .backend
+                .record_grill_default(default_input)
+                .expect("replay Grill default through the real sidecar"),
+            default,
+            "default replay must return the durable append-only record",
+        );
+
+        let answer = first
+            .backend
+            .record_grill_answer(grill_answer_input(
+                &created,
+                "grill_question_acceptance_evidence",
+            ))
+            .expect("record Grill acknowledgement through the real sidecar");
+        assert_grill_record_matches_oracle(
+            &serde_json::to_value(&answer).expect("serialize public Grill answer"),
+            &oracle["record_grill_answer"]["result"],
+            &created,
+        );
+
+        let override_record = first
+            .backend
+            .record_grill_override(grill_override_input(
+                &created,
+                "grill_question_scope_compatibility",
+            ))
+            .expect("record permitted Grill waiver through the real sidecar");
+        assert_grill_record_matches_oracle(
+            &serde_json::to_value(&override_record).expect("serialize public Grill waiver"),
+            &oracle["record_grill_override"]["result"],
+            &created,
+        );
+
+        let after_waiver = first
+            .backend
+            .evaluate_grill(evaluation_input.clone())
+            .expect("re-evaluate Grill after the scope waiver");
+        let after_waiver_wire =
+            serde_json::to_value(&after_waiver).expect("serialize post-waiver Grill evaluation");
+        assert_public_object(
+            &after_waiver_wire,
+            &[
+                "deferred_rule_classes",
+                "new_question_ids",
+                "new_records",
+                "proposal_id",
+                "revision",
+                "revision_hash",
+                "shown_questions",
+                "status",
+            ],
+        );
+        assert_no_private_grill_wire(&after_waiver_wire);
+        assert_eq!(after_waiver_wire["new_records"], 1);
+        assert_eq!(
+            after_waiver_wire["new_question_ids"],
+            serde_json::json!(["grill_question_autonomy_budget"])
+        );
+        assert_eq!(
+            after_waiver_wire["deferred_rule_classes"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            after_waiver_wire["shown_questions"]
+                .as_array()
+                .expect("shown public Grill Questions")
+                .iter()
+                .map(|question| question["question_id"].as_str().expect("Question ID"))
+                .collect::<Vec<_>>(),
+            vec![
+                "grill_question_observable_outcome",
+                "grill_question_acceptance_evidence",
+                "grill_question_destructive_external_authorization",
+                "grill_question_adapter_worktree_isolation",
+                "grill_question_autonomy_budget",
+            ],
+        );
+
+        let replay = first
+            .backend
+            .evaluate_grill(evaluation_input.clone())
+            .expect("replay unchanged Grill evaluation");
+        let replay_wire =
+            serde_json::to_value(&replay).expect("serialize replayed Grill evaluation");
+        assert_eq!(replay_wire["new_records"], 0);
+        assert_eq!(replay_wire["new_question_ids"], serde_json::json!([]));
+        let mut expected_replay = after_waiver_wire;
+        expected_replay["new_records"] = serde_json::json!(0);
+        expected_replay["new_question_ids"] = serde_json::json!([]);
+        assert_eq!(replay_wire, expected_replay);
+
+        let mut reconnected =
+            Backend::new(first.backend.paths.clone()).expect("construct reconnecting Grill bridge");
+        assert_eq!(
+            serde_json::to_value(
+                reconnected
+                    .evaluate_grill(evaluation_input)
+                    .expect("evaluate persisted Grill stream through reconnecting bridge"),
+            )
+            .expect("serialize reconnected Grill evaluation"),
+            replay_wire,
+            "reconnect must preserve the bounded public Grill projection",
+        );
+
+        let identity_error = first
+            .backend
+            .evaluate_grill(grill_evaluate_input_for_identity(
+                "proposal_missing",
+                1,
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ))
+            .expect_err("unknown Grill Revision identity must fail");
+        assert_sanitized_grill_error(&identity_error);
+
+        let mut cap_breach =
+            private_grill_evaluation_from_public(&oracle["evaluate_grill"]["result"]);
+        let duplicate_question = cap_breach["shown_questions"][4].clone();
+        cap_breach["shown_questions"]
+            .as_array_mut()
+            .expect("private shown Question array")
+            .push(duplicate_question);
+        cap_breach["shown_question_ids"]
+            .as_array_mut()
+            .expect("private shown Question ID array")
+            .push(serde_json::json!(
+                "grill_question_adapter_worktree_isolation"
+            ));
+        let cap_input = grill_evaluate_input_for_identity(
+            oracle["evaluate_grill"]["input"]["proposal_id"]
+                .as_str()
+                .expect("canonical cap evaluation proposal ID"),
+            oracle["evaluate_grill"]["input"]["revision"]
+                .as_i64()
+                .expect("canonical cap evaluation revision"),
+            oracle["evaluate_grill"]["input"]["revision_hash"]
+                .as_str()
+                .expect("canonical cap evaluation revision hash"),
+        );
+        let cap_identity = GrillRevisionIdentity::new(
+            &cap_input.proposal_id,
+            cap_input.revision,
+            &cap_input.revision_hash,
+        );
+        let cap_input_hash = hash_grill_input(&private_grill_input(&cap_input))
+            .expect("hash canonical cap evaluation input");
+        cap_breach["input_hash"] = serde_json::json!(cap_input_hash);
+        let cap_error = project_grill_evaluation(Some(cap_breach), cap_identity, &cap_input_hash)
+            .expect_err("a private six-question response must not cross the public boundary");
+        assert_sanitized_grill_error(&cap_error);
+    }
+
+    #[test]
+    fn bridge_grill_rejects_schema_valid_swapped_private_sidecar_results() {
+        let fixture = p2c_grill_fixture();
+        let commands = &fixture["commands"];
+        let evaluation_input = grill_evaluate_input_for_identity(
+            commands["evaluate_grill"]["input"]["proposal_id"]
+                .as_str()
+                .expect("canonical evaluation proposal ID"),
+            commands["evaluate_grill"]["input"]["revision"]
+                .as_i64()
+                .expect("canonical evaluation revision"),
+            commands["evaluate_grill"]["input"]["revision_hash"]
+                .as_str()
+                .expect("canonical evaluation revision hash"),
+        );
+        let swapped_proposal_id = "proposal_p2d_swap";
+        let swapped_revision_hash = format!("sha256:{}", "b".repeat(64));
+
+        let mut different_evaluation_tuple =
+            private_grill_evaluation_from_public(&commands["evaluate_grill"]["result"]);
+        replace_private_evaluation_identity(
+            &mut different_evaluation_tuple,
+            swapped_proposal_id,
+            2,
+            &swapped_revision_hash,
+        );
+        assert_scripted_grill_rejection(
+            "grill_evaluation",
+            different_evaluation_tuple,
+            |backend| backend.evaluate_grill(evaluation_input.clone()),
+            &[swapped_proposal_id, &swapped_revision_hash],
+        );
+
+        let mut different_evaluation_hash =
+            private_grill_evaluation_from_public(&commands["evaluate_grill"]["result"]);
+        different_evaluation_hash["input_hash"] =
+            serde_json::json!(format!("sha256:{}", "c".repeat(64)));
+        assert_scripted_grill_rejection(
+            "grill_evaluation",
+            different_evaluation_hash,
+            |backend| backend.evaluate_grill(evaluation_input.clone()),
+            &["sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+        );
+
+        let default_input = grill_default_input(
+            &proposal_mutation_from_grill_command(&commands["record_grill_default"]),
+            commands["record_grill_default"]["input"]["question_id"]
+                .as_str()
+                .expect("canonical default question ID"),
+        );
+        let mut different_default_tuple = private_grill_record_from_public(
+            &commands["record_grill_default"]["result"],
+            GRILL_DEFAULT_SCHEMA_VERSION,
+        );
+        replace_private_record_identity(
+            &mut different_default_tuple,
+            swapped_proposal_id,
+            2,
+            &swapped_revision_hash,
+        );
+        assert_scripted_grill_rejection(
+            "grill_record",
+            different_default_tuple,
+            |backend| backend.record_grill_default(default_input.clone()),
+            &[swapped_proposal_id, &swapped_revision_hash],
+        );
+
+        let answer_input = grill_answer_input(
+            &proposal_mutation_from_grill_command(&commands["record_grill_answer"]),
+            commands["record_grill_answer"]["input"]["question_id"]
+                .as_str()
+                .expect("canonical answer question ID"),
+        );
+        let wrong_question_id = "grill_question_observable_outcome";
+        assert_ne!(answer_input.question_id, wrong_question_id);
+        let mut different_answer_question = private_grill_record_from_public(
+            &commands["record_grill_answer"]["result"],
+            GRILL_ANSWER_SCHEMA_VERSION,
+        );
+        different_answer_question["question_id"] = serde_json::json!(wrong_question_id);
+        assert_scripted_grill_rejection(
+            "grill_record",
+            different_answer_question,
+            |backend| backend.record_grill_answer(answer_input.clone()),
+            &[wrong_question_id],
+        );
+
+        let override_input = grill_override_input(
+            &proposal_mutation_from_grill_command(&commands["record_grill_override"]),
+            commands["record_grill_override"]["input"]["question_id"]
+                .as_str()
+                .expect("canonical override question ID"),
+        );
+        assert_ne!(override_input.question_id, wrong_question_id);
+        let mut different_override_question = private_grill_record_from_public(
+            &commands["record_grill_override"]["result"],
+            GRILL_OVERRIDE_SCHEMA_VERSION,
+        );
+        different_override_question["question_id"] = serde_json::json!(wrong_question_id);
+        assert_scripted_grill_rejection(
+            "grill_record",
+            different_override_question,
+            |backend| backend.record_grill_override(override_input.clone()),
+            &[wrong_question_id],
+        );
+    }
+
+    #[test]
+    fn bridge_grill_rejects_schema_valid_nested_shown_question_identity_swap() {
+        let fixture = p2c_grill_fixture();
+        let command = &fixture["commands"]["evaluate_grill"];
+        let evaluation_input = grill_evaluate_input_for_identity(
+            command["input"]["proposal_id"]
+                .as_str()
+                .expect("canonical evaluation proposal ID"),
+            command["input"]["revision"]
+                .as_i64()
+                .expect("canonical evaluation revision"),
+            command["input"]["revision_hash"]
+                .as_str()
+                .expect("canonical evaluation revision hash"),
+        );
+        let expected_input_hash = hash_grill_input(&private_grill_input(&evaluation_input))
+            .expect("hash canonical Grill evaluation input");
+        let swapped_proposal_id = "proposal_p2d_nested_swap";
+        let swapped_revision_hash = format!("sha256:{}", "d".repeat(64));
+
+        let mut response = private_grill_evaluation_from_public(&command["result"]);
+        response["input_hash"] = serde_json::json!(&expected_input_hash);
+        let original_shown_question_ids = response["shown_question_ids"].clone();
+        assert_eq!(response["proposal_id"], evaluation_input.proposal_id);
+        assert_eq!(response["revision"], evaluation_input.revision);
+        assert_eq!(response["revision_hash"], evaluation_input.revision_hash);
+        assert_eq!(response["input_hash"], expected_input_hash);
+        {
+            let question = response["shown_questions"][0]
+                .as_object_mut()
+                .expect("private shown Question object");
+            question.insert("proposal_id".into(), serde_json::json!(swapped_proposal_id));
+            question.insert("revision".into(), serde_json::json!(2));
+            question.insert(
+                "revision_hash".into(),
+                serde_json::json!(&swapped_revision_hash),
+            );
+        }
+        assert_eq!(response["shown_question_ids"], original_shown_question_ids);
+
+        assert_scripted_grill_rejection(
+            "grill_evaluation",
+            response,
+            |backend| backend.evaluate_grill(evaluation_input),
+            &[
+                swapped_proposal_id,
+                &swapped_revision_hash,
+                &expected_input_hash,
+            ],
+        );
+    }
+
+    fn proposal_mutation_from_grill_command(
+        command: &serde_json::Value,
+    ) -> generated::renderer_public_proposal_mutation::ProposalMutation {
+        serde_json::from_value(serde_json::json!({
+            "approval_id": "approval_p2d_identity",
+            "proposal_id": command["input"]["proposal_id"],
+            "revision": command["input"]["revision"],
+            "revision_hash": command["input"]["revision_hash"],
+        }))
+        .expect("construct public mutation from canonical Grill command identity")
+    }
+
+    fn new_scripted_grill_backend(
+        response_field: &'static str,
+        response: serde_json::Value,
+    ) -> (Backend, TestEnvironment, thread::JoinHandle<()>) {
+        let environment = new_test_environment("scripted-grill");
+        let paths = DaemonPaths::from_parts(
+            environment.root.join("app-data"),
+            environment.root.join("project-root"),
+            environment.root.join("missing-sidecars"),
+            environment.root.clone(),
+        )
+        .expect("construct scripted Grill bridge paths");
+        let backend = Backend::new(paths.clone()).expect("construct scripted Grill bridge");
+        let listener = UnixListener::bind(&paths.socket).expect("bind scripted Grill sidecar");
+        let server = thread::spawn(move || {
+            let (mut ping, _) = listener.accept().expect("accept scripted Grill ping");
+            assert_eq!(
+                read_scripted_sidecar_request(&mut ping)["cmd"],
+                "ping",
+                "bridge must probe the scripted Grill sidecar before projection"
+            );
+            write_scripted_sidecar_response(&mut ping, serde_json::json!({"ok": true}));
+            drop(ping);
+
+            let (mut request, _) = listener.accept().expect("accept scripted Grill command");
+            let command = read_scripted_sidecar_request(&mut request);
+            assert!(
+                matches!(
+                    command["cmd"].as_str(),
+                    Some("evaluate-grill")
+                        | Some("record-grill-default")
+                        | Some("record-grill-answer")
+                        | Some("record-grill-override")
+                ),
+                "scripted sidecar received a Grill command"
+            );
+            let mut response_object = serde_json::Map::new();
+            response_object.insert("ok".into(), serde_json::Value::Bool(true));
+            response_object.insert(response_field.into(), response);
+            write_scripted_sidecar_response(
+                &mut request,
+                serde_json::Value::Object(response_object),
+            );
+        });
+        (backend, environment, server)
+    }
+
+    fn read_scripted_sidecar_request(stream: &mut UnixStream) -> serde_json::Value {
+        let mut bytes = Vec::new();
+        loop {
+            let mut byte = [0_u8; 1];
+            stream
+                .read_exact(&mut byte)
+                .expect("read scripted sidecar request byte");
+            if byte == [b'\n'] {
+                break;
+            }
+            bytes.push(byte[0]);
+        }
+        serde_json::from_slice(&bytes).expect("decode scripted sidecar request")
+    }
+
+    fn write_scripted_sidecar_response(stream: &mut UnixStream, response: serde_json::Value) {
+        serde_json::to_writer(&mut *stream, &response).expect("encode scripted sidecar response");
+        stream
+            .write_all(b"\n")
+            .expect("terminate scripted sidecar response");
+        stream.flush().expect("flush scripted sidecar response");
+    }
+
+    fn assert_scripted_grill_rejection<T>(
+        response_field: &'static str,
+        response: serde_json::Value,
+        operation: impl FnOnce(&mut Backend) -> Result<T, BridgeError>,
+        private_details: &[&str],
+    ) {
+        let (mut backend, _environment, server) =
+            new_scripted_grill_backend(response_field, response);
+        let error = match operation(&mut backend) {
+            Ok(_) => {
+                panic!("schema-valid swapped private Grill response crossed the public boundary")
+            }
+            Err(error) => error,
+        };
+        server.join().expect("join scripted Grill sidecar");
+        assert_sanitized_grill_identity_error(&error, private_details);
+    }
+
+    fn assert_sanitized_grill_identity_error(error: &BridgeError, private_details: &[&str]) {
+        assert_sanitized_grill_error(error);
+        let message = error.public_message();
+        assert_eq!(
+            message,
+            "The Ananke daemon is unavailable. Check the local backend installation and retry.",
+            "private projection failure must use the fixed public error"
+        );
+        for detail in private_details {
+            assert!(
+                !message.contains(detail),
+                "public Grill error leaked swapped private detail {detail}: {message}"
+            );
+        }
+    }
+
+    fn private_grill_record_from_public(
+        public: &serde_json::Value,
+        schema_version: &str,
+    ) -> serde_json::Value {
+        let mut value = public.clone();
+        let object = value
+            .as_object_mut()
+            .expect("canonical P2c record result object");
+        object.insert("rule_version".into(), serde_json::json!(GRILL_RULE_VERSION));
+        object.insert("schema_version".into(), serde_json::json!(schema_version));
+        value
+    }
+
+    fn replace_private_evaluation_identity(
+        value: &mut serde_json::Value,
+        proposal_id: &str,
+        revision: i64,
+        revision_hash: &str,
+    ) {
+        let object = value
+            .as_object_mut()
+            .expect("private Grill evaluation object");
+        object.insert("proposal_id".into(), serde_json::json!(proposal_id));
+        object.insert("revision".into(), serde_json::json!(revision));
+        object.insert("revision_hash".into(), serde_json::json!(revision_hash));
+        for question in object["shown_questions"]
+            .as_array_mut()
+            .expect("private shown Question array")
+        {
+            let question = question
+                .as_object_mut()
+                .expect("private shown Question object");
+            question.insert("proposal_id".into(), serde_json::json!(proposal_id));
+            question.insert("revision".into(), serde_json::json!(revision));
+            question.insert("revision_hash".into(), serde_json::json!(revision_hash));
+        }
+    }
+
+    fn replace_private_record_identity(
+        value: &mut serde_json::Value,
+        proposal_id: &str,
+        revision: i64,
+        revision_hash: &str,
+    ) {
+        let object = value.as_object_mut().expect("private Grill record object");
+        object.insert("proposal_id".into(), serde_json::json!(proposal_id));
+        object.insert("revision".into(), serde_json::json!(revision));
+        object.insert("revision_hash".into(), serde_json::json!(revision_hash));
+    }
+
+    fn p2c_grill_fixture() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../contracts/p2c/fixtures/protocol-v1.canonical.json"
+        ))
+        .expect("decode frozen P2c public wire oracle")
+    }
+
+    fn grill_evaluate_input(
+        mutation: &generated::renderer_public_proposal_mutation::ProposalMutation,
+    ) -> generated::renderer_public_grill_evaluate_input::EvaluateGrillInput {
+        grill_evaluate_input_for_identity(
+            &mutation.proposal_id,
+            mutation.revision,
+            &mutation.revision_hash,
+        )
+    }
+
+    fn grill_evaluate_input_for_identity(
+        proposal_id: &str,
+        revision: i64,
+        revision_hash: &str,
+    ) -> generated::renderer_public_grill_evaluate_input::EvaluateGrillInput {
+        serde_json::from_value(serde_json::json!({
+            "proposal_id": proposal_id,
+            "revision": revision,
+            "revision_hash": revision_hash,
+        }))
+        .expect("decode generated public Grill evaluation input")
+    }
+
+    fn grill_default_input(
+        mutation: &generated::renderer_public_proposal_mutation::ProposalMutation,
+        question_id: &str,
+    ) -> generated::renderer_public_grill_record_default_input::RecordGrillDefaultInput {
+        serde_json::from_value(serde_json::json!({
+            "proposal_id": mutation.proposal_id,
+            "revision": mutation.revision,
+            "revision_hash": mutation.revision_hash,
+            "question_id": question_id,
+        }))
+        .expect("decode generated public Grill default input")
+    }
+
+    fn grill_answer_input(
+        mutation: &generated::renderer_public_proposal_mutation::ProposalMutation,
+        question_id: &str,
+    ) -> generated::renderer_public_grill_record_answer_input::RecordGrillAnswerInput {
+        serde_json::from_value(serde_json::json!({
+            "proposal_id": mutation.proposal_id,
+            "revision": mutation.revision,
+            "revision_hash": mutation.revision_hash,
+            "question_id": question_id,
+        }))
+        .expect("decode generated public Grill answer input")
+    }
+
+    fn grill_override_input(
+        mutation: &generated::renderer_public_proposal_mutation::ProposalMutation,
+        question_id: &str,
+    ) -> generated::renderer_public_grill_record_override_input::RecordGrillOverrideInput {
+        serde_json::from_value(serde_json::json!({
+            "proposal_id": mutation.proposal_id,
+            "revision": mutation.revision,
+            "revision_hash": mutation.revision_hash,
+            "question_id": question_id,
+        }))
+        .expect("decode generated public Grill override input")
+    }
+
+    fn private_grill_evaluation_from_public(public: &serde_json::Value) -> serde_json::Value {
+        let mut value = public.clone();
+        let object = value
+            .as_object_mut()
+            .expect("canonical P2c evaluation result object");
+        object.insert(
+            "input_hash".into(),
+            serde_json::json!(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ),
+        );
+        object.insert("rule_version".into(), serde_json::json!(GRILL_RULE_VERSION));
+        object.insert(
+            "shown_question_ids".into(),
+            serde_json::Value::Array(
+                object["shown_questions"]
+                    .as_array()
+                    .expect("canonical shown Grill Questions")
+                    .iter()
+                    .map(|question| question["question_id"].clone())
+                    .collect(),
+            ),
+        );
+        value
+    }
+
+    fn assert_grill_evaluation_matches_oracle(
+        actual: &serde_json::Value,
+        oracle: &serde_json::Value,
+        mutation: &generated::renderer_public_proposal_mutation::ProposalMutation,
+    ) {
+        assert_public_object(
+            actual,
+            &[
+                "deferred_rule_classes",
+                "new_question_ids",
+                "new_records",
+                "proposal_id",
+                "revision",
+                "revision_hash",
+                "shown_questions",
+                "status",
+            ],
+        );
+        assert_no_private_grill_wire(actual);
+        assert_eq!(actual["proposal_id"], mutation.proposal_id);
+        assert_eq!(actual["revision"], mutation.revision);
+        assert_eq!(actual["revision_hash"], mutation.revision_hash);
+        for field in [
+            "deferred_rule_classes",
+            "new_question_ids",
+            "new_records",
+            "status",
+        ] {
+            assert_eq!(
+                actual[field], oracle[field],
+                "P2c oracle evaluation {field}"
+            );
+        }
+        let actual_questions = actual["shown_questions"]
+            .as_array()
+            .expect("public Grill Questions");
+        let oracle_questions = oracle["shown_questions"]
+            .as_array()
+            .expect("oracle Grill Questions");
+        assert_eq!(actual_questions.len(), oracle_questions.len());
+        for (actual_question, oracle_question) in actual_questions.iter().zip(oracle_questions) {
+            assert_public_object(
+                actual_question,
+                &[
+                    "blocking",
+                    "default",
+                    "proposal_id",
+                    "question_id",
+                    "question_sequence",
+                    "record_sequence",
+                    "remedial_step",
+                    "revision",
+                    "revision_hash",
+                    "risk",
+                    "rule_class",
+                    "waivable",
+                    "written_at",
+                    "written_by",
+                ],
+            );
+            assert_no_private_grill_wire(actual_question);
+            for field in [
+                "blocking",
+                "default",
+                "question_id",
+                "question_sequence",
+                "record_sequence",
+                "remedial_step",
+                "risk",
+                "rule_class",
+                "waivable",
+                "written_by",
+            ] {
+                assert_eq!(
+                    actual_question[field], oracle_question[field],
+                    "P2c oracle Question {field}"
+                );
+            }
+            assert_eq!(actual_question["proposal_id"], mutation.proposal_id);
+            assert_eq!(actual_question["revision"], mutation.revision);
+            assert_eq!(actual_question["revision_hash"], mutation.revision_hash);
+        }
+    }
+
+    fn assert_grill_record_matches_oracle(
+        actual: &serde_json::Value,
+        oracle: &serde_json::Value,
+        mutation: &generated::renderer_public_proposal_mutation::ProposalMutation,
+    ) {
+        let fields = oracle
+            .as_object()
+            .expect("oracle record")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_public_object(actual, &fields);
+        assert_no_private_grill_wire(actual);
+        for (field, expected) in oracle.as_object().expect("oracle record object") {
+            match field.as_str() {
+                "proposal_id" => assert_eq!(actual[field], mutation.proposal_id),
+                "revision" => assert_eq!(actual[field], mutation.revision),
+                "revision_hash" => assert_eq!(actual[field], mutation.revision_hash),
+                "written_at" => assert!(actual[field].as_str().is_some(), "record timestamp"),
+                _ => assert_eq!(actual[field], *expected, "P2c oracle record {field}"),
+            }
+        }
+    }
+
+    fn assert_no_private_grill_wire(value: &serde_json::Value) {
+        const PRIVATE_FIELDS: &[&str] = &[
+            "cmd",
+            "command",
+            "token",
+            "ok",
+            "error",
+            "socket",
+            "socket_path",
+            "identity",
+            "worker",
+            "process",
+            "pid",
+            "path",
+            "root",
+            "input_hash",
+            "rule_version",
+            "schema_version",
+            "declarations",
+            "raw",
+        ];
+        match value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    assert_no_private_grill_wire(value);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for (field, value) in values {
+                    assert!(
+                        !PRIVATE_FIELDS.contains(&field.as_str()),
+                        "public Grill wire leaked private field {field}: {value}",
+                    );
+                    assert_no_private_grill_wire(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn assert_sanitized_grill_error(error: &BridgeError) {
+        let message = error.public_message();
+        for private in [
+            "Grill revision identity does not exist",
+            "Question",
+            "cmd",
+            "token",
+            "socket",
+            "path",
+            "input_hash",
+            "rule_version",
+            "shown_questions",
+        ] {
+            assert!(
+                !message.contains(private),
+                "public Grill error leaked private daemon data {private}: {message}",
+            );
+        }
     }
 
     #[test]

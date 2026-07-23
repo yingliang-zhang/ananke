@@ -1603,6 +1603,7 @@ type apiResponse struct {
 	ProposalDetail   *jsonProposalDetail     `json:"proposal_detail,omitempty"`
 	ProposalActivity *[]jsonProposalActivity `json:"proposal_activity,omitempty"`
 	GrillEvaluation  *jsonGrillEvaluation    `json:"grill_evaluation,omitempty"`
+	GrillRecord      *jsonGrillRecord        `json:"grill_record,omitempty"`
 }
 
 type jsonRun struct {
@@ -1774,31 +1775,107 @@ type jsonProposalActivity struct {
 }
 
 type jsonGrillEvaluation struct {
-	ProposalID          string   `json:"proposal_id"`
-	Revision            int      `json:"revision"`
-	RevisionHash        string   `json:"revision_hash"`
-	RuleVersion         string   `json:"rule_version"`
-	InputHash           string   `json:"input_hash"`
-	NewQuestionIDs      []string `json:"new_question_ids"`
-	ShownQuestionIDs    []string `json:"shown_question_ids"`
-	DeferredRuleClasses []string `json:"deferred_rule_classes"`
-	Status              string   `json:"status"`
-	NewRecords          int      `json:"new_records"`
+	ProposalID          string              `json:"proposal_id"`
+	Revision            int                 `json:"revision"`
+	RevisionHash        string              `json:"revision_hash"`
+	RuleVersion         string              `json:"rule_version"`
+	InputHash           string              `json:"input_hash"`
+	NewQuestionIDs      []string            `json:"new_question_ids"`
+	ShownQuestionIDs    []string            `json:"shown_question_ids"`
+	ShownQuestions      []jsonGrillQuestion `json:"shown_questions"`
+	DeferredRuleClasses []string            `json:"deferred_rule_classes"`
+	Status              string              `json:"status"`
+	NewRecords          int                 `json:"new_records"`
 }
 
-func jsonGrillEvaluationFromStore(evaluation store.GrillEvaluation) *jsonGrillEvaluation {
-	return &jsonGrillEvaluation{
-		ProposalID:          evaluation.ProposalID,
-		Revision:            evaluation.Revision,
-		RevisionHash:        evaluation.RevisionHash,
-		RuleVersion:         evaluation.RuleVersion,
-		InputHash:           evaluation.InputHash,
-		NewQuestionIDs:      append([]string{}, evaluation.NewQuestionIDs...),
-		ShownQuestionIDs:    append([]string{}, evaluation.ShownQuestionIDs...),
-		DeferredRuleClasses: append([]string{}, evaluation.DeferredRuleClasses...),
-		Status:              string(evaluation.Status),
-		NewRecords:          evaluation.NewRecords,
+type jsonGrillQuestion struct {
+	Blocking         bool   `json:"blocking"`
+	Default          string `json:"default"`
+	ProposalID       string `json:"proposal_id"`
+	QuestionID       string `json:"question_id"`
+	QuestionSequence int    `json:"question_sequence"`
+	RecordSequence   int    `json:"record_sequence"`
+	RemedialStep     string `json:"remedial_step"`
+	Revision         int    `json:"revision"`
+	RevisionHash     string `json:"revision_hash"`
+	Risk             string `json:"risk"`
+	RuleClass        string `json:"rule_class"`
+	Waivable         bool   `json:"waivable"`
+	WrittenAt        string `json:"written_at"`
+	WrittenBy        string `json:"written_by"`
+}
+
+type jsonGrillRecord struct {
+	ProposalID     string  `json:"proposal_id"`
+	Revision       int     `json:"revision"`
+	RevisionHash   string  `json:"revision_hash"`
+	RuleVersion    string  `json:"rule_version"`
+	SchemaVersion  string  `json:"schema_version"`
+	QuestionID     string  `json:"question_id"`
+	RecordSequence int     `json:"record_sequence"`
+	Default        *string `json:"default,omitempty"`
+	Answer         *string `json:"answer,omitempty"`
+	Override       *string `json:"override,omitempty"`
+	WrittenAt      string  `json:"written_at"`
+	WrittenBy      string  `json:"written_by"`
+}
+
+func jsonGrillQuestionFromStore(record store.GrillRecord) jsonGrillQuestion {
+	return jsonGrillQuestion{
+		Blocking: record.Blocking, Default: record.Default, ProposalID: record.ProposalID,
+		QuestionID: record.QuestionID, QuestionSequence: record.QuestionSequence,
+		RecordSequence: record.RecordSequence, RemedialStep: record.RemedialStep,
+		Revision: record.Revision, RevisionHash: record.RevisionHash, Risk: record.Risk,
+		RuleClass: record.RuleClass, Waivable: record.Waivable,
+		WrittenAt: record.WrittenAt.UTC().Format(time.RFC3339Nano), WrittenBy: record.WrittenBy,
 	}
+}
+
+func jsonGrillRecordFromStore(record store.GrillRecord) jsonGrillRecord {
+	result := jsonGrillRecord{
+		ProposalID: record.ProposalID, Revision: record.Revision, RevisionHash: record.RevisionHash,
+		RuleVersion: record.RuleVersion, SchemaVersion: record.SchemaVersion,
+		QuestionID: record.QuestionID, RecordSequence: record.RecordSequence,
+		WrittenAt: record.WrittenAt.UTC().Format(time.RFC3339Nano), WrittenBy: record.WrittenBy,
+	}
+	if record.Default != "" {
+		value := record.Default
+		result.Default = &value
+	}
+	if record.Answer != "" {
+		value := record.Answer
+		result.Answer = &value
+	}
+	if record.Override != "" {
+		value := record.Override
+		result.Override = &value
+	}
+	return result
+}
+
+func jsonGrillEvaluationFromStore(evaluation store.GrillEvaluation, records []store.GrillRecord) (*jsonGrillEvaluation, error) {
+	questions := make(map[string]store.GrillRecord)
+	for _, record := range records {
+		if record.SchemaVersion == store.GrillQuestionSchemaVersion {
+			questions[record.QuestionID] = record
+		}
+	}
+	shown := make([]jsonGrillQuestion, 0, len(evaluation.ShownQuestionIDs))
+	for _, questionID := range evaluation.ShownQuestionIDs {
+		record, ok := questions[questionID]
+		if !ok {
+			return nil, fmt.Errorf("Grill shown question %q is missing", questionID)
+		}
+		shown = append(shown, jsonGrillQuestionFromStore(record))
+	}
+	return &jsonGrillEvaluation{
+		ProposalID: evaluation.ProposalID, Revision: evaluation.Revision, RevisionHash: evaluation.RevisionHash,
+		RuleVersion: evaluation.RuleVersion, InputHash: evaluation.InputHash,
+		NewQuestionIDs:   append([]string{}, evaluation.NewQuestionIDs...),
+		ShownQuestionIDs: append([]string{}, evaluation.ShownQuestionIDs...),
+		ShownQuestions:   shown, DeferredRuleClasses: append([]string{}, evaluation.DeferredRuleClasses...),
+		Status: string(evaluation.Status), NewRecords: evaluation.NewRecords,
+	}, nil
 }
 
 func jsonProposalMutationFromStore(mutation store.ProposalMutation) *jsonProposalMutation {
@@ -2098,32 +2175,53 @@ func (e *Engine) handleEvaluateGrill(ctx context.Context, req *apiRequest) apiRe
 	if err != nil {
 		return apiResponse{OK: false, Error: err.Error()}
 	}
-	return apiResponse{OK: true, GrillEvaluation: jsonGrillEvaluationFromStore(evaluation)}
+	records, err := e.store.ListGrillRecords(ctx, store.GrillRevisionIdentity{
+		ProposalID: evaluation.ProposalID, Revision: evaluation.Revision, RevisionHash: evaluation.RevisionHash,
+	})
+	if err != nil {
+		return apiResponse{OK: false, Error: err.Error()}
+	}
+	projection, err := jsonGrillEvaluationFromStore(evaluation, records)
+	if err != nil {
+		return apiResponse{OK: false, Error: err.Error()}
+	}
+	return apiResponse{OK: true, GrillEvaluation: projection}
 }
 
 func (e *Engine) handleRecordGrillDefault(ctx context.Context, req *apiRequest) apiResponse {
-	return e.handleRecordGrill(ctx, req, e.store.RecordGrillDefault)
+	return e.handleRecordGrill(ctx, req, store.GrillDefaultSchemaVersion, e.store.RecordGrillDefault)
 }
 
 func (e *Engine) handleRecordGrillAnswer(ctx context.Context, req *apiRequest) apiResponse {
-	return e.handleRecordGrill(ctx, req, e.store.RecordGrillAnswer)
+	return e.handleRecordGrill(ctx, req, store.GrillAnswerSchemaVersion, e.store.RecordGrillAnswer)
 }
 
 func (e *Engine) handleRecordGrillOverride(ctx context.Context, req *apiRequest) apiResponse {
-	return e.handleRecordGrill(ctx, req, e.store.RecordGrillOverride)
+	return e.handleRecordGrill(ctx, req, store.GrillOverrideSchemaVersion, e.store.RecordGrillOverride)
 }
 
-func (e *Engine) handleRecordGrill(ctx context.Context, req *apiRequest, record func(context.Context, store.GrillRevisionIdentity, string) (bool, error)) apiResponse {
+func (e *Engine) handleRecordGrill(ctx context.Context, req *apiRequest, schemaVersion string, record func(context.Context, store.GrillRevisionIdentity, string) (bool, error)) apiResponse {
 	var input apiGrillIdentity
 	if invalid := decodeGrillPayload(req, &input); invalid.Error != "" {
 		return invalid
 	}
-	if _, err := record(ctx, store.GrillRevisionIdentity{
+	identity := store.GrillRevisionIdentity{
 		ProposalID: input.ProposalID, Revision: input.Revision, RevisionHash: input.RevisionHash,
-	}, input.QuestionID); err != nil {
+	}
+	if _, err := record(ctx, identity, input.QuestionID); err != nil {
 		return apiResponse{OK: false, Error: err.Error()}
 	}
-	return apiResponse{OK: true}
+	records, err := e.store.ListGrillRecords(ctx, identity)
+	if err != nil {
+		return apiResponse{OK: false, Error: err.Error()}
+	}
+	for _, result := range records {
+		if result.SchemaVersion == schemaVersion && result.QuestionID == input.QuestionID {
+			projection := jsonGrillRecordFromStore(result)
+			return apiResponse{OK: true, GrillRecord: &projection}
+		}
+	}
+	return apiResponse{OK: false, Error: "Grill record projection is unavailable"}
 }
 
 func (e *Engine) handleLaunchRun(ctx context.Context, req *apiRequest) apiResponse {

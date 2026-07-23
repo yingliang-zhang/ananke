@@ -275,8 +275,8 @@ mod grill_contract_tests {
         unmatched_new_id["new_question_ids"][0] = json!("grill_question_autonomy_budget");
         assert_rejected::<super::renderer_public_grill_evaluation::GrillEvaluation>(unmatched_new_id, "new Question IDs must preserve shown Question order");
         let mut inconsistent_new_records = evaluation.clone();
-        inconsistent_new_records["new_records"] = json!(5);
-        assert_rejected::<super::renderer_public_grill_evaluation::GrillEvaluation>(inconsistent_new_records, "new record count must match appended Question IDs");
+        inconsistent_new_records["new_records"] = json!(4);
+        assert_rejected::<super::renderer_public_grill_evaluation::GrillEvaluation>(inconsistent_new_records, "new record count must account for every appended Question");
         let mut clear_with_questions = evaluation.clone();
         clear_with_questions["status"] = json!("clear");
         assert_rejected::<super::renderer_public_grill_evaluation::GrillEvaluation>(clear_with_questions, "clear Evaluation cannot retain active Questions");
@@ -633,10 +633,11 @@ fn p2c_validate_evaluation(value: &GrillEvaluation) -> Result<(), &'static str> 
         }
         previous_deferred_priority = priority;
     }
-    if value.new_records != 0 && value.new_records != value.new_question_ids.len() as i32 + 1 {
-        return Err("new_records must include one Evaluation plus each new Question");
+    let question_record_count = value.new_question_ids.len() as i32;
+    if value.new_records < question_record_count || value.new_records > question_record_count + 1 {
+        return Err("new_records must account for each appended Question and an optional Evaluation record");
     }
-    if value.status == Status::Clear && (!value.shown_questions.is_empty() || !value.new_question_ids.is_empty() || !value.deferred_rule_classes.is_empty() || value.new_records != 0) {
+    if value.status == Status::Clear && (!value.shown_questions.is_empty() || !value.new_question_ids.is_empty() || !value.deferred_rule_classes.is_empty()) {
         return Err("clear Evaluation cannot retain active or appended Questions");
     }
     Ok(())
@@ -812,8 +813,8 @@ function p2cValidateEvaluation(value: any): void {
         deferredRules.add(ruleClass);
         deferredPriority = rule.priority;
     }
-    if (value.new_records !== 0 && value.new_records !== newIDs.length + 1) p2cFail("$.new_records", "must include one Evaluation plus each new Question");
-    if (value.status === "clear" && (shown.length !== 0 || newIDs.length !== 0 || deferred.length !== 0 || value.new_records !== 0)) p2cFail("$", "clear Evaluations cannot retain active or appended Questions");
+    if (value.new_records < newIDs.length || value.new_records > newIDs.length + 1) p2cFail("$.new_records", "must account for each appended Question and an optional Evaluation record");
+    if (value.status === "clear" && (shown.length !== 0 || newIDs.length !== 0 || deferred.length !== 0)) p2cFail("$", "clear Evaluations cannot retain active or appended Questions");
 }
 
 function validateP2c<T>(value: T, schema: any, topLevel: string): T {

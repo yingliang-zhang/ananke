@@ -278,10 +278,10 @@ mod grill_contract_tests {
             "new Question IDs must preserve shown Question order",
         );
         let mut inconsistent_new_records = evaluation.clone();
-        inconsistent_new_records["new_records"] = json!(5);
+        inconsistent_new_records["new_records"] = json!(4);
         assert_rejected::<super::renderer_public_grill_evaluation::GrillEvaluation>(
             inconsistent_new_records,
-            "new record count must match appended Question IDs",
+            "new record count must account for every appended Question",
         );
         let mut clear_with_questions = evaluation.clone();
         clear_with_questions["status"] = json!("clear");

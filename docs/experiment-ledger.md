@@ -923,3 +923,133 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 - `cargo test --manifest-path gui/src-tauri/Cargo.toml --all-targets` exited `0`: 22 tests passed across two suites with no warnings.
 - `npm --prefix gui run typecheck`, `npm --prefix gui run check:renderer-public-privacy`, `npm --prefix gui run test:renderer-public-privacy`, and `npm --prefix gui run test:renderer-public` each exited `0`.
 - `node contracts/p2c/verify.mjs` and `node contracts/p2c/verify.mjs --self-test` each exited `0`.
+
+### 2026-07-23 — P2d Grill runtime public projection
+
+#### Scope
+
+- Added only the four P2c-approved Tauri commands: `evaluate_grill`,
+  `record_grill_default`, `record_grill_answer`, and
+  `record_grill_override`. They accept and return the generated, closed Rust
+  DTOs; no renderer UI or TypeScript call site was added.
+- The bridge constructs the fixed conservative, unreviewed P2a declaration
+  only from the generated immutable Revision tuple, canonicalizes and hashes
+  it locally, then calls the existing authenticated private Grill commands.
+  It never reads Revision prose, Approval, model data, worker data, claims, or
+  execution data.
+- Existing private `evaluate-grill` now returns the persisted shown Question
+  records, and each existing record command returns its durable record. The
+  Rust bridge allowlists those private fields into generated P2c results and
+  discards private input hashes, rule/schema versions, daemon envelopes, and
+  raw errors. Any daemon/store rejection or invalid private result remains a
+  sanitized Tauri error.
+- Corrected the P2b Default writer to `deterministic_grill`; it was previously
+  persisted as `local_gui_operator`, which cannot satisfy the frozen P2c
+  `GrillDefaultRecord` DTO. Corrected generated `new_records` validation to
+  accept a newly appended Question without a duplicate Evaluation row after a
+  prior evaluation exists, while still requiring every appended Question to be
+  counted.
+- No model, worker, claim, approval mutation, execution, commit, or push was
+  added or run.
+
+#### TDD and verification
+
+- RED: the initial native P2d bridge test did not compile because the private
+  P2b Grill methods returned private wire types and accepted private input.
+  After the public projection was added, the real sidecar test failed at the
+  Default projection; the focused Store regression observed record sequence 6
+  written by `local_gui_operator` rather than `deterministic_grill`.
+- RED: after fixing that writer, the same real sidecar test exposed an
+  over-strict generated P2c `new_records == new_question_ids + 1` invariant.
+  The durable evaluator correctly appends just the deferred Question after its
+  already-existing Evaluation row. Generator, Rust, TypeScript, and decoder
+  regression tests now require `new_question_ids.length <= new_records <=
+  new_question_ids.length + 1`.
+- GREEN: `tests::bridge_grill_projects_p2c_oracle_through_sidecar_and_sanitizes_failures`
+  passed against copied real sidecars. It uses the frozen P2c fixture as its
+  public wire oracle; covers eval → idempotent Default → Answer → Override →
+  deferred-question re-eval → idempotent replay → reconnect, a valid-but-missing
+  Revision identity, a six-question cap breach at the private-to-public
+  conversion boundary, and raw daemon/private-transport error denial.
+- `go test ./... -count=1 -timeout=300s` exited `0` (3 packages passed; 3 had
+  no tests). `cargo fmt --manifest-path gui/src-tauri/Cargo.toml -- --check`,
+  `npm --prefix gui run build:go`, and `cargo test --manifest-path
+  gui/src-tauri/Cargo.toml --all-targets` exited `0` (23 tests across two
+  suites).
+- `npm --prefix gui run check:renderer-public`,
+  `check:renderer-public-privacy`, `test:renderer-public`,
+  `test:renderer-public-privacy`, `typecheck`, and `test:state` each exited
+  `0`.
+- P2a (`--check`, verifier, self-test), P1a (verifier, self-test), P1c
+  (verifier, self-test), and P2c (verifier, self-test) contract gates all
+  exited `0`.
+
+### 2026-07-23 — P2d Grill response identity-binding repair
+
+#### Scope
+
+- Changed only `gui/src-tauri/src/lib.rs` and this ledger. The four existing
+  Grill commands remain the complete Tauri registration set: `evaluate_grill`,
+  `record_grill_default`, `record_grill_answer`, and `record_grill_override`.
+- The evaluation projector now receives the submitted public Revision tuple and
+  the bridge-derived canonical private input hash, then requires exact matches
+  before projecting any generated P2c DTO. Every record projector similarly
+  requires the submitted tuple and Question ID before allowlisting its result.
+- The native scripted-sidecar regression supplies schema-valid private results
+  for a different Revision tuple, a different evaluation input hash, and
+  different allowed record Question IDs. It covers Default, Answer, and
+  Override paths; every mismatch becomes the fixed public bridge error without
+  a DTO or private response detail.
+- No UI, generated model, worker, claim, approval, execution, daemon protocol,
+  commit, or push changed or ran.
+
+#### TDD and verification
+
+- RED: `cargo test --manifest-path gui/src-tauri/Cargo.toml
+  tests::bridge_grill_rejects_schema_valid_swapped_private_sidecar_results --
+  --exact` exited `101`; the schema-valid swapped private evaluation crossed
+  the public boundary.
+- GREEN: the same focused regression exited `0` after exact tuple/hash/Question
+  checks were placed at the private-to-public conversion boundary.
+- `cargo fmt --manifest-path gui/src-tauri/Cargo.toml -- --check`, `npm
+  --prefix gui run build:go`, the real-sidecar P2d oracle test, and `cargo test
+  --manifest-path gui/src-tauri/Cargo.toml --all-targets` exited `0`; the full
+  Rust suite reported 24 passing tests.
+- `node contracts/p2c/verify.mjs` and `node contracts/p2c/verify.mjs
+  --self-test` exited `0`. The command registration remains exactly the four
+  approved Grill commands above.
+
+### 2026-07-23 — P2d nested shown Question identity binding
+
+#### Scope
+
+- `project_grill_evaluation` now rejects a returned shown Question when any of
+  its `proposal_id`, `revision`, or `revision_hash` differs from the submitted
+  Revision identity. That check runs after private response decoding and before
+  construction of the projected public Question JSON and `GrillEvaluation` DTO.
+  The existing outer evaluation tuple, locally derived `input_hash`, rule
+  version, and shown-ID checks remain intact.
+- Added a scripted Unix-sidecar regression whose outer evaluation tuple,
+  locally derived input hash, and `shown_question_ids` remain correct while one
+  nested Question carries a different individually valid tuple. It requires the
+  fixed unavailable error; its error-path assertion proves no DTO is returned
+  and denies the swapped tuple and private input-hash detail.
+- This repair changed no UI, generated model, worker, claim, approval,
+  execution, daemon protocol, command registration, commit, or push. The
+  existing four-command Grill scope remains unchanged.
+
+#### TDD and verification
+
+- The scripted regression was added and run before the new projector guard. It
+  exited `0` because the generated P2c decoder already rejects mismatched nested
+  Question identities after projected public JSON is assembled. That existing
+  late defense did not meet the required pre-construction boundary; the new
+  guard makes the same rejection before projection. The focused regression
+  exited `0` again after the guard was added.
+- `npm --prefix gui run build:go`, `cargo fmt --manifest-path
+  gui/src-tauri/Cargo.toml -- --check`, and `cargo test --manifest-path
+  gui/src-tauri/Cargo.toml --all-targets` exited `0`; the Rust suite reported
+  25 passing tests.
+- `go test ./... -count=1 -timeout=300s`, renderer generator/privacy/decoder,
+  TypeScript typecheck/state, and P2a/P2c plus P1a/P1c verifier and self-test
+  gates each exited `0`.

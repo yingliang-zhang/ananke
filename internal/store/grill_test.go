@@ -528,6 +528,14 @@ func assertGrillRecordSequences(t *testing.T, s *Store, identity GrillRevisionId
 			if record.QuestionSequence != questionCount {
 				t.Fatalf("question %d sequence = %d, want %d", questionCount, record.QuestionSequence, questionCount)
 			}
+			continue
+		}
+		wantWriter := localGUIOperator
+		if record.SchemaVersion == GrillDefaultSchemaVersion {
+			wantWriter = deterministicGrillWriter
+		}
+		if record.WrittenBy != wantWriter {
+			t.Fatalf("record %d writer = %q, want %q", record.RecordSequence, record.WrittenBy, wantWriter)
 		}
 	}
 	if questionCount != wantQuestions {

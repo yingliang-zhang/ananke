@@ -178,7 +178,7 @@ rejectGrillMutation("toGrillEvaluation", grillEvaluation, (invalid) => {
   [invalid.new_question_ids[0], invalid.new_question_ids[1]] = [invalid.new_question_ids[1], invalid.new_question_ids[0]];
 }, "toGrillEvaluation retains P2b priority order");
 rejectGrillMutation("toGrillEvaluation", grillEvaluation, (invalid) => { invalid.new_question_ids[0] = "grill_question_autonomy_budget"; }, "toGrillEvaluation preserves shown Question order for new IDs");
-rejectGrillMutation("toGrillEvaluation", grillEvaluation, (invalid) => { invalid.new_records = 5; }, "toGrillEvaluation matches new record count to Question IDs");
+rejectGrillMutation("toGrillEvaluation", grillEvaluation, (invalid) => { invalid.new_records = 4; }, "toGrillEvaluation accounts for every appended Question");
 rejectGrillMutation("toGrillEvaluation", grillEvaluation, (invalid) => { invalid.status = "clear"; }, "toGrillEvaluation permits clear only without active Questions");
 
 for (const method of ["toGrillDefaultRecord", "toGrillAnswerRecord", "toGrillOverrideRecord"]) {

@@ -304,8 +304,8 @@ function p2cValidateEvaluation(value: any): void {
         deferredRules.add(ruleClass);
         deferredPriority = rule.priority;
     }
-    if (value.new_records !== 0 && value.new_records !== newIDs.length + 1) p2cFail("$.new_records", "must include one Evaluation plus each new Question");
-    if (value.status === "clear" && (shown.length !== 0 || newIDs.length !== 0 || deferred.length !== 0 || value.new_records !== 0)) p2cFail("$", "clear Evaluations cannot retain active or appended Questions");
+    if (value.new_records < newIDs.length || value.new_records > newIDs.length + 1) p2cFail("$.new_records", "must account for each appended Question and an optional Evaluation record");
+    if (value.status === "clear" && (shown.length !== 0 || newIDs.length !== 0 || deferred.length !== 0)) p2cFail("$", "clear Evaluations cannot retain active or appended Questions");
 }
 
 function validateP2c<T>(value: T, schema: any, topLevel: string): T {
