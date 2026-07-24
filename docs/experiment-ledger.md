@@ -2120,3 +2120,22 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 #### Terminal verdict
 
 - **PASS:** P4 freezes replayable canonical evidence verification and a bounded, fresh-fact, typed-MoA repair-admission declaration without creating execution authority or inferring any outcome.
+
+### 2026-07-25 — P4 durable evidence verifier and bounded repair-admission runtime
+
+#### Strict TDD
+
+- RED: `go test ./internal/store -run '^TestP4EvidenceAdmission' -count=1` initially failed to build because `P4EvidenceAdmission`, durable SQLite operations, and the runtime verifier seam did not exist. `go test ./internal/lifecycle -run '^TestP4' -count=1` likewise failed before the durable runtime types existed.
+- GREEN: immutable P4 evidence bundle, repair-admission, verifier-request, verifier-output, and zero-fact replay records now commit in one SQLite immediate transaction. A replay-trigger rollback test proves no partial record survives an insert failure; exact concurrent replay returns the durable fact and adds no facts.
+
+#### Runtime boundary
+
+- The durable fact pins the exact P1–P3f chain, including P3f adapter fixture `sha256:956cc3e2a7fb6426dc084f87fa55595ce8cf8767741b66eda77489db32c5cf44`, P3f 37-case denial fixture `sha256:6c69ac6ceaac825098fc716e4bb6576ee2bf1a3f7e0b4ca9ad3ba42b3d47b525`, all twelve immutable evidence hashes, and verifier trust/release identities.
+- Admission is fixed to cap `2`, role `self_development_repair_runner`, exact route evidence, exact bundle/hash map, distinct fresh approval and full-fence facts, and the strict typed `ananke.moa-typed-role-grant.v1`. The frozen verifier output and replay require `waiting_for_human`, `not_authorized_by_verifier`, and `new_durable_facts: 0`.
+- The P4 runtime has no concrete verifier, network, OMP, process, child, source, artifact, repair, or run implementation. Its only verifier is the in-process `p4FakeVerifier` in `internal/lifecycle/p4_evidence_admission_test.go`; the production-build test proves that file is test-only. Valid and invalid submissions both return a closed `waiting_for_human` public output and create no local repair or run.
+
+#### Verification
+
+- Focused: `go test ./internal/store ./internal/lifecycle -run '^TestP4' -count=1 -timeout=120s` → PASS (2.11 s).
+- Full: `go test ./... -count=1 -timeout=300s` → PASS (3 packages with tests, 3 without; 48.63 s). Race: `go test -race ./... -count=1 -timeout=300s` → PASS (3 packages with tests, 3 without; 155.19 s). `go vet ./...` → PASS (1.20 s).
+- Contracts: `node --check contracts/p3d/verify.mjs && node contracts/p3d/verify.mjs && node contracts/p3d/verify.mjs --self-test && node --check contracts/p3f/verify.mjs && node contracts/p3f/verify.mjs && node contracts/p3f/verify.mjs --self-test && node --check contracts/p4/verify.mjs && node contracts/p4/verify.mjs && node contracts/p4/verify.mjs --self-test` → PASS (0.46 s). P4 self-test exercised its exact ordered 38-case denial-mutator inventory; every denial retained the closed `waiting_for_human` projection.
