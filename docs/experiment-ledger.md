@@ -1550,3 +1550,149 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 - **PASS:** P3d freezes a controlled, bounded, read-only future OMP audit
   envelope and public fail-closed boundary without implementing or exercising
   any adapter runtime behavior.
+
+### 2026-07-24 — P3e controlled fake-only OMP adapter runtime
+
+#### Scope and execution boundary
+
+- Added `internal/lifecycle/omp_adapter.go` and `internal/lifecycle/omp_adapter_test.go` only. The runtime is private to `lifecycle`; no daemon, Tauri/UI, renderer, CLI, store schema, public API, real-OMP flag, commit, or push path was added.
+- `ompReadOnlyAdapter` is a private interface. Its private executable implementation receives only a preconfigured executable and sealed materialization directory; request data cannot supply an executable, argv, route, prompt, prose, environment, token, socket, target path, or verification command.
+- The sole construction callsite is the test in `internal/lifecycle/omp_adapter_test.go`: it re-execs `os.Args[0]` with `-test.run=^TestP3EFakeAdapterExecutable$` and fixed fake-mode environment. Every P3e test creates a temporary synthetic root and source file; no real OMP, wrapper, or Ananke checkout was invoked or opened.
+- The runtime revalidates P3d's exact closed HostSpec and P3a hash/materialization nonce before and after private filesystem materialization. It authenticates the current full P3b fence and P3c `retry_process_admission` outbox boundary, rejects a changed fence, and writes no P3e terminal/evidence fact into the existing append-only outbox.
+
+#### Behavior and coverage
+
+- Source bytes receive a deterministic private hash, are created through directory descriptors with no-follow opens, then are sealed read-only. The trusted root and materialization inode are rechecked at the write boundary; traversal, root substitution, and materialization-directory replacement fail closed without escaping the temporary root.
+- Only exact wrapper source/dialect/event shapes normalize to the three bounded event kinds. Any malformed, unknown, reordered, or extra transcript shape clears the public prefix and produces `waiting_for_human`, an empty event list, no result, and `verification_state: "not_run"`.
+- The deterministic fake executable covers known lifecycle completion, reconnect after a known prefix, abrupt crash after a known prefix, bounded cancellation, deadline timeout, and unknown transcript handling. It proves cleanup of each sealed temporary materialization. Separate tests reject bare/unknown routes, source/root/hash/nonce drift, writable capability, stale fence, traversal, and TOCTOU replacement before executable invocation.
+
+#### Verification
+
+- RED was established before source creation: `go test ./internal/lifecycle -run '^TestP3E' -count=1 -timeout 30s` failed on the missing P3e runtime symbols.
+- `go test ./internal/lifecycle -run '^TestP3E' -count=1 -timeout 60s` → PASS (`ok`, 2.69 s).
+- `go test ./... -count=1 -timeout 300s` → PASS (3 packages, 3 packages without tests; 38.36 s).
+- `go test -race ./... -count=1 -timeout 360s` → PASS (3 packages, 3 packages without tests; 106.55 s).
+- `node --check contracts/p3d/verify.mjs && node contracts/p3d/verify.mjs && node contracts/p3d/verify.mjs --self-test` → PASS. P3d fixture bytes and fail-closed contract remain unchanged.
+
+#### Residual boundary
+
+- This is a controlled private runtime proof, not an enabled production adapter. Recovery returns only `retry_adapter_admission`, `reconnect_transcript_source`, or `retry_bounded_cancellation`, always without inferred events, result, terminal state, cancellation completion, or verification outcome; a future persistence/activation slice must preserve that fail-closed boundary before introducing any real adapter callsite.
+
+### 2026-07-24 — P3e hard-review repair
+
+#### Scope and execution boundary
+
+- Repaired only `internal/lifecycle/omp_adapter.go` and `internal/lifecycle/omp_adapter_test.go`. The adapter remains private; no real OMP, wrapper, Ananke target, daemon, Tauri/UI, renderer, CLI, store schema, public API, commit, or push path was introduced or exercised.
+- The sole executable remains the deterministic test re-exec of `TestP3EFakeAdapterExecutable`. Every exercised materialization root and source is synthetic and temporary.
+
+#### Repairs
+
+- P3e now represents P3d's complete sealed-materialization tuple: materialization hash, nonce, payload hash, and canonical seal fingerprint. Source files bind to a private source seal established outside the request and are copied before materialization; changing bytes and recomputing a caller tuple is denied before fake execution.
+- Materialization owns its directory descriptor and device/inode identity. The post-seal launch boundary validates descriptor plus namespace binding and fence immediately before the fake starts; the fake receives only the validated directory descriptor, never the materialization path. Replaced directories and a deterministically reclaimed stale fence both deny execution.
+- Creation is transactional: duplicate foreign materialization paths survive untouched, while injected partial trees are removed through the descriptor-owned cleanup path.
+- `cancel_requested` is explicit. Recovery before a terminal fact returns exactly `retry_bounded_cancellation` and the empty `waiting_for_human` state; it does not infer cancellation completion.
+- Transcript decoding now rejects duplicate JSON members before normalization.
+
+#### Verification
+
+- RED: the expanded focused P3e tests initially failed to build against the prior runtime because the sealed tuple, launch-boundary hooks, cancellation recovery symbols, and strict decoder behavior were absent.
+- `go test ./internal/lifecycle -run '^TestP3E' -count=1 -timeout 60s` → PASS (2.59 s).
+- `go test ./... -count=1 -timeout 300s` → PASS (3 packages, 3 packages without tests; 38.82 s).
+- `go test -race ./... -count=1 -timeout 360s` → PASS (3 packages, 3 packages without tests; 109.11 s).
+- `go vet ./...` → PASS.
+- `node --check contracts/p3d/verify.mjs && node contracts/p3d/verify.mjs && node contracts/p3d/verify.mjs --self-test` → PASS; P3d fixture bytes remain unchanged.
+
+#### Residual boundary
+
+- This remains a fake-only private runtime proof. It exposes no enabled adapter or process authority and persists no terminal, evidence, cancellation-completion, or verification result.
+
+### 2026-07-24 — P3e deterministic cross-handle final-fence repair
+
+#### Scope and execution boundary
+
+- Repaired only `internal/lifecycle/omp_adapter.go`, `internal/lifecycle/omp_adapter_test.go`, and this ledger. The adapter remains private; no real OMP, wrapper, Ananke target, daemon, Tauri/UI, renderer, CLI, store schema, public API, commit, or push path was introduced or exercised.
+- Every P3e execution remained the deterministic re-exec of `TestP3EFakeAdapterExecutable` against a synthetic temporary root and synthetic SQLite journal.
+
+#### Repair and proof
+
+- Added an unexported test synchronization hook inside `WithLaunchFenceAdmission`, immediately after sealed-descriptor and complete P3b/P3c boundary validation and immediately before `p3eExecAdapter.Start`. The immediate SQLite transaction and its cross-handle write lock remain unchanged.
+- The pre-admission regression now reclaims through a second `Store` handle before transaction acquisition; the reclaim commits, the later admission observes the stale fence, and the fake is never invoked.
+- The final-fence regression pauses the in-transaction callback, starts reclaim through the second handle, and holds the fake-start gate until the deterministic fake invocation record exists. Reclaim cannot complete while that admission transaction is held; once fake start returns and the transaction rolls back, reclaim completes at exactly the next fence generation.
+
+#### Verification
+
+- RED: `go test ./internal/lifecycle -run '^(TestP3EPreAdmissionReclaimFromSecondHandlePreventsFakeExecution|TestP3ECrossHandleReclaimWaitsForFinalFenceAdmission)$' -count=1 -timeout 30s` failed to build because `afterFenceAdmissionValidation` did not exist.
+- `go test ./internal/lifecycle -run '^TestP3E' -count=20 -timeout 180s` → PASS (one package; 14.78 s).
+- `go test ./... -count=1 -timeout 300s` → PASS (3 packages, 3 packages without tests; 38.26 s).
+- `go test -race ./... -count=1 -timeout 360s` → PASS (3 packages, 3 packages without tests; 111.80 s).
+- `go vet ./...` → PASS.
+- `node --check contracts/p3d/verify.mjs && node contracts/p3d/verify.mjs && node contracts/p3d/verify.mjs --self-test` → PASS; P3d verifier accepted the frozen fixtures and self-test denial vectors.
+
+#### Residual boundary
+
+- This remains a fake-only private runtime proof. It exposes no enabled adapter or process authority and persists no terminal, evidence, cancellation-completion, or verification result.
+
+### 2026-07-24 — P3e deterministic SQLite contention proof repair
+
+#### Scope and execution boundary
+
+- Repaired only `internal/lifecycle/omp_adapter_test.go`, this ledger, and the P3e evidence artifact. Production admission, the SQLite DSN/isolation settings, store schema, public APIs, and runtime authority are unchanged.
+- Every execution remained a deterministic re-exec of `TestP3EFakeAdapterExecutable` against a temporary synthetic root and a temporary file-backed SQLite journal. No real OMP, wrapper, target, commit, or push was introduced or exercised.
+
+#### Deterministic cross-handle proof
+
+- Kept `TestP3EPreAdmissionReclaimFromSecondHandlePreventsFakeExecution`: a second `Store` handle reclaims before admission, the final admission observes the stale complete fence, and no fake is invoked.
+- Renamed the final-fence case to `TestP3ECrossHandleAdmissionBusyBeforeFakeStartThenReclaims`. Its first handle has entered `WithLaunchFenceAdmission` and is paused inside the validated callback before fake start. The independent second handle sets `PRAGMA busy_timeout = 0` and calls its real writable `BeginTx`; the store DSN's `_txlock=immediate` makes that operation `BEGIN IMMEDIATE`.
+- The test requires that second admission to return `SQLITE_BUSY` before it releases the fake-start gate, and confirms the fake invocation record does not exist first. This is an observed SQLite write-admission collision, not a scheduler-sensitive noncompletion delay.
+- After fake invocation, the test releases the gated adapter, waits for `runtime.start` to return (therefore after `WithLaunchFenceAdmission`'s deferred rollback), then reclaims through the second handle. It requires successful reclaim, generation exactly `request.Fence.FenceGeneration + 1`, and equality between the returned and active fences.
+
+#### Verification
+
+- `go test ./internal/lifecycle -run '^TestP3ECrossHandleAdmissionBusyBeforeFakeStartThenReclaims$' -count=1 -timeout 30s` → PASS.
+- `go test ./internal/lifecycle -run '^TestP3ECrossHandleAdmissionBusyBeforeFakeStartThenReclaims$' -count=50 -timeout 180s` → PASS.
+- `go test ./internal/lifecycle -run '^TestP3E' -count=20 -timeout 180s` → PASS.
+- `go test ./... -count=1 -timeout 300s` → PASS (3 packages; 3 packages without tests).
+
+#### Residual boundary
+
+- This remains a fake-only private runtime proof. It exposes no enabled adapter or process authority and persists no terminal, evidence, cancellation-completion, or verification result.
+
+### 2026-07-24 — P3e actual-reclaim final cross-handle proof repair
+
+#### Scope and execution boundary
+
+- Repaired only `internal/lifecycle/omp_adapter_test.go` and this ledger. Production admission, SQLite configuration, store schema, runtime authority, and public APIs are unchanged.
+- Every P3e execution used the deterministic re-exec of `TestP3EFakeAdapterExecutable` with a synthetic temporary root and temporary file-backed SQLite journal. No real OMP, wrapper, target, commit, or push was introduced or exercised.
+
+#### Actual reclaim contention proof
+
+- Kept `TestP3EPreAdmissionReclaimFromSecondHandlePreventsFakeExecution`: a second `Store` handle reclaims before admission, the later final admission observes the stale full fence, and the fake is not invoked.
+- `TestP3ECrossHandleAdmissionBusyBeforeFakeStartThenReclaims` pauses inside the first handle's `WithLaunchFenceAdmission` callback after its final sealed-root/full-fence/outbox validation and before fake `Start`. The second handle sets `PRAGMA busy_timeout = 0` and invokes the actual `ReclaimLaunchClaim` request, not a raw transaction. Its returned error must expose `SQLITE_BUSY` or `database is locked`; the fake invocation record is still absent.
+- After the fake start gate returns and `runtime.start` returns, which releases the admission transaction by rollback, the test restores the second handle's busy timeout and retries the exact same reclaim request. It requires success, fence generation `request.Fence.FenceGeneration + 1`, and equality between the returned and active fences.
+
+#### Verification
+
+- Isolated, sequential focused repetitions: `go test ./internal/lifecycle -run '^TestP3ECrossHandleAdmissionBusyBeforeFakeStartThenReclaims$' -count=50 -timeout 180s` → PASS; then `go test ./internal/lifecycle -run '^TestP3E' -count=20 -timeout 180s` → PASS.
+- Only after those repetitions completed: `go test ./... -count=1 -timeout 300s` → PASS (3 packages; 3 packages without tests); `go test -race ./... -count=1 -timeout 360s` → PASS (3 packages; 3 packages without tests); `go vet ./...` → PASS.
+- `node --check contracts/p3d/verify.mjs`, `node contracts/p3d/verify.mjs`, and `node contracts/p3d/verify.mjs --self-test` → PASS. The verifier accepted the frozen fixture bytes and self-test denial vectors.
+- The repeated proof runs were isolated from the full and race gates. No determinism claim is drawn from a run concurrent with broader suites.
+
+### 2026-07-24 — P3e final-fence connection-lifecycle and staged-diagnostic repair
+
+#### Scope and execution boundary
+
+- Repaired only `internal/lifecycle/omp_adapter.go`, `internal/lifecycle/omp_adapter_test.go`, and this ledger. The production SQLite DSN, `WithLaunchFenceAdmission` transaction, schema, public APIs, and runtime authority are unchanged.
+- Every exercised adapter remained the test re-exec `TestP3EFakeAdapterExecutable` against a temporary synthetic root and file-backed temporary SQLite journal. No real OMP, wrapper, target, commit, or push was introduced or exercised.
+
+#### Cause and repair
+
+- The flaky test set the connection-scoped `PRAGMA busy_timeout = 0` through `*sql.DB` and then called `ReclaimLaunchClaim` through a separate pool acquisition. It did not establish that the reclaim received the configured physical connection; an intermittent admission failure was consequently collapsed into the generic fail-closed adapter error.
+- `TestP3ECrossHandleAdmissionBusyBeforeFakeStartThenReclaims` now pins the sole second-handle connection, configures its zero busy timeout, waits until the real reclaim is queued in that handle's pool (`DBStats.WaitCount`), releases the connection, and requires the actual reclaim to return `SQLITE_BUSY`/locked before fake start. It retries the same reclaim only after the gated fake returns and admission rollback completes, then proves generation `+1` and exact active-fence equality. Deferred gate cancellation/release also prevents a failed assertion from stranding the fake or sealed directory.
+- `p3eStartFailure` retains a private `stage` and `cause`; its text remains exactly the prior sanitized denial and `errors.Is(err, errP3eDenied)` remains true. Tests now distinguish descriptor validation, fence/boundary validation, SQLite admission, and fake-start failures without exposing private causes through the runtime error string or public state.
+
+#### Verification
+
+- Isolated first: `go test ./internal/lifecycle -run '^TestP3ECrossHandleAdmissionBusyBeforeFakeStartThenReclaims$' -count=100 -timeout 300s` → PASS.
+- `go test ./internal/lifecycle -run '^TestP3E' -count=20 -timeout 180s` → PASS.
+- `go test ./... -count=1 -timeout 300s` → PASS (3 packages; 3 packages without tests); `go test -race ./... -count=1 -timeout 360s` → PASS (3 packages; 3 packages without tests); `go vet ./...` → PASS.
+- `node --check`, normal verification, and `--self-test` all passed for P1a, P1c, P2a, P2c, P3a, and P3d contract verifiers.

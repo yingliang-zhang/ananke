@@ -1249,19 +1249,57 @@ func validLaunchOutboxStage(sequence int, state LaunchOutboxState) bool {
 		(sequence == 3 && state == LaunchOutboxPendingProcessAdmission)
 }
 
+// WithLaunchFenceAdmission holds SQLite's immediate cross-handle write lock
+// from active-fence validation through invoke. A reclaim can therefore either
+// commit before this admission validates or after invoke has returned; it
+// cannot replace the active fence between validation and the invocation.
+//
+// The transaction intentionally has no durable write and is rolled back after
+// invoke. The lock comes from the existing SQLite authority, not a process-local
+// mutex, so separate Store handles and processes sharing the journal serialize.
+func (s *Store) WithLaunchFenceAdmission(ctx context.Context, launchSpecHash string, fence LaunchFence, invoke func(LaunchRecoveryBoundary) error) error {
+	if invoke == nil {
+		return ErrLaunchRecordCorrupt
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	boundary, err := loadLaunchRecoveryBoundary(ctx, tx, launchSpecHash)
+	if err != nil {
+		return err
+	}
+	if boundary.Claim.LaunchFence != fence {
+		return ErrLaunchStaleFence
+	}
+	return invoke(boundary)
+}
+
 // GetLaunchRecoveryBoundary returns the single safe next modeled obligation for
 // an active claim. It returns only durable identities and never guesses a
 // terminal fact, evidence result, process, or filesystem/materialization state.
 func (s *Store) GetLaunchRecoveryBoundary(ctx context.Context, launchSpecHash string) (LaunchRecoveryBoundary, error) {
-	claim, err := s.GetLaunchClaim(ctx, launchSpecHash)
+	return loadLaunchRecoveryBoundary(ctx, s.db, launchSpecHash)
+}
+
+func loadLaunchRecoveryBoundary(ctx context.Context, queryer launchQueryer, launchSpecHash string) (LaunchRecoveryBoundary, error) {
+	claim, found, err := loadActiveLaunchClaim(ctx, queryer, launchSpecHash)
 	if err != nil {
 		return LaunchRecoveryBoundary{}, err
 	}
-	storedSpec, err := s.GetLaunchSpec(ctx, launchSpecHash)
+	if !found {
+		return LaunchRecoveryBoundary{}, ErrLaunchClaimNotFound
+	}
+	storedSpec, found, err := loadLaunchSpec(ctx, queryer, launchSpecHash)
 	if err != nil {
 		return LaunchRecoveryBoundary{}, err
 	}
-	outbox, err := loadLatestLaunchOutbox(ctx, s.db, launchSpecHash, claim.FenceGeneration)
+	if !found {
+		return LaunchRecoveryBoundary{}, ErrLaunchSpecNotFound
+	}
+	outbox, err := loadLatestLaunchOutbox(ctx, queryer, launchSpecHash, claim.FenceGeneration)
 	if err != nil {
 		return LaunchRecoveryBoundary{}, err
 	}
@@ -1269,7 +1307,7 @@ func (s *Store) GetLaunchRecoveryBoundary(ctx context.Context, launchSpecHash st
 		return LaunchRecoveryBoundary{}, fmt.Errorf("%w: outbox does not match active claim", ErrLaunchRecordCorrupt)
 	}
 	boundary := LaunchRecoveryBoundary{LaunchSpecHash: launchSpecHash, Claim: claim, Outbox: outbox}
-	if materialization, found, err := loadLaunchMaterialization(ctx, s.db, launchSpecHash, claim.FenceGeneration); err != nil {
+	if materialization, found, err := loadLaunchMaterialization(ctx, queryer, launchSpecHash, claim.FenceGeneration); err != nil {
 		return LaunchRecoveryBoundary{}, err
 	} else if found {
 		if err := validatePersistedLaunchMaterialization(storedSpec, materialization); err != nil {
@@ -1280,7 +1318,7 @@ func (s *Store) GetLaunchRecoveryBoundary(ctx context.Context, launchSpecHash st
 		}
 		boundary.Materialization = &materialization
 	}
-	if run, found, err := loadLaunchRunIntentByGeneration(ctx, s.db, launchSpecHash, claim.FenceGeneration); err != nil {
+	if run, found, err := loadLaunchRunIntentByGeneration(ctx, queryer, launchSpecHash, claim.FenceGeneration); err != nil {
 		return LaunchRecoveryBoundary{}, err
 	} else if found {
 		if run.LaunchFence != claim.LaunchFence {
@@ -1290,7 +1328,7 @@ func (s *Store) GetLaunchRecoveryBoundary(ctx context.Context, launchSpecHash st
 			return LaunchRecoveryBoundary{}, fmt.Errorf("%w: run intent does not name the recovered materialization", ErrLaunchRecordCorrupt)
 		}
 		boundary.RunIntent = &run
-		if terminal, found, err := loadLaunchTerminalIntent(ctx, s.db, run.RunID); err != nil {
+		if terminal, found, err := loadLaunchTerminalIntent(ctx, queryer, run.RunID); err != nil {
 			return LaunchRecoveryBoundary{}, err
 		} else if found {
 			if terminal.LaunchFence != claim.LaunchFence {
@@ -1298,7 +1336,7 @@ func (s *Store) GetLaunchRecoveryBoundary(ctx context.Context, launchSpecHash st
 			}
 			boundary.TerminalIntent = &terminal
 		}
-		if evidence, found, err := loadLaunchEvidenceIntent(ctx, s.db, run.RunID); err != nil {
+		if evidence, found, err := loadLaunchEvidenceIntent(ctx, queryer, run.RunID); err != nil {
 			return LaunchRecoveryBoundary{}, err
 		} else if found {
 			if evidence.LaunchFence != claim.LaunchFence {
