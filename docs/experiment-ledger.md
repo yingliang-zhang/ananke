@@ -2068,3 +2068,29 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 #### Boundary
 
 - No network/RPC/OMP/real supervisor/child/local execution path, authority-bearing runtime configuration, commit, or push was added. The only delivery target remains the in-process `_test.go` fake; public runtime output remains exactly `waiting_for_human` with no inferred outcome.
+
+### 2026-07-25 — P3f independently trusted supervisor protocol-adapter design contract
+
+#### Scope
+
+- Hardened the closed `ananke.independent-supervisor-protocol-adapter-design.v1` fixture and red-flag oracle. They remain design-only and pin the P3d → P3f activation → Darwin `none_fail_closed` → external-handoff → protocol-adapter chain.
+- This evidence is limited to the protocol-adapter fixture/verifier slice. It makes no repository-wide claim that supervisor or OMP implementations or processes are absent, unimplemented, or unexercised; predecessor P3e and P3f runtime paths are out of slice.
+- The wire vectors retain canonical JCS/SHA-256 self-hashes for detached release attestation, independent release approval, typed MoA role grant, sealed delivery, acceptance receipt, and completion callback. Authorization is now revalidated exactly at delivery, receipt, and callback `issued_at`; each record requires `issued_at <= verification_time < not_after`.
+- Independent release, approval, and MoA root sets name active and cross-signed successor roots, strict overlap, explicit revocation, and downgrade rejection. The vectors deny approval expiry at all boundaries, root revocation before delivery/receipt/callback, expired/wrong-root MoA grants, rotation-overlap/successor-binding drift, URI/host/port endpoint authority, mTLS downgrade/identity drift, replay, plaintext/encrypted secrets, and outcome inference with the exact closed failure projection. `release_approval.approval_id` and `moa_typed_role_grant.grant_id` are strict safe opaque identifiers only (`[a-z][a-z0-9_]{2,63}`), rejecting URLs, whitespace, secret/key markers, and raw authority content.
+
+#### Verification
+
+- **PASS:** `node --check contracts/p3d/verify.mjs && node contracts/p3d/verify.mjs && node contracts/p3d/verify.mjs --self-test && node --check contracts/p3f/verify.mjs && node contracts/p3f/verify.mjs && node contracts/p3f/verify.mjs --self-test`.
+- **PASS:** the current protocol-adapter red-flag fixture has exactly **37** closed, ordered denial cases. That exact count protects the complete protocol-adapter inventory from omission or reclassification; it is not a repository-wide test count. `fixtures.sha256` and the verifier hard digest bind it to `sha256:6c69ac6ceaac825098fc716e4bb6576ee2bf1a3f7e0b4ca9ad3ba42b3d47b525`; the companion canonical wire fixture is `sha256:956cc3e2a7fb6426dc084f87fa55595ce8cf8767741b66eda77489db32c5cf44`.
+- **PASS:** the 37-case assertion and manifest-binding self-test rejected an omitted red flag and a substituted manifest digest; all cases retain exactly `{"events":[],"result":null,"schema_version":"ananke.omp-production-output.v1","state":"waiting_for_human","verification_state":"not_run"}`.
+- **PASS:** the self-test traced P3d manifest/canonical-fixture authentication and anchor derivation before every P3f manifest or fixture read, and proved a rejected P3d canonical fixture prevents every P3f read.
+- The fixture verifier authenticated the P3d anchor and the P3f fixture chain, including wire self-hashes, strict safe opaque `approval_id`/`grant_id` validation, exact delivery/receipt/callback authorization revalidation, active/successor/revoked release/approval/MoA roots, typed grant binding, endpoint rejection, and no-inference failure projection. This evidence does not validate predecessor P3e/P3f runtime paths.
+- P3f self-test rehashed in-memory endpoint and secret/key-marker identifier mutations for both approval and MoA grant IDs, plus whitespace and raw-authority identifier mutations; it also exercised approval expiry at every verification boundary, release-root revocation before delivery/receipt/callback, MoA expiry/wrong root/revocation, rotation overlap/successor binding, predecessor-chain, canonical-wire, mTLS/endpoint, replay, encrypted-secret, and public-projection classes. Every mutation was rejected.
+
+#### Boundary
+
+- This protocol-adapter slice added no protocol adapter implementation, network client/server, listener, mTLS connection, endpoint, certificate/key/signature/root implementation, OMP, supervisor process, child, source/artifact/evidence operation, persistence, commit, or push. The vectors are format/binding declarations only; fixture self-hashes are never release, receipt, callback, or execution authority. This does not claim predecessor P3e/P3f runtime paths are absent, unimplemented, or unexercised elsewhere.
+
+#### Terminal verdict
+
+- **PASS:** the protocol-adapter slice has a byte-pinned independently trusted supervisor protocol-adapter design contract that rejects expired or invalid authority at every frozen boundary while preserving exact `waiting_for_human`, no inference, and no active protocol-adapter execution or transport path.

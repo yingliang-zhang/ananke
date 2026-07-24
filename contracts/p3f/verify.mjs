@@ -7,6 +7,9 @@ import { fileURLToPath } from "node:url";
 const scriptPath = fileURLToPath(import.meta.url);
 const sourceFixtureDirectory = resolve(dirname(scriptPath), "fixtures");
 const sourceP3dFixtureDirectory = resolve(dirname(scriptPath), "..", "p3d", "fixtures");
+const protocolAdapterRedFlagsFixtureName = "independent-supervisor-protocol-adapter-red-flags-v1.canonical.json";
+const protocolAdapterRedFlagCount = 37;
+const protocolAdapterRedFlagDigest = "6c69ac6ceaac825098fc716e4bb6576ee2bf1a3f7e0b4ca9ad3ba42b3d47b525";
 const fixtureNames = [
   "production-activation-v1.canonical.json",
   "preflight-red-flags-v1.canonical.json",
@@ -14,6 +17,8 @@ const fixtureNames = [
   "exec-fd-red-flags-v1.canonical.json",
   "external-supervisor-handoff-v1.canonical.json",
   "external-supervisor-red-flags-v1.canonical.json",
+  "independent-supervisor-protocol-adapter-v1.canonical.json",
+  protocolAdapterRedFlagsFixtureName,
 ];
 const fixtureHashVersion = "ananke-omp-production-activation-contract-v1";
 const canonicalFixtureDigests = new Map([
@@ -23,6 +28,8 @@ const canonicalFixtureDigests = new Map([
   ["exec-fd-red-flags-v1.canonical.json", "f10f9c9df50a7120c8d59b07f86477f75221c5e2b5c963a33b9b4d86db78386c"],
   ["external-supervisor-handoff-v1.canonical.json", "8c5d97165d8f26a06ba649176674174bebb6204041e649f9a2b01e8aa4e7b658"],
   ["external-supervisor-red-flags-v1.canonical.json", "3fc57a4dd1040e684b2ea04546a37803edb37807bbcf3a17ddb940bf5a4dac92"],
+  ["independent-supervisor-protocol-adapter-v1.canonical.json", "956cc3e2a7fb6426dc084f87fa55595ce8cf8767741b66eda77489db32c5cf44"],
+  [protocolAdapterRedFlagsFixtureName, protocolAdapterRedFlagDigest],
 ]);
 const p3dCanonicalDigest = "9c8ca561416c82f98ad49d08c625bb5b11be468fb306cd254e7700468ac0e7f3";
 const p3dManifest = [
@@ -57,6 +64,7 @@ const gitCommitPattern = /^[0-9a-f]{40}$/;
 const identifierPattern = /^[a-z][a-z0-9_]{2,63}$/;
 const timestampPattern = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?Z$/;
 const forbiddenRawFragments = ["argument", "argv", "command", "credential", "environment", "error", "exec", "instruction", "password", "path", "pid", "prompt", "prose", "raw", "secret", "socket", "token"];
+const forbiddenOpaqueIdentifierMarkers = [...new Set([...forbiddenRawFragments, "address", "admin", "authority", "certificate", "delegate", "endpoint", "host", "http", "https", "issuer", "key", "port", "principal", "private", "public", "root", "signer", "spki", "uri", "url"])];
 
 function optionValue(name) {
   const index = process.argv.indexOf(name);
@@ -129,6 +137,12 @@ function assertIdentifier(value, name) {
   assert.ok(typeof value === "string" && identifierPattern.test(value), `${name} must be an identifier`);
 }
 
+function assertSafeOpaqueIdentifier(value, name) {
+  const message = `${name} must be a safe opaque identifier`;
+  assert.ok(typeof value === "string" && identifierPattern.test(value), message);
+  assert.ok(!forbiddenOpaqueIdentifierMarkers.some((marker) => normalizedKey(value).includes(marker)), message);
+}
+
 function assertTimestamp(value, name) {
   const message = `${name} must be a semantic UTC RFC 3339/RFC3339Nano timestamp`;
   assert.ok(typeof value === "string", message);
@@ -148,7 +162,8 @@ function normalizedKey(key) {
 function isAllowedAuthorityMetadata(path, key) {
   return (path === "$" && key === "credential_policy")
     || (path === "$.credential_policy" && ["argv_credentials", "environment_credentials"].includes(key))
-    || (path === "$.p3f_binding" && key === "exec_fd_design_fixture_sha256");
+    || (path === "$.p3f_binding" && key === "exec_fd_design_fixture_sha256")
+    || (path === "$.predecessor_binding" && key === "exec_fd_design_fixture_sha256");
 }
 
 function assertNoRawAuthority(value, path = "$") {
@@ -941,8 +956,385 @@ function verifyRemoteRedFlagsFixture(value) {
   });
 }
 
-async function readManifest(directory) {
-  const text = await readFile(join(directory, "fixtures.sha256"), "utf8");
+function sha256Text(value) {
+  return `sha256:${digest(Buffer.from(value, "utf8"))}`;
+}
+
+function assertTimestampBefore(left, right, name) {
+  assertTimestamp(left, `${name} left timestamp`);
+  assertTimestamp(right, `${name} right timestamp`);
+  assert.ok(Date.parse(left) < Date.parse(right), `${name} timestamp order`);
+}
+function assertTimestampAtOrBefore(left, right, name) {
+  assertTimestamp(left, `${name} left timestamp`);
+  assertTimestamp(right, `${name} right timestamp`);
+  assert.ok(Date.parse(left) <= Date.parse(right), `${name} timestamp order`);
+}
+
+
+function assertSelfHashedWireVector(value, schema, name) {
+  expectKeys(schema, ["required_fields", "schema_version", "self_hash_field"], `${name} schema`);
+  assert.ok(Array.isArray(schema.required_fields), `${name} schema required fields`);
+  assert.deepEqual(schema.required_fields, Object.keys(value).sort(), `${name} closed wire fields`);
+  assert.equal(value.schema_version, schema.schema_version, `${name} schema version`);
+  assert.ok(schema.required_fields.includes(schema.self_hash_field), `${name} schema self-hash field`);
+  assertHash(value[schema.self_hash_field], `${name} self hash`);
+  const hashInput = { ...value };
+  delete hashInput[schema.self_hash_field];
+  assert.equal(value[schema.self_hash_field], hashCanonical(hashInput), `${name} canonical self hash`);
+}
+
+function assertProtocolAdapterChannelBinding(value) {
+  expectKeys(value, ["callback_binding", "client_identity_role", "client_spki_sha256", "delivery_binding", "endpoint_serialization", "peer_identity_role", "peer_spki_sha256", "protocol", "schema_version", "transport_state"], "protocol adapter mTLS channel-binding interface");
+  assert.equal(value.schema_version, "ananke.independent-supervisor-mtls-channel-binding.v1", "protocol adapter mTLS channel-binding schema");
+  assert.equal(value.protocol, "tls_1_3_mutual_authentication_required", "protocol adapter mTLS protocol");
+  assert.equal(value.transport_state, "future_interface_only_no_connection_or_listener", "protocol adapter transport remains absent");
+  assert.equal(value.endpoint_serialization, "forbidden_no_uri_host_or_port_authority", "protocol adapter endpoint authority policy");
+  assert.equal(value.client_identity_role, "ananke_sealed_handoff_sender", "protocol adapter client identity role");
+  assert.equal(value.peer_identity_role, "independent_supervisor_protocol_adapter", "protocol adapter peer identity role");
+  assert.equal(value.delivery_binding, "future_tls_exporter_sha256_bound_to_delivery_message", "protocol adapter delivery channel binding");
+  assert.equal(value.callback_binding, "future_tls_exporter_sha256_bound_to_callback_message", "protocol adapter callback channel binding");
+  assertHash(value.client_spki_sha256, "protocol adapter client SPKI identity");
+  assertHash(value.peer_spki_sha256, "protocol adapter peer SPKI identity");
+  return value;
+}
+
+function assertProtocolAdapterPredecessorBinding(value, remoteHandoff, activation, execFdDesign, anchor) {
+  expectKeys(value, ["activation_fixture_sha256", "exec_fd_design_fixture_sha256", "external_supervisor_handoff_fixture_sha256", "p3d_fixture_sha256", "p3d_host_spec_hash", "p3f_wrapper_binary_sha256", "predecessor_envelope_hash", "predecessor_route_mapping_hash", "source_manifest_hash", "source_snapshot_hash"], "protocol adapter P3d/P3f predecessor binding");
+  Object.entries(value).forEach(([key, entry]) => assertHash(entry, `protocol adapter predecessor binding.${key}`));
+  assert.deepEqual(value, {
+    activation_fixture_sha256: `sha256:${canonicalFixtureDigests.get("production-activation-v1.canonical.json")}`,
+    exec_fd_design_fixture_sha256: `sha256:${canonicalFixtureDigests.get("production-exec-fd-design-v1.canonical.json")}`,
+    external_supervisor_handoff_fixture_sha256: `sha256:${canonicalFixtureDigests.get("external-supervisor-handoff-v1.canonical.json")}`,
+    p3d_fixture_sha256: `sha256:${p3dCanonicalDigest}`,
+    p3d_host_spec_hash: anchor.host_spec_hash,
+    p3f_wrapper_binary_sha256: activation.approved_wrapper.binary_sha256,
+    predecessor_envelope_hash: remoteHandoff.sealed_launch_envelope.envelope_hash,
+    predecessor_route_mapping_hash: remoteHandoff.sealed_launch_envelope.route_mapping_hash,
+    source_manifest_hash: activation.source_manifest_hash,
+    source_snapshot_hash: anchor.required_source_snapshot_hash,
+  }, "protocol adapter exact P3d/P3f/handoff chain");
+  assert.equal(execFdDesign.p3f_binding.wrapper_binary_sha256, value.p3f_wrapper_binary_sha256, "protocol adapter exec-by-FD predecessor wrapper binding");
+}
+
+function assertProtocolAdapterPayloadConstraints(value) {
+  expectKeys(value, ["allowed_content", "application_payload_encryption", "encrypted_payload_secret_content", "endpoint_authority", "forbidden_content", "transport_confidentiality"], "protocol adapter payload constraints");
+  assert.deepEqual(value, {
+    allowed_content: "identity_hashes_fixed_enums_timestamps_nonce_hashes_and_detached_reference_hashes_only",
+    application_payload_encryption: "optional_future_confidentiality_for_identity_only_canonical_bytes",
+    encrypted_payload_secret_content: "forbidden",
+    endpoint_authority: "forbidden_not_representable",
+    forbidden_content: ["credentials", "secrets", "raw_paths", "prompt_authority", "commands", "argv", "environment", "raw_source", "raw_evidence", "network_endpoint"],
+    transport_confidentiality: "future_mtls_only_not_implemented",
+  }, "protocol adapter encrypted no-secret payload boundary");
+}
+
+function assertProtocolAdapterRootSet(value, name) {
+  expectKeys(value, ["active_root_id", "active_root_valid_from", "revocation", "rotation", "successor_root_id"], `${name} root lifecycle`);
+  assertIdentifier(value.active_root_id, `${name} active root`);
+  assertIdentifier(value.successor_root_id, `${name} successor root`);
+  assertTimestamp(value.active_root_valid_from, `${name} active root validity start`);
+  const rotationSchema = {
+    required_fields: ["cross_signature_reference_hash", "new_root_id", "new_root_spki_sha256", "new_root_valid_from", "old_root_id", "old_root_not_after", "rotation_hash", "schema_version"],
+    schema_version: "ananke.independent-supervisor-trust-root-rotation.v1",
+    self_hash_field: "rotation_hash",
+  };
+  assertSelfHashedWireVector(value.rotation, rotationSchema, `${name} root rotation`);
+  assert.equal(value.rotation.old_root_id, value.active_root_id, `${name} root active binding`);
+  assert.equal(value.rotation.new_root_id, value.successor_root_id, `${name} root successor binding`);
+  assertHash(value.rotation.cross_signature_reference_hash, `${name} root rotation cross signature reference`);
+  assertHash(value.rotation.new_root_spki_sha256, `${name} root successor SPKI`);
+  assertTimestampBefore(value.active_root_valid_from, value.rotation.new_root_valid_from, `${name} root active before successor`);
+  assertTimestampBefore(value.rotation.new_root_valid_from, value.rotation.old_root_not_after, `${name} root rotation validity overlap`);
+  const revocationSchema = {
+    required_fields: ["effective_at", "issuer_root_id", "revocation_hash", "revocation_reason_class", "revoked_root_id", "schema_version"],
+    schema_version: "ananke.independent-supervisor-trust-root-revocation.v1",
+    self_hash_field: "revocation_hash",
+  };
+  assertSelfHashedWireVector(value.revocation, revocationSchema, `${name} root revocation`);
+  assert.equal(value.revocation.issuer_root_id, value.successor_root_id, `${name} root revocation issuer`);
+  assert.equal(value.revocation.revoked_root_id, value.active_root_id, `${name} root revocation active binding`);
+  assert.equal(value.revocation.revocation_reason_class, "key_compromise_or_policy_withdrawal", `${name} root revocation reason`);
+  return value;
+}
+
+function assertProtocolAdapterRootAcceptedAt(rootSet, rootID, verificationTime, name, verificationPoint) {
+  assertTimestampAtOrBefore(rootSet.active_root_valid_from, verificationTime, `${name} root active at ${verificationPoint}`);
+  const successorActive = Date.parse(verificationTime) >= Date.parse(rootSet.rotation.new_root_valid_from);
+  const expectedRoot = successorActive ? rootSet.successor_root_id : rootSet.active_root_id;
+  assert.equal(rootID, expectedRoot, `${name} root active successor state at ${verificationPoint}`);
+  assert.ok(
+    !(rootID === rootSet.revocation.revoked_root_id && Date.parse(rootSet.revocation.effective_at) <= Date.parse(verificationTime)),
+    `${name} root revoked at ${verificationPoint}`,
+  );
+}
+
+function assertProtocolAdapterTrustRoots(value) {
+  expectKeys(value, ["approval_root", "authorization_time_policy", "invalid_or_revoked_root", "moa_grant_root", "release_root", "root_acceptance_policy", "trust_bundle_hash"], "protocol adapter trust-root lifecycle");
+  assert.equal(value.invalid_or_revoked_root, "waiting_for_human", "protocol adapter invalid/revoked root failure");
+  assertHash(value.trust_bundle_hash, "protocol adapter trust bundle hash");
+  assert.deepEqual(value.authorization_time_policy, {
+    callback_verification_time: "completion_callback.issued_at",
+    delivery_verification_time: "sealed_handoff_delivery.issued_at",
+    prior_record_verification: "delivery_and_receipt_rechecked_at_their_own_issued_at",
+    receipt_verification_time: "acceptance_receipt.issued_at",
+    record_validity: "record_issued_at_less_than_or_equal_to_verification_time_strictly_before_not_after",
+    revalidation: "attestation_release_approval_and_moa_grant_rechecked_at_each_boundary",
+  }, "protocol adapter authorization verification times");
+  assert.deepEqual(value.root_acceptance_policy, {
+    active_root: "only_named_active_root_before_successor_valid_from",
+    downgrade: "predecessor_rejected_at_or_after_successor_valid_from_even_during_overlap",
+    revocation: "reject_root_when_effective_at_or_before_verification_time",
+    rotation: "cross_signed_successor_and_strict_validity_overlap_required",
+    successor_root: "only_named_successor_root_at_or_after_successor_valid_from",
+  }, "protocol adapter root acceptance policy");
+  return {
+    ...value,
+    approval_root: assertProtocolAdapterRootSet(value.approval_root, "approval"),
+    moa_grant_root: assertProtocolAdapterRootSet(value.moa_grant_root, "MoA grant"),
+    release_root: assertProtocolAdapterRootSet(value.release_root, "release"),
+  };
+}
+
+function assertProtocolAdapterReplayPolicy(value) {
+  expectKeys(value, ["callback_replay_key", "delivery_replay_key", "nonce_scope", "nonce_uniqueness", "receipt_replay_key", "timestamp_policy"], "protocol adapter replay nonce timestamp policy");
+  assert.deepEqual(value, {
+    callback_replay_key: "callback_id_and_nonce_hash_and_receipt_hash",
+    delivery_replay_key: "delivery_id_and_nonce_hash_and_predecessor_envelope_hash",
+    nonce_scope: "single_message_type_and_issued_at_window",
+    nonce_uniqueness: "required_no_reuse_even_with_matching_payload",
+    receipt_replay_key: "receipt_id_and_nonce_hash_and_delivery_hash",
+    timestamp_policy: "issued_at_before_expiry_before_p3d_deadline_and_no_future_or_stale_acceptance",
+  }, "protocol adapter replay nonce timestamp policy");
+}
+
+function assertProtocolAdapterMoaBoundary(value) {
+  expectKeys(value, ["fallback", "grant_schema_version", "role_labels_are_authorization", "runtime_integration", "typed_role", "validation"], "protocol adapter MoA typed-role grant binding");
+  assert.deepEqual(value, {
+    fallback: "forbidden",
+    grant_schema_version: "ananke.moa-typed-role-grant.v1",
+    role_labels_are_authorization: false,
+    runtime_integration: "absent",
+    typed_role: "remote_supervisor_runner",
+    validation: "exact_route_release_attestation_release_approval_and_active_or_successor_nonrevoked_grant_root_required",
+  }, "protocol adapter typed-role grant boundary");
+}
+
+function assertProtocolAdapterAuthorizationAt(verificationTime, attestation, approval, grant, trustRoots, verificationPoint) {
+  const authorizations = [
+    [attestation, "release attestation", trustRoots.release_root, attestation.release_root_id, "release"],
+    [approval, "release approval", trustRoots.approval_root, approval.approver_root_id, "approval"],
+    [grant, "MoA grant", trustRoots.moa_grant_root, grant.grantor_root_id, "MoA grant"],
+  ];
+  for (const [record, recordName, rootSet, rootID, rootName] of authorizations) {
+    assertTimestampAtOrBefore(record.issued_at, verificationTime, `${verificationPoint} ${recordName} issuance`);
+    assertTimestampBefore(verificationTime, record.not_after, `${verificationPoint} ${recordName} validity`);
+    assertProtocolAdapterRootAcceptedAt(rootSet, rootID, verificationTime, rootName, verificationPoint);
+  }
+}
+
+function assertProtocolAdapterWireVectors(vectors, schemas, channelBinding, predecessor, trustRoots, anchor) {
+  expectKeys(vectors, ["acceptance_receipt", "completion_callback", "detached_release_attestation", "moa_typed_role_grant", "release_approval", "sealed_handoff_delivery"], "protocol adapter wire test vector inventory");
+  assertSelfHashedWireVector(vectors.detached_release_attestation, schemas.detached_release_attestation, "protocol detached release attestation");
+  const attestation = vectors.detached_release_attestation;
+  assert.equal(attestation.artifact_sha256, "sha256:fe7ce7ab9cb07d010a0a02526674efeb486fecc50ce07699acac5a305179588d", "protocol detached release artifact identity");
+  assert.equal(attestation.build_identity_hash, "sha256:771b9391bb1445c5186b7033c1eed137eafbc4afeca5a7dc712ea8993d57e0df", "protocol detached release build identity");
+  assert.equal(attestation.route_mapping_hash, predecessor.predecessor_route_mapping_hash, "protocol detached release route binding");
+  assertHash(attestation.attestor_key_spki_sha256, "protocol detached release attestor identity");
+  assertTimestampBefore(attestation.issued_at, attestation.not_after, "protocol detached release validity");
+
+  assertSelfHashedWireVector(vectors.release_approval, schemas.release_approval, "protocol release approval");
+  const approval = vectors.release_approval;
+  assertSafeOpaqueIdentifier(approval.approval_id, "protocol release approval id");
+  assert.equal(approval.attestation_hash, attestation.attestation_hash, "protocol release approval attestation binding");
+  assert.equal(approval.route_mapping_hash, predecessor.predecessor_route_mapping_hash, "protocol release approval route binding");
+  assert.equal(approval.decision, "approved", "protocol release approval decision");
+  assertHash(approval.approver_key_spki_sha256, "protocol release approval signer identity");
+  assertTimestampBefore(approval.issued_at, approval.not_after, "protocol release approval validity");
+
+  assertSelfHashedWireVector(vectors.moa_typed_role_grant, schemas.moa_typed_role_grant, "protocol MoA typed-role grant");
+  const grant = vectors.moa_typed_role_grant;
+  assertSafeOpaqueIdentifier(grant.grant_id, "protocol MoA grant id");
+  assert.equal(grant.grantee_role, "remote_supervisor_runner", "protocol MoA grantee role");
+  assert.equal(grant.route_mapping_hash, predecessor.predecessor_route_mapping_hash, "protocol MoA route binding");
+  assert.equal(grant.release_attestation_hash, attestation.attestation_hash, "protocol MoA attestation binding");
+  assert.equal(grant.release_approval_hash, approval.approval_hash, "protocol MoA approval binding");
+  assertHash(grant.grantor_key_spki_sha256, "protocol MoA grantor identity");
+  assertTimestampBefore(grant.issued_at, grant.not_after, "protocol MoA grant validity");
+
+  assertSelfHashedWireVector(vectors.sealed_handoff_delivery, schemas.sealed_handoff_delivery, "protocol sealed handoff delivery");
+  const delivery = vectors.sealed_handoff_delivery;
+  assert.equal(delivery.attempt_number, 1, "protocol sealed delivery initial attempt");
+  assert.equal(delivery.attempt_cap, 3, "protocol sealed delivery P3d attempt cap");
+  assert.equal(delivery.predecessor_envelope_hash, predecessor.predecessor_envelope_hash, "protocol sealed delivery predecessor envelope binding");
+  assert.equal(delivery.predecessor_idempotency_key_hash, "sha256:ece45739445ee76b8a9faf258ee29cfc761745039b9fec428df4c55a7a76d7b9", "protocol sealed delivery predecessor idempotency binding");
+  assert.equal(delivery.route_mapping_hash, predecessor.predecessor_route_mapping_hash, "protocol sealed delivery route binding");
+  assert.equal(delivery.release_attestation_hash, attestation.attestation_hash, "protocol sealed delivery attestation binding");
+  assert.equal(delivery.release_approval_hash, approval.approval_hash, "protocol sealed delivery approval binding");
+  assert.equal(delivery.moa_role_grant_hash, grant.grant_hash, "protocol sealed delivery MoA grant binding");
+  assert.equal(delivery.trust_bundle_hash, trustRoots.trust_bundle_hash, "protocol sealed delivery trust bundle binding");
+  assertHash(delivery.channel_binding_hash, "protocol sealed delivery channel binding");
+  assertHash(delivery.nonce_hash, "protocol sealed delivery nonce");
+  assertIdentifier(delivery.delivery_id, "protocol sealed delivery id");
+  assertTimestampBefore(delivery.issued_at, delivery.delivery_expires_at, "protocol sealed delivery expiry");
+  assertTimestampBefore(delivery.delivery_expires_at, anchor.deadline, "protocol sealed delivery P3d deadline");
+  assert.equal(delivery.deadline, anchor.deadline, "protocol sealed delivery exact P3d deadline");
+  assertProtocolAdapterAuthorizationAt(delivery.issued_at, attestation, approval, grant, trustRoots, "delivery");
+
+  assertSelfHashedWireVector(vectors.acceptance_receipt, schemas.acceptance_receipt, "protocol acceptance receipt");
+  const receipt = vectors.acceptance_receipt;
+  assert.equal(receipt.attempt_number, delivery.attempt_number, "protocol receipt attempt binding");
+  assert.equal(receipt.delivery_hash, delivery.delivery_hash, "protocol receipt delivery binding");
+  assert.equal(receipt.envelope_hash, delivery.predecessor_envelope_hash, "protocol receipt envelope binding");
+  assert.equal(receipt.release_approval_hash, approval.approval_hash, "protocol receipt approval binding");
+  assert.equal(receipt.route_mapping_hash, delivery.route_mapping_hash, "protocol receipt route binding");
+  assert.equal(receipt.channel_binding_hash, delivery.channel_binding_hash, "protocol receipt channel binding");
+  assert.equal(receipt.signer_key_spki_sha256, channelBinding.peer_spki_sha256, "protocol receipt peer mTLS identity");
+  assert.equal(receipt.trust_root_id, trustRoots.release_root.active_root_id, "protocol receipt current trust root");
+  assertHash(receipt.nonce_hash, "protocol receipt nonce");
+  assertIdentifier(receipt.receipt_id, "protocol receipt id");
+  assertTimestampBefore(delivery.issued_at, receipt.issued_at, "protocol receipt issued after delivery");
+  assertTimestampBefore(receipt.issued_at, delivery.delivery_expires_at, "protocol receipt issued before delivery expiry");
+  assertProtocolAdapterAuthorizationAt(receipt.issued_at, attestation, approval, grant, trustRoots, "receipt");
+
+  assertSelfHashedWireVector(vectors.completion_callback, schemas.callback, "protocol completion callback");
+  const callback = vectors.completion_callback;
+  assert.equal(callback.attempt_number, delivery.attempt_number, "protocol callback attempt binding");
+  assert.equal(callback.delivery_hash, delivery.delivery_hash, "protocol callback delivery binding");
+  assert.equal(callback.envelope_hash, delivery.predecessor_envelope_hash, "protocol callback envelope binding");
+  assert.equal(callback.receipt_hash, receipt.receipt_hash, "protocol callback durable receipt binding");
+  assert.equal(callback.route_mapping_hash, delivery.route_mapping_hash, "protocol callback route binding");
+  assert.equal(callback.signer_key_spki_sha256, channelBinding.peer_spki_sha256, "protocol callback peer mTLS identity");
+  assert.equal(callback.trust_root_id, trustRoots.release_root.active_root_id, "protocol callback current trust root");
+  assert.equal(callback.result_schema_version, "ananke.independent-supervisor-result.v1", "protocol callback result schema");
+  assert.equal(callback.terminal_state, "completed", "protocol callback typed terminal state");
+  assertHash(callback.callback_channel_binding_hash, "protocol callback channel binding");
+  assertHash(callback.evidence_hash, "protocol callback evidence identity");
+  assertHash(callback.nonce_hash, "protocol callback nonce");
+  assertIdentifier(callback.callback_id, "protocol callback id");
+  assertTimestampBefore(receipt.issued_at, callback.issued_at, "protocol callback issued after receipt");
+  assertTimestampBefore(callback.issued_at, delivery.delivery_expires_at, "protocol callback issued before delivery expiry");
+  assertProtocolAdapterAuthorizationAt(callback.issued_at, attestation, approval, grant, trustRoots, "callback");
+}
+
+function verifyProtocolAdapterFixture(value, remoteHandoff, activation, execFdDesign, anchor) {
+  assertNoRawAuthority(value);
+  expectKeys(value, ["channel_binding_mtls_identity_interface", "contract_state", "failure_projection", "moa_typed_role_grant_binding", "payload_constraints", "predecessor_binding", "replay_nonce_timestamp_policy", "schema_version", "trust_root_lifecycle", "wire_schemas", "wire_test_vectors"], "independent supervisor protocol adapter design fixture");
+  assert.equal(value.schema_version, "ananke.independent-supervisor-protocol-adapter-design.v1", "protocol adapter design schema version");
+  assert.equal(value.contract_state, "design_only_no_network_client_server_or_runtime", "protocol adapter remains design-only");
+  const channelBinding = assertProtocolAdapterChannelBinding(value.channel_binding_mtls_identity_interface);
+  assertProtocolAdapterPredecessorBinding(value.predecessor_binding, remoteHandoff, activation, execFdDesign, anchor);
+  assertProtocolAdapterPayloadConstraints(value.payload_constraints);
+  assertProtocolAdapterTrustRoots(value.trust_root_lifecycle);
+  assertProtocolAdapterReplayPolicy(value.replay_nonce_timestamp_policy);
+  assertProtocolAdapterMoaBoundary(value.moa_typed_role_grant_binding);
+  expectKeys(value.wire_schemas, ["acceptance_receipt", "callback", "detached_release_attestation", "moa_typed_role_grant", "release_approval", "sealed_handoff_delivery"], "protocol adapter wire schema inventory");
+  assertProtocolAdapterWireVectors(value.wire_test_vectors, value.wire_schemas, channelBinding, value.predecessor_binding, value.trust_root_lifecycle, anchor);
+  assertFailClosed(value.failure_projection, "protocol adapter no-inference failure projection");
+}
+
+function assertProtocolAdapterRedFlagGiven(testCase) {
+  const expected = [
+    ["noncanonical_wire_encoding", { encoding: "pretty_printed_json" }],
+    ["delivery_hash_drift", { delivery_hash: sha256Text("wrong-delivery-hash") }],
+    ["predecessor_envelope_drift", { predecessor_envelope_hash: sha256Text("wrong-predecessor-envelope") }],
+    ["p3d_chain_drift", { p3d_fixture_sha256: sha256Text("wrong-p3d-fixture") }],
+    ["p3f_handoff_chain_drift", { external_supervisor_handoff_fixture_sha256: sha256Text("wrong-handoff-fixture") }],
+    ["opaque_identifier_secret_payload", { approval_id: "release_secret_token_001", grant_id: "moa_grant_key_material_001" }],
+    ["encrypted_secret_payload", { content_class: "encrypted_secret" }],
+    ["opaque_identifier_endpoint_authority", { approval_id: "https://approval.invalid/release", grant_id: "https://grant.invalid/moa" }],
+    ["transport_downgrade", { protocol: "tls_1_2" }],
+    ["missing_channel_binding", { channel_binding: "absent" }],
+    ["peer_identity_drift", { peer_spki_sha256: sha256Text("wrong-peer-spki") }],
+    ["delivery_nonce_replay", { nonce_reuse: "same_delivery_nonce_hash" }],
+    ["stale_timestamp", { issued_at: "2026-07-24T23:59:59Z" }],
+    ["receipt_before_delivery", { receipt_state: "no_durable_delivery" }],
+    ["receipt_binding_drift", { envelope_hash: sha256Text("wrong-receipt-envelope") }],
+    ["callback_before_receipt", { receipt_state: "not_durable" }],
+    ["callback_channel_binding_drift", { callback_channel_binding: "peer_identity_mismatch" }],
+    ["callback_replay_conflict", { binding: "same_callback_id_different_receipt_hash" }],
+    ["trust_root_downgrade", { active_root_id: "ananke_independent_supervisor_release_root_v1" }],
+    ["revoked_trust_root", { root_id: "ananke_independent_supervisor_release_root_v1" }],
+    ["detached_attestation_hash_drift", { attestation_hash: sha256Text("wrong-attestation-hash") }],
+    ["release_approval_binding_drift", { approval_binding: "other_attestation_hash" }],
+    ["expired_release_approval_at_delivery", { not_after: "2026-07-25T00:04:59Z", verification_point: "delivery" }],
+    ["expired_release_approval_at_receipt", { not_after: "2026-07-25T00:05:09Z", verification_point: "receipt" }],
+    ["expired_release_approval_at_callback", { not_after: "2026-07-25T00:05:19Z", verification_point: "callback" }],
+    ["release_root_revoked_before_delivery", { revoked_at: "2026-07-25T00:04:59Z", root_id: "ananke_independent_supervisor_release_root_v2", verification_point: "delivery" }],
+    ["release_root_revoked_before_receipt", { revoked_at: "2026-07-25T00:05:09Z", root_id: "ananke_independent_supervisor_release_root_v2", verification_point: "receipt" }],
+    ["release_root_revoked_before_callback", { revoked_at: "2026-07-25T00:05:19Z", root_id: "ananke_independent_supervisor_release_root_v2", verification_point: "callback" }],
+    ["untyped_moa_role", { role: "provider_delegate" }],
+    ["expired_moa_grant_at_delivery", { not_after: "2026-07-25T00:04:59Z", verification_point: "delivery" }],
+    ["wrong_root_moa_grant", { grantor_root_id: "ananke_moa_role_grant_root_v9" }],
+    ["revoked_moa_grant_root", { revoked_at: "2026-07-25T00:04:59Z", root_id: "ananke_moa_role_grant_root_v1", verification_point: "delivery" }],
+    ["moa_rotation_without_overlap", { old_root_not_after: "2026-07-30T00:00:00Z", successor_valid_from: "2026-07-30T00:00:00Z" }],
+    ["moa_successor_binding_drift", { expected_successor_root_id: "ananke_moa_role_grant_root_v2", successor_root_id: "ananke_moa_role_grant_root_v9" }],
+    ["moa_grant_binding_drift", { grant_binding: "other_release_approval_hash" }],
+    ["outcome_inference", { decision: "infer_completed_from_timeout" }],
+    ["unknown_wire_schema", { schema_version: "ananke.unknown-independent-supervisor-wire.v1" }],
+  ];
+  const match = expected.find(([kind]) => kind === testCase.kind);
+  assert.ok(match, `unsupported protocol adapter red flag ${testCase.kind}`);
+  expectKeys(testCase.given, Object.keys(match[1]), `${testCase.id} given`);
+  assert.deepEqual(testCase.given, match[1], `${testCase.id} given`);
+}
+
+function verifyProtocolAdapterRedFlagsFixture(value) {
+  assertNoRawAuthority(value);
+  expectKeys(value, ["cases", "schema_version"], "protocol adapter red flags fixture");
+  assert.equal(value.schema_version, "ananke.independent-supervisor-protocol-adapter-design.red-flags.v1", "protocol adapter red flags schema version");
+  const expected = [
+    ["noncanonical_wire_encoding_waits_for_human", "noncanonical_wire_encoding"],
+    ["delivery_hash_drift_waits_for_human", "delivery_hash_drift"],
+    ["predecessor_envelope_drift_waits_for_human", "predecessor_envelope_drift"],
+    ["p3d_chain_drift_waits_for_human", "p3d_chain_drift"],
+    ["p3f_handoff_chain_drift_waits_for_human", "p3f_handoff_chain_drift"],
+    ["opaque_identifier_secret_payload_waits_for_human", "opaque_identifier_secret_payload"],
+    ["encrypted_secret_payload_waits_for_human", "encrypted_secret_payload"],
+    ["opaque_identifier_endpoint_authority_waits_for_human", "opaque_identifier_endpoint_authority"],
+    ["transport_downgrade_waits_for_human", "transport_downgrade"],
+    ["missing_channel_binding_waits_for_human", "missing_channel_binding"],
+    ["peer_identity_drift_waits_for_human", "peer_identity_drift"],
+    ["delivery_nonce_replay_waits_for_human", "delivery_nonce_replay"],
+    ["stale_timestamp_waits_for_human", "stale_timestamp"],
+    ["receipt_before_delivery_waits_for_human", "receipt_before_delivery"],
+    ["receipt_binding_drift_waits_for_human", "receipt_binding_drift"],
+    ["callback_before_receipt_waits_for_human", "callback_before_receipt"],
+    ["callback_channel_binding_drift_waits_for_human", "callback_channel_binding_drift"],
+    ["callback_replay_conflict_waits_for_human", "callback_replay_conflict"],
+    ["trust_root_downgrade_waits_for_human", "trust_root_downgrade"],
+    ["revoked_trust_root_waits_for_human", "revoked_trust_root"],
+    ["detached_attestation_hash_drift_waits_for_human", "detached_attestation_hash_drift"],
+    ["release_approval_binding_drift_waits_for_human", "release_approval_binding_drift"],
+    ["expired_release_approval_at_delivery_waits_for_human", "expired_release_approval_at_delivery"],
+    ["expired_release_approval_at_receipt_waits_for_human", "expired_release_approval_at_receipt"],
+    ["expired_release_approval_at_callback_waits_for_human", "expired_release_approval_at_callback"],
+    ["release_root_revoked_before_delivery_waits_for_human", "release_root_revoked_before_delivery"],
+    ["release_root_revoked_before_receipt_waits_for_human", "release_root_revoked_before_receipt"],
+    ["release_root_revoked_before_callback_waits_for_human", "release_root_revoked_before_callback"],
+    ["untyped_moa_role_waits_for_human", "untyped_moa_role"],
+    ["expired_moa_grant_at_delivery_waits_for_human", "expired_moa_grant_at_delivery"],
+    ["wrong_root_moa_grant_waits_for_human", "wrong_root_moa_grant"],
+    ["revoked_moa_grant_root_waits_for_human", "revoked_moa_grant_root"],
+    ["moa_rotation_without_overlap_waits_for_human", "moa_rotation_without_overlap"],
+    ["moa_successor_binding_drift_waits_for_human", "moa_successor_binding_drift"],
+    ["moa_grant_binding_drift_waits_for_human", "moa_grant_binding_drift"],
+    ["outcome_inference_waits_for_human", "outcome_inference"],
+    ["unknown_wire_schema_waits_for_human", "unknown_wire_schema"],
+  ];
+  assert.ok(Array.isArray(value.cases), "protocol adapter red flags cases must be an array");
+  assert.equal(value.cases.length, protocolAdapterRedFlagCount, "protocol adapter red flags must contain exactly 37 current cases");
+  assert.equal(expected.length, protocolAdapterRedFlagCount, "protocol adapter red flag expectation must contain exactly 37 current cases");
+  value.cases.forEach((testCase, index) => {
+    expectKeys(testCase, ["given", "id", "kind", "then"], `protocol adapter red flag ${index + 1}`);
+    assert.deepEqual([testCase.id, testCase.kind], expected[index], `protocol adapter red flag ${index + 1} identity`);
+    assertProtocolAdapterRedFlagGiven(testCase);
+    assertFailClosed(testCase.then, `protocol adapter red flag ${testCase.id}`);
+  });
+}
+
+async function readManifest(directory, readFixtureFile = readFile) {
+  const text = await readFixtureFile(join(directory, "fixtures.sha256"), "utf8");
   assert.ok(!text.endsWith("\n"), "fixtures.sha256 must not end with a newline");
   const entries = text.split("\n").map((line) => {
     const match = line.match(/^([a-z0-9-]+) sha256 ([0-9a-f]{64}) ([a-z0-9.-]+)$/);
@@ -954,8 +1346,16 @@ async function readManifest(directory) {
   return new Map(entries.map(({ name, digest: entryDigest }) => [name, entryDigest]));
 }
 
-async function readCanonical(directory, name, manifest) {
-  const bytes = await readFile(join(directory, name));
+function assertProtocolAdapterRedFlagsManifestBinding(manifest) {
+  assert.equal(
+    manifest.get(protocolAdapterRedFlagsFixtureName),
+    protocolAdapterRedFlagDigest,
+    "protocol adapter red flags manifest binding",
+  );
+}
+
+async function readCanonical(directory, name, manifest, readFixtureFile = readFile) {
+  const bytes = await readFixtureFile(join(directory, name));
   assert.equal(digest(bytes), manifest.get(name), `fixture digest mismatch: ${name}`);
   assert.equal(digest(bytes), canonicalFixtureDigests.get(name), `canonical fixture digest mismatch: ${name}`);
   assert.ok(!bytes.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf])), `${name} has a UTF-8 BOM`);
@@ -967,10 +1367,10 @@ async function readCanonical(directory, name, manifest) {
   return value;
 }
 
-async function readP3dAnchor(directory) {
-  const manifest = await readFile(join(directory, "fixtures.sha256"), "utf8");
+async function readP3dAnchor(directory, readFixtureFile = readFile) {
+  const manifest = await readFixtureFile(join(directory, "fixtures.sha256"), "utf8");
   assert.equal(manifest, p3dManifest, "P3d manifest anchor");
-  const bytes = await readFile(join(directory, "omp-audit-v1.canonical.json"));
+  const bytes = await readFixtureFile(join(directory, "omp-audit-v1.canonical.json"));
   assert.equal(digest(bytes), p3dCanonicalDigest, "P3d canonical fixture digest anchor");
   assert.ok(!bytes.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf])), "P3d canonical fixture has a UTF-8 BOM");
   const text = bytes.toString("utf8");
@@ -981,10 +1381,27 @@ async function readP3dAnchor(directory) {
   return { anchor: assertP3dAnchor(value), value };
 }
 
-async function verify(directory, p3dDirectory) {
-  const manifest = await readManifest(directory);
-  const fixtures = Object.fromEntries(await Promise.all(fixtureNames.map(async (name) => [name, await readCanonical(directory, name, manifest)])));
-  const { anchor } = await readP3dAnchor(p3dDirectory);
+async function readP3fFixtures(directory, readFixtureFile = readFile) {
+  const manifest = await readManifest(directory, readFixtureFile);
+  assertProtocolAdapterRedFlagsManifestBinding(manifest);
+  const fixtures = Object.fromEntries(await Promise.all(
+    fixtureNames.map(async (name) => [name, await readCanonical(directory, name, manifest, readFixtureFile)]),
+  ));
+  return { fixtures, manifest };
+}
+
+async function loadFixtureChain(directory, p3dDirectory, {
+  onP3dAnchorAuthenticated = () => {},
+  readFixtureFile = readFile,
+} = {}) {
+  const { anchor, value: p3dFixture } = await readP3dAnchor(p3dDirectory, readFixtureFile);
+  onP3dAnchorAuthenticated(anchor);
+  const { fixtures, manifest } = await readP3fFixtures(directory, readFixtureFile);
+  return { anchor, fixtures, manifest, p3dFixture };
+}
+
+async function verify(directory, p3dDirectory, options) {
+  const { anchor, fixtures } = await loadFixtureChain(directory, p3dDirectory, options);
   const activation = fixtures["production-activation-v1.canonical.json"];
   verifyCanonicalFixture(activation, anchor);
   verifyRedFlagsFixture(fixtures["preflight-red-flags-v1.canonical.json"], activation);
@@ -994,26 +1411,117 @@ async function verify(directory, p3dDirectory) {
   const remoteHandoff = fixtures["external-supervisor-handoff-v1.canonical.json"];
   verifyRemoteHandoffFixture(remoteHandoff, activation, execFdDesign, anchor);
   verifyRemoteRedFlagsFixture(fixtures["external-supervisor-red-flags-v1.canonical.json"]);
+  const protocolAdapter = fixtures["independent-supervisor-protocol-adapter-v1.canonical.json"];
+  verifyProtocolAdapterFixture(protocolAdapter, remoteHandoff, activation, execFdDesign, anchor);
+  verifyProtocolAdapterRedFlagsFixture(fixtures["independent-supervisor-protocol-adapter-red-flags-v1.canonical.json"]);
 }
 
 async function assertRejected(action, pattern, name) {
   await assert.rejects(action, pattern, `${name} rejection reason`);
 }
 
+function isP3fFixtureRead(path) {
+  const absolutePath = resolve(path);
+  return absolutePath === join(sourceFixtureDirectory, "fixtures.sha256")
+    || fixtureNames.some((name) => absolutePath === join(sourceFixtureDirectory, name));
+}
+
+async function assertP3dAnchorFirstDependency() {
+  const p3dManifestPath = join(sourceP3dFixtureDirectory, "fixtures.sha256");
+  const p3dCanonicalFixturePath = join(sourceP3dFixtureDirectory, "omp-audit-v1.canonical.json");
+  const reads = [];
+  let p3dAnchorAuthenticated = false;
+  const tracedReadFile = async (...args) => {
+    const absolutePath = resolve(args[0]);
+    if (isP3fFixtureRead(absolutePath)) {
+      assert.ok(p3dAnchorAuthenticated, "P3d anchor must authenticate before any P3f manifest or fixture read");
+    }
+    reads.push(absolutePath);
+    return readFile(...args);
+  };
+  await verify(sourceFixtureDirectory, sourceP3dFixtureDirectory, {
+    onP3dAnchorAuthenticated: () => {
+      assert.deepEqual(
+        reads,
+        [p3dManifestPath, p3dCanonicalFixturePath],
+        "P3d manifest and canonical fixture must be the first dependencies",
+      );
+      p3dAnchorAuthenticated = true;
+    },
+    readFixtureFile: tracedReadFile,
+  });
+  assert.ok(p3dAnchorAuthenticated, "P3d anchor authentication dependency proof");
+
+  let p3fReadAfterRejectedP3d = false;
+  const corruptP3dReadFile = async (...args) => {
+    const absolutePath = resolve(args[0]);
+    if (isP3fFixtureRead(absolutePath)) p3fReadAfterRejectedP3d = true;
+    if (absolutePath === p3dCanonicalFixturePath) return Buffer.from("{}", "utf8");
+    return readFile(...args);
+  };
+  await assertRejected(
+    () => verify(sourceFixtureDirectory, sourceP3dFixtureDirectory, { readFixtureFile: corruptP3dReadFile }),
+    /P3d canonical fixture digest anchor/,
+    "P3d canonical authentication precedes P3f reads",
+  );
+  assert.equal(p3fReadAfterRejectedP3d, false, "rejected P3d authentication must prevent every P3f read");
+}
+
+function rehashWireVector(value, schema) {
+  const hashInput = { ...value };
+  delete hashInput[schema.self_hash_field];
+  value[schema.self_hash_field] = hashCanonical(hashInput);
+}
+
+function rebindProtocolAdapterWireChain(fixture) {
+  const vectors = fixture.wire_test_vectors;
+  const schemas = fixture.wire_schemas;
+  rehashWireVector(vectors.detached_release_attestation, schemas.detached_release_attestation);
+  vectors.release_approval.attestation_hash = vectors.detached_release_attestation.attestation_hash;
+  rehashWireVector(vectors.release_approval, schemas.release_approval);
+  vectors.moa_typed_role_grant.release_attestation_hash = vectors.detached_release_attestation.attestation_hash;
+  vectors.moa_typed_role_grant.release_approval_hash = vectors.release_approval.approval_hash;
+  rehashWireVector(vectors.moa_typed_role_grant, schemas.moa_typed_role_grant);
+  vectors.sealed_handoff_delivery.release_attestation_hash = vectors.detached_release_attestation.attestation_hash;
+  vectors.sealed_handoff_delivery.release_approval_hash = vectors.release_approval.approval_hash;
+  vectors.sealed_handoff_delivery.moa_role_grant_hash = vectors.moa_typed_role_grant.grant_hash;
+  rehashWireVector(vectors.sealed_handoff_delivery, schemas.sealed_handoff_delivery);
+  vectors.acceptance_receipt.delivery_hash = vectors.sealed_handoff_delivery.delivery_hash;
+  vectors.acceptance_receipt.release_approval_hash = vectors.release_approval.approval_hash;
+  rehashWireVector(vectors.acceptance_receipt, schemas.acceptance_receipt);
+  vectors.completion_callback.delivery_hash = vectors.sealed_handoff_delivery.delivery_hash;
+  vectors.completion_callback.receipt_hash = vectors.acceptance_receipt.receipt_hash;
+  rehashWireVector(vectors.completion_callback, schemas.callback);
+}
+
+function rehashProtocolAdapterRootRecord(fixture, rootName, recordName) {
+  const roots = fixture.trust_root_lifecycle[rootName];
+  const schema = recordName === "rotation"
+    ? { self_hash_field: "rotation_hash" }
+    : { self_hash_field: "revocation_hash" };
+  rehashWireVector(roots[recordName], schema);
+}
+
 async function selfTest() {
-  const manifest = await readManifest(sourceFixtureDirectory);
-  const fixtures = Object.fromEntries(await Promise.all(fixtureNames.map(async (name) => [name, await readCanonical(sourceFixtureDirectory, name, manifest)])));
-  const { anchor, value: p3dFixture } = await readP3dAnchor(sourceP3dFixtureDirectory);
+  await assertP3dAnchorFirstDependency();
+  const { anchor, fixtures, manifest, p3dFixture } = await loadFixtureChain(
+    sourceFixtureDirectory,
+    sourceP3dFixtureDirectory,
+  );
   const canonicalFixture = fixtures["production-activation-v1.canonical.json"];
   const execFdDesign = fixtures["production-exec-fd-design-v1.canonical.json"];
   const remoteHandoff = fixtures["external-supervisor-handoff-v1.canonical.json"];
   const remoteRedFlags = fixtures["external-supervisor-red-flags-v1.canonical.json"];
+  const protocolAdapter = fixtures["independent-supervisor-protocol-adapter-v1.canonical.json"];
+  const protocolAdapterRedFlags = fixtures["independent-supervisor-protocol-adapter-red-flags-v1.canonical.json"];
   verifyCanonicalFixture(canonicalFixture, anchor);
   verifyRedFlagsFixture(fixtures["preflight-red-flags-v1.canonical.json"], canonicalFixture);
   verifyExecFdDesignFixture(execFdDesign, canonicalFixture);
   verifyExecFdRedFlagsFixture(fixtures["exec-fd-red-flags-v1.canonical.json"], execFdDesign);
   verifyRemoteHandoffFixture(remoteHandoff, canonicalFixture, execFdDesign, anchor);
   verifyRemoteRedFlagsFixture(remoteRedFlags);
+  verifyProtocolAdapterFixture(protocolAdapter, remoteHandoff, canonicalFixture, execFdDesign, anchor);
+  verifyProtocolAdapterRedFlagsFixture(protocolAdapterRedFlags);
 
   const drifted = structuredClone(canonicalFixture);
   drifted.source_manifest_hash = `sha256:${"9".repeat(64)}`;
@@ -1112,15 +1620,64 @@ async function selfTest() {
   remoteFlags.cases[13] = structuredClone(remoteRedFlags.cases[13]);
   remoteFlags.cases[17].given.rotation = "accepted";
   await assertRejected(async () => verifyRemoteRedFlagsFixture(remoteFlags), /given/, "remote trust-root red flag drift");
+
+  const protocolMutations = [
+    ["P3d/P3f/handoff chain", (fixture) => { fixture.predecessor_binding.external_supervisor_handoff_fixture_sha256 = `sha256:${"2".repeat(64)}`; }, /exact P3d\/P3f\/handoff chain/],
+    ["sealed delivery hash", (fixture) => { fixture.wire_test_vectors.sealed_handoff_delivery.nonce_hash = `sha256:${"3".repeat(64)}`; }, /canonical self hash/],
+    ["release approval", (fixture) => { fixture.wire_test_vectors.release_approval.attestation_hash = `sha256:${"4".repeat(64)}`; }, /canonical self hash/],
+    ["expired release approval at delivery", (fixture) => { fixture.wire_test_vectors.release_approval.not_after = "2026-07-25T00:04:59Z"; rebindProtocolAdapterWireChain(fixture); }, /delivery release approval validity/],
+    ["expired release approval at receipt", (fixture) => { fixture.wire_test_vectors.release_approval.not_after = "2026-07-25T00:05:09Z"; rebindProtocolAdapterWireChain(fixture); }, /receipt release approval validity/],
+    ["expired release approval at callback", (fixture) => { fixture.wire_test_vectors.release_approval.not_after = "2026-07-25T00:05:19Z"; rebindProtocolAdapterWireChain(fixture); }, /callback release approval validity/],
+    ["release root revoked before delivery", (fixture) => { fixture.trust_root_lifecycle.release_root.revocation.effective_at = "2026-07-25T00:04:59Z"; rehashProtocolAdapterRootRecord(fixture, "release_root", "revocation"); }, /release root revoked at delivery/],
+    ["release root revoked before receipt", (fixture) => { fixture.trust_root_lifecycle.release_root.revocation.effective_at = "2026-07-25T00:05:09Z"; rehashProtocolAdapterRootRecord(fixture, "release_root", "revocation"); }, /release root revoked at receipt/],
+    ["release root revoked before callback", (fixture) => { fixture.trust_root_lifecycle.release_root.revocation.effective_at = "2026-07-25T00:05:19Z"; rehashProtocolAdapterRootRecord(fixture, "release_root", "revocation"); }, /release root revoked at callback/],
+    ["mTLS downgrade", (fixture) => { fixture.channel_binding_mtls_identity_interface.protocol = "tls_1_2"; }, /mTLS protocol/],
+    ["endpoint authority", (fixture) => { fixture.channel_binding_mtls_identity_interface.endpoint_serialization = "permitted"; }, /endpoint authority policy/],
+    ["release approval endpoint identifier", (fixture) => { fixture.wire_test_vectors.release_approval.approval_id = "https://approval.invalid/release"; rebindProtocolAdapterWireChain(fixture); }, /safe opaque identifier/],
+    ["MoA grant endpoint identifier", (fixture) => { fixture.wire_test_vectors.moa_typed_role_grant.grant_id = "https://grant.invalid/moa"; rebindProtocolAdapterWireChain(fixture); }, /safe opaque identifier/],
+    ["release approval secret identifier", (fixture) => { fixture.wire_test_vectors.release_approval.approval_id = "release_secret_token_001"; rebindProtocolAdapterWireChain(fixture); }, /safe opaque identifier/],
+    ["MoA grant key identifier", (fixture) => { fixture.wire_test_vectors.moa_typed_role_grant.grant_id = "moa_grant_key_material_001"; rebindProtocolAdapterWireChain(fixture); }, /safe opaque identifier/],
+    ["release approval whitespace identifier", (fixture) => { fixture.wire_test_vectors.release_approval.approval_id = "release approval 001"; rebindProtocolAdapterWireChain(fixture); }, /safe opaque identifier/],
+    ["MoA grant raw authority identifier", (fixture) => { fixture.wire_test_vectors.moa_typed_role_grant.grant_id = "moa_grant_authority_001"; rebindProtocolAdapterWireChain(fixture); }, /safe opaque identifier/],
+    ["MoA grant expiry", (fixture) => { fixture.wire_test_vectors.moa_typed_role_grant.not_after = "2026-07-25T00:04:59Z"; rebindProtocolAdapterWireChain(fixture); }, /delivery MoA grant validity/],
+    ["MoA grant wrong root", (fixture) => { fixture.wire_test_vectors.moa_typed_role_grant.grantor_root_id = "ananke_moa_role_grant_root_v9"; rebindProtocolAdapterWireChain(fixture); }, /MoA grant root active successor state at delivery/],
+    ["MoA grant root revoked", (fixture) => { fixture.trust_root_lifecycle.moa_grant_root.revocation.effective_at = "2026-07-25T00:04:59Z"; rehashProtocolAdapterRootRecord(fixture, "moa_grant_root", "revocation"); }, /MoA grant root revoked at delivery/],
+    ["MoA root overlap", (fixture) => { fixture.trust_root_lifecycle.moa_grant_root.rotation.new_root_valid_from = fixture.trust_root_lifecycle.moa_grant_root.rotation.old_root_not_after; rehashProtocolAdapterRootRecord(fixture, "moa_grant_root", "rotation"); }, /MoA grant root rotation validity overlap/],
+    ["MoA successor binding", (fixture) => { fixture.trust_root_lifecycle.moa_grant_root.successor_root_id = "ananke_moa_role_grant_root_v9"; }, /MoA grant root successor binding/],
+    ["replay nonce", (fixture) => { fixture.replay_nonce_timestamp_policy.nonce_uniqueness = "optional"; }, /replay nonce timestamp policy/],
+    ["encrypted secret payload", (fixture) => { fixture.payload_constraints.encrypted_payload_secret_content = "allowed"; }, /encrypted no-secret payload boundary/],
+    ["MoA runtime integration", (fixture) => { fixture.moa_typed_role_grant_binding.runtime_integration = "present"; }, /typed-role grant boundary/],
+    ["failure projection", (fixture) => { fixture.failure_projection.result = { outcome: "completed" }; }, /normalized waiting_for_human/],
+  ];
+  for (const [name, mutate, pattern] of protocolMutations) {
+    const fixture = structuredClone(protocolAdapter);
+    mutate(fixture);
+    await assertRejected(async () => verifyProtocolAdapterFixture(fixture, remoteHandoff, canonicalFixture, execFdDesign, anchor), pattern, name);
+  }
+  const incompleteProtocolFlags = structuredClone(protocolAdapterRedFlags);
+  incompleteProtocolFlags.cases.pop();
+  await assertRejected(async () => verifyProtocolAdapterRedFlagsFixture(incompleteProtocolFlags), /exactly 37 current cases/, "protocol red flag inventory count");
+
+  const driftedProtocolFlagsManifest = new Map(manifest);
+  driftedProtocolFlagsManifest.set(protocolAdapterRedFlagsFixtureName, "0".repeat(64));
+  await assertRejected(async () => assertProtocolAdapterRedFlagsManifestBinding(driftedProtocolFlagsManifest), /manifest binding/, "protocol red flag manifest binding");
+
+
+  const protocolFlags = structuredClone(protocolAdapterRedFlags);
+  protocolFlags.cases[7].then.state = "completed";
+  await assertRejected(async () => verifyProtocolAdapterRedFlagsFixture(protocolFlags), /normalized waiting_for_human/, "protocol endpoint denial information leak");
+  protocolFlags.cases[7] = structuredClone(protocolAdapterRedFlags.cases[7]);
+  protocolFlags.cases[7].given.approval_id = "other_authority";
+  await assertRejected(async () => verifyProtocolAdapterRedFlagsFixture(protocolFlags), /given/, "protocol endpoint denial drift");
 }
 
 if (process.argv.includes("--self-test")) {
   await selfTest();
-  console.log("P3f production activation self-test rejected source-manifest and P3d-chain drift, wrapper/route and FD/sandbox/cleanup-policy drift, credential channels, Darwin exec-by-FD drift, and remote-supervisor handoff drift across authority, provenance, route, envelope, callback/result, cancellation/recovery, replay, trust-root, MoA, transmission, and waiting-for-human failures.");
+  console.log(`P3f fixture-chain self-test proved P3d manifest/canonical-fixture authentication and anchor derivation precede every P3f manifest or fixture read, then rejected source-manifest and P3d-chain drift, wrapper/route and FD/sandbox/cleanup-policy drift, credential channels, Darwin exec-by-FD drift, remote-supervisor handoff drift, and independently trusted supervisor protocol-adapter drift across its exact ${protocolAdapterRedFlagCount}-case protocol-adapter inventory and manifest binding (${protocolAdapterRedFlagDigest}), canonical wire hashes, strict safe opaque approval/grant identifier validation with rehashed endpoint/secret/key-marker, whitespace, and raw-authority mutations, delivery/receipt/callback authorization time checks, expired approvals, root revocation, MoA root expiry/rotation, endpoint rejection, and waiting-for-human failures.`);
 } else {
   await verify(
     resolve(optionValue("--fixtures") ?? sourceFixtureDirectory),
     resolve(optionValue("--p3d-fixtures") ?? sourceP3dFixtureDirectory),
   );
-  console.log("P3f production activation fixtures verified: P3d-bound activation, FD-only preflight, the Darwin macOS 27 exec-by-FD design chain, and the external independently trusted supervisor handoff design. Darwin remains none/fail-closed before a child; remote authority is future-only and requires exact P3d/P3f bindings, sealed envelope, independent release provenance, authenticated fence/deadline/cap, trust-root rotation, typed results, no-inference recovery, and MoA grants.");
+  console.log(`P3f fixture chain verified: P3d manifest/canonical-fixture authentication and anchor derivation precede every P3f manifest or fixture read. The protocol-adapter slice has exactly ${protocolAdapterRedFlagCount} ordered denial cases, manifest-bound to sha256:${protocolAdapterRedFlagDigest}; its canonical wire fixture is sha256:${canonicalFixtureDigests.get("independent-supervisor-protocol-adapter-v1.canonical.json")}. This verifier validates fixtures only; predecessor P3e/P3f runtime paths are outside the protocol-adapter slice.`);
 }

@@ -4,3 +4,5 @@ ananke-omp-production-activation-contract-v1 sha256 9cc58dec80462815cc8a3fc28243
 ananke-omp-production-activation-contract-v1 sha256 f10f9c9df50a7120c8d59b07f86477f75221c5e2b5c963a33b9b4d86db78386c exec-fd-red-flags-v1.canonical.json
 ananke-omp-production-activation-contract-v1 sha256 8c5d97165d8f26a06ba649176674174bebb6204041e649f9a2b01e8aa4e7b658 external-supervisor-handoff-v1.canonical.json
 ananke-omp-production-activation-contract-v1 sha256 3fc57a4dd1040e684b2ea04546a37803edb37807bbcf3a17ddb940bf5a4dac92 external-supervisor-red-flags-v1.canonical.json
+ananke-omp-production-activation-contract-v1 sha256 956cc3e2a7fb6426dc084f87fa55595ce8cf8767741b66eda77489db32c5cf44 independent-supervisor-protocol-adapter-v1.canonical.json
+ananke-omp-production-activation-contract-v1 sha256 6c69ac6ceaac825098fc716e4bb6576ee2bf1a3f7e0b4ca9ad3ba42b3d47b525 independent-supervisor-protocol-adapter-red-flags-v1.canonical.json
