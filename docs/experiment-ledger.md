@@ -2094,3 +2094,29 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 #### Terminal verdict
 
 - **PASS:** the protocol-adapter slice has a byte-pinned independently trusted supervisor protocol-adapter design contract that rejects expired or invalid authority at every frozen boundary while preserving exact `waiting_for_human`, no inference, and no active protocol-adapter execution or transport path.
+
+
+### 2026-07-25 — P4 self-development evidence verifier and bounded-repair admission design contract
+
+#### Scope
+
+- Added a design-only P4 canonical evidence bundle with self-hashed proposal, revision, approval, fence, envelope, receipt, callback, source, artifact, route, test, and evaluation records. Source and artifact declarations are hash-only; callback evidence cannot establish repair success.
+- The P4 verifier independently authenticates the P3f protocol-adapter fixture and its exact 37-case red-flag fixture before reading P4 material. The bundle links P1 revision, P2 grill, P3a launch/spec, P3b current-full-fence rule, P3c admission obligation, P3d adapter, and P3f envelope/route identities.
+- The bounded repair policy fixes cap `2`, role `self_development_repair_runner`, and one evidence-bound route. It requires the exact bundle/all 12 hashes, fresh approval and fence after evaluation, and a typed MoA grant bound to those exact facts and verifier trust identity.
+
+#### Verification
+
+- **PASS:** `node --check`, normal verification, and `--self-test` all exited
+  `0` for `contracts/p3d/verify.mjs`, `contracts/p3f/verify.mjs`, and
+  `contracts/p4/verify.mjs`.
+- **PASS:** P4 independently authenticated P3f's adapter fixture `sha256:956cc3e2a7fb6426dc084f87fa55595ce8cf8767741b66eda77489db32c5cf44` and its exact 37-case denial inventory `sha256:6c69ac6ceaac825098fc716e4bb6576ee2bf1a3f7e0b4ca9ad3ba42b3d47b525` before each P4 read; the self-test proved rejected P3f bytes prevent every P4 fixture read.
+- **PASS:** the P4 canonical bundle fixture is `sha256:aa7d94f96b123ff200bf4f84ec55d7b5edbd157f4578ba99ed3b4fdbc93ee36c`; its 38-case P4 denial fixture is `sha256:91c900ce7cc2c53ce360775be0909b3e679a971756075d643f3b0d0e3eb4ce0f`.
+- **PASS:** the self-test's 38-entry, ordered mutator map exactly matches the denial fixture inventory. Each invalid evidence/admission mutation rehashes enclosing dependent records unless self-hash drift is the tested invariant, then the target verifier or validator rejects that invariant. Every declared denial remains exactly `{"admission":"rejected","bundle_hash":null,"repair_execution":"not_authorized","state":"waiting_for_human","verification_state":"not_run"}`.
+
+#### Boundary
+
+- No supervisor, protocol adapter, network/RPC, OMP, source/artifact operation, repair execution, approval/fence/MoA issuance, persistence, process, child, commit, or push was added. P4's verified output remains `waiting_for_human` and `repair_execution: "not_authorized_by_verifier"`; it is not repair success or permission to perform a repair.
+
+#### Terminal verdict
+
+- **PASS:** P4 freezes replayable canonical evidence verification and a bounded, fresh-fact, typed-MoA repair-admission declaration without creating execution authority or inferring any outcome.
