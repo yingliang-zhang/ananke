@@ -1750,3 +1750,112 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 - **PASS:** P3f freezes the P3d-bound production self-hosted activation
   preflight and complete fail-closed red-flag boundary without implementing or
   exercising production activation.
+
+### 2026-07-24 — P3f sandboxed fake-child runtime
+
+#### Scope
+
+- Added private-only `internal/lifecycle/p3f_runtime.go` and its focused
+  `p3f_runtime_test.go` suite. There is no exported runtime API, command,
+  daemon, renderer/Tauri integration, or production callsite.
+- Each positive test creates a temporary synthetic Git repository with opaque
+  entry IDs, creates a Git tar archive, and pins the archive's global PAX
+  commit comment, ordered entry hashes, and canonical source-manifest hash.
+  It never opens or targets the Ananke checkout.
+- Staging accepts only a regular inherited archive descriptor. It duplicates
+  and revalidates the descriptor identity, validates the pinned Git commit and
+  every ordered archive member hash, and presents manifest, source directory,
+  and evidence only as inherited child descriptors. The public output remains
+  the closed `waiting_for_human` shape with `result: null`.
+- The final admission transaction rechecks the complete P3b fence, P3c action,
+  exact deadline, P3d HostSpec/source-snapshot bindings, derived manifest hash,
+  and declared wrapper SHA-256/kind/route immediately before fake-child start.
+  Tests mutate every activation identity after initial preflight and reclaim the
+  complete fence before admission; both paths deny before fake execution.
+- Cleanup closes the owned staging descriptor, reopens through the trusted
+  parent with `O_NOFOLLOW`, verifies device/inode identity, and removes only
+  that owned tree. A replacement tree is preserved and denied.
+
+#### Sandbox and fake-child evidence
+
+- On this Darwin host, `/usr/bin/sandbox-exec` started only the deterministic
+  test binary under a Seatbelt profile that denies `file-write*`. The fake child
+  read source through its inherited descriptor while the staged directory was
+  DAC-writable, then its write open was denied by the OS sandbox. It also
+  verified a descriptor-only manifest/evidence interface and rejected
+  credential-named environment entries and raw path arguments.
+- The unavailable-capability adapter is separately tested and returns the same
+  closed public output before the fake child starts. The runtime never resolves
+  or invokes a real wrapper; wrapper identity is a declared pinned value only.
+
+#### TDD and verification
+
+- RED established by `go test ./internal/lifecycle -run '^TestP3F' -count=1
+  -timeout 60s` before the P3f symbols existed; compilation failed on the
+  absent fake-child runtime, source manifest, sandbox, and launch types.
+- Focused: `go test -v ./internal/lifecycle -run '^TestP3F' -count=1 -timeout
+  60s` → PASS. The verbose result records the Darwin Seatbelt read-only/write-
+  denied proof; it also covers tracked-vs-plain archive staging, FD cleanup,
+  no raw public result/path leakage, credential-free child argv/environment,
+  initial and final-boundary identity drift, and full-fence reclamation.
+- Full: `go test ./... -count=1 -timeout 300s` → PASS (3 packages with tests,
+  3 without). Race: `go test -race ./... -count=1 -timeout 360s` → PASS (same
+  package inventory). `go vet ./...` → PASS.
+- P3d and P3f syntax, normal, and in-memory self-test contract gates all
+  passed. The P3f verifier again rejected manifest/P3d/wrapper/FD/sandbox/
+  cleanup/credential/launch-time drift and non-fail-closed public output.
+
+#### Remaining activation boundary
+
+- This is a private, fake-child-only containment proof. It does not accept or
+  hash a real wrapper binary, call OMP, materialize a real source target,
+  connect to a service, emit audit results, or grant production launch
+  authority. No commit or push was run.
+- A real activation still requires separately accepted production wrapper and
+  sandbox designs, an actual pinned-wrapper hash proof, controlled source
+  authority, and an explicit authorization to replace this fake-only runtime.
+
+### 2026-07-24 — P3f fake-only production exclusion repair
+
+#### Cause and repair
+
+- `internal/lifecycle/p3f_runtime.go` compiled the private fake runtime into the production lifecycle package despite its test-only comments. Its fake launcher and Seatbelt adapter each accepted a configurable program/executable value.
+- Moved the complete P3f runtime, staging, archive, fence, descriptor, sandbox, evidence, and cleanup proof to `internal/lifecycle/p3f_fake_runtime_test.go`. It is absent from the production `GoFiles` set.
+- The test-only fake launcher and Seatbelt adapter are now empty structs. The sandbox capability accepts only context and inherited descriptors; it has no program parameter. Its only child command fixes `/usr/bin/sandbox-exec`, `os.Args[0]`, the single fake-child test selector, and the fake-child marker. No P3f production runtime, public API, wrapper, OMP path, or executable injection path remains.
+
+#### Strict TDD and mechanical regression
+
+- RED: `go test ./internal/lifecycle -run '^TestP3FProductionBuildExcludesFakeExecution$' -count=1 -timeout 60s` failed before the move: `P3f source "p3f_runtime.go" is compiled into the production lifecycle package`.
+- `TestP3FProductionBuildExcludesFakeExecution` reads the actual `go list -json` build selection and parses the test-only runtime AST. It requires no production P3f Go file, requires `p3f_fake_runtime_test.go` only in `TestGoFiles`, requires zero-field launcher/sandbox types, rejects a string sandbox parameter, and requires the sole Seatbelt `exec.CommandContext` path to name `os.Args[0]`.
+
+#### Verification
+
+- `go test -v ./internal/lifecycle -run '^TestP3F' -count=1 -timeout 120s` → PASS. The preserved P3f suite covered the Darwin Seatbelt read-only/write-denied proof, tracked archive admission, archive/identity/fence drift denial before the fake child, inherited-FD evidence, no-credential child environment/arguments, and descriptor-owned replacement-safe cleanup.
+- `go build ./internal/lifecycle && go list -json ./internal/lifecycle` → PASS. The non-test `GoFiles` inventory is `backend.go`, `engine.go`, `fenced_launch.go`, `identity.go`, `mutation_hooks.go`, and `omp_adapter.go`; `p3f_fake_runtime_test.go` appears only in `TestGoFiles`.
+- `go test ./... -count=1 -timeout 300s` → PASS (3 packages with tests, 3 without); `go test -race ./... -count=1 -timeout 360s` → PASS (same package inventory); `go vet ./...` → PASS.
+- `node --check contracts/p3d/verify.mjs && node contracts/p3d/verify.mjs && node contracts/p3d/verify.mjs --self-test && node --check contracts/p3f/verify.mjs && node contracts/p3f/verify.mjs && node contracts/p3f/verify.mjs --self-test` → PASS.
+
+#### Boundary
+
+- P3f execution remains a test-only synthetic fixture proof. The focused suite re-executed only its test binary against temporary synthetic fixtures; no real OMP, wrapper, Ananke target, repository commit, or push was invoked.
+
+### 2026-07-24 — P3f pinned Git archive provenance repair
+
+#### Cause and repair
+
+- The test-only P3f runtime had treated the global PAX `comment` commit as archive provenance. A hand-built tar can reproduce that comment and every pinned member hash; the comment is therefore consistency metadata, not authentication.
+- The synthetic `p3fTrackedSourceManifest` now includes `archive_sha256` in its canonical self-hash. Activation and launch request each carry the same immutable digest, and the runtime SHA-256s its duplicated inherited archive descriptor before creating the staging directory.
+- Only after the byte digest matches both activation and manifest does P3f compare the PAX commit with the manifest commit. The archive is rewound before tar staging; FD identity, trusted-root staging, private-fence rechecks, sandbox boundary, cleanup ownership, and fake-only execution remain unchanged.
+- `TestP3FRejectsForgedPAXArchiveBeforeFakeChild` hand-builds a non-Git tar with the expected PAX comment, exact pinned member names, and exact pinned content hashes, then proves its distinct archive SHA-256 is denied at `tracked_archive` before sandbox or fake-child execution.
+
+#### TDD and verification
+
+- RED: after the forged tar fixture was made valid, `go test ./internal/lifecycle -run '^TestP3FRejectsForgedPAXArchiveBeforeFakeChild$' -count=1 -timeout=60s` failed with `stage=sandbox ... want private tracked_archive cause`; PAX-plus-member equivalence reached the sandbox before the digest binding existed.
+- GREEN focused: `go test -v ./internal/lifecycle -run '^TestP3F' -count=1 -timeout=120s` → PASS. It covers immutable archive-hash request and final-boundary drift, forged PAX denial, FD-only staging, fence checks, descriptor-owned cleanup, and the Darwin test-binary sandbox proof.
+- Full: `go test ./... -count=1 -timeout=300s` → PASS (3 packages with tests, 3 without). Race: `go test -race ./... -count=1 -timeout=360s` → PASS (same package inventory). `go vet ./...` → PASS.
+- Contract syntax, normal verification, and in-memory self-tests all passed for P1a, P1c, P2a, P2c, P3a, P3d, and P3f.
+
+#### Boundary
+
+- The P3f contract fixtures remain declaration-only: they contain no archive bytes to authenticate. The fixture binding added here is the canonical manifest created for each temporary synthetic Git archive; no static archive digest was fabricated.
+- This repair remains test-only. It invoked no real OMP, wrapper, target, or repository commit, and performed no commit or push.
