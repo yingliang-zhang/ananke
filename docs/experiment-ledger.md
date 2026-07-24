@@ -1696,3 +1696,57 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 - `go test ./internal/lifecycle -run '^TestP3E' -count=20 -timeout 180s` → PASS.
 - `go test ./... -count=1 -timeout 300s` → PASS (3 packages; 3 packages without tests); `go test -race ./... -count=1 -timeout 360s` → PASS (3 packages; 3 packages without tests); `go vet ./...` → PASS.
 - `node --check`, normal verification, and `--self-test` all passed for P1a, P1c, P2a, P2c, P3a, and P3d contract verifiers.
+
+### 2026-07-24 — P3f production self-hosted OMP activation contract
+
+#### Scope
+
+- Added only `contracts/p3f` canonical and preflight-red-flag fixture vectors,
+  their SHA-256 manifest, a dependency-free Node verifier with in-memory
+  self-test, the P3f plan and contract documents, and this ledger entry.
+- P3f binds a tracked Git commit and an RFC 8785 JCS-derived source-manifest
+  hash to the hard-pinned P3d canonical fixture, P3d HostSpec/source/deadline,
+  P3c `retry_process_admission`, and P3d's exact wrapper-kind/route pair.
+- The frozen production declaration names one approved wrapper binary SHA-256,
+  inherited FD-only manifest/source/evidence interfaces, OS-enforced
+  read-only/write-denied sandbox requirements, activation-owned
+  descriptor/device-inode cleanup, and forbidden argv/environment credentials.
+- Every preflight red flag has exactly the closed normalized
+  `waiting_for_human` output. It infers no launch, event, result, verification,
+  sandbox, descriptor, inode, credential, or process fact.
+
+#### Verification
+
+- Passed exactly:
+
+  ```sh
+  node --check contracts/p3d/verify.mjs
+  node contracts/p3d/verify.mjs
+  node contracts/p3d/verify.mjs --self-test
+  node --check contracts/p3f/verify.mjs
+  node contracts/p3f/verify.mjs
+  node contracts/p3f/verify.mjs --self-test
+  ```
+
+- The P3f normal verifier independently checked P3d's frozen fixture manifest
+  and canonical bytes before checking the successor declaration. Its self-test
+  rejected tracked-commit/source-manifest/P3d-chain drift; wrapper and route
+  drift; non-FD interfaces; advisory sandbox declarations; cleanup ownership
+  loss; argv/environment credentials; launch-time deadline/full-fence/P3c/
+  source/wrapper/route drift; raw authority; and non-fail-closed output.
+
+#### Activation boundary
+
+- No real wrapper, sandbox, source/worktree, OMP session, production child,
+  activation command, or production verification execution was created, opened,
+  or launched; no commit or push was run. The verifier reads contract fixture
+  bytes, and its self-test mutates cloned values in memory only.
+- **A real child cannot be launched until the sandbox and production wrapper
+  implementation are both accepted.** P3f is a contract-only successor gate
+  and grants no runtime launch authority.
+
+#### Terminal verdict
+
+- **PASS:** P3f freezes the P3d-bound production self-hosted activation
+  preflight and complete fail-closed red-flag boundary without implementing or
+  exercising production activation.
