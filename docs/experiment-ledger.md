@@ -1942,3 +1942,80 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
   source/evidence descriptor open, sandbox application, commit, or push was
   performed. Contract commands read fixture bytes and mutate copies in memory
   only; the focused Go test checked test-only build selection.
+
+### 2026-07-24 — P3f external independently trusted supervisor handoff design contract
+
+#### Scope
+
+- Added two P3f canonical fixtures, SHA-256 manifest entries, dependency-free
+  verifier rules and in-memory mutation checks, a TDD plan, and the design
+  contract. No Go/runtime, lifecycle, store, UI, wrapper, OMP, supervisor,
+  network, request, callback receiver, child, source/artifact/evidence I/O,
+  commit, or push code changed.
+- The predecessor decision remains Darwin macOS 27 `none_fail_closed`: this
+  contract defines no local fallback and is not an exec-by-FD/path/spawn/fileport
+  workaround.
+
+#### Contract boundary
+
+- The verifier checks canonical P3d bytes and manifest, then the P3f activation
+  and Darwin exec-by-FD design fixtures, before accepting the remote-handoff
+  fixture and denial vectors. The successor binds exact P3d fixture/HostSpec,
+  P3f source snapshot/manifest/wrapper, and predecessor fixture identities.
+- One P3d wrapper-kind/route pair maps to one supervisor wrapper-kind/route and
+  protocol. The sealed envelope is JCS self-hashed and binds opaque handoff and
+  idempotency identities, route mapping, full-fence binding hash, P3d deadline
+  and cap, source identity, independently released supervisor artifact identity,
+  and typed evidence identity.
+- Durable authority is future-only: it requires an independently trusted
+  supervisor's durable authenticated acceptance receipt. The declaration allows
+  persistence only of the envelope hash and receipt identity; fixture hashes or
+  caller input grant no execution authority.
+- The supervisor release requires detached attestation, independent approval,
+  and a release authority separate from Ananke, builders, launch machinery, and
+  runtime. Cross-signed active/successor trust-root rotation with validity
+  overlap is required; unknown, invalid, or downgraded roots fail closed.
+- Callback/result schemas require a current-root authenticated envelope binding
+  and attested typed evidence. Missing/unverifiable callbacks or receipts,
+  unavailable recovery, cancellation before attested callback, replay conflicts,
+  and every adversarial vector produce only the closed `waiting_for_human`
+  projection; Ananke cannot infer an execution result.
+- The handoff admits sealed identity hashes, fixed enums, and attestation
+  references only. Secrets, raw paths, source/evidence bytes, prompt/prose
+  authority, command/argv/environment authority, and a usable execution
+  endpoint are forbidden. MoA role labels grant nothing without a typed signed
+  grant plus exact route and release binding; runtime integration and fallback
+  remain absent/forbidden.
+
+#### Verification
+
+- Passed exactly:
+
+  ```sh
+  node --check contracts/p3d/verify.mjs
+  node contracts/p3d/verify.mjs
+  node contracts/p3d/verify.mjs --self-test
+  node --check contracts/p3f/verify.mjs
+  node contracts/p3f/verify.mjs
+  node contracts/p3f/verify.mjs --self-test
+  ```
+
+- The P3d normal/self-test gate retained its closed route-aware source and
+  no-outcome-inference boundary. The P3f normal gate checked the full P3d →
+  activation → Darwin `none_fail_closed` → remote-handoff byte chain. Its
+  self-test rejected predecessor, route, envelope, release, trust-root,
+  callback/result, cancellation/recovery, replay, MoA, authority-transmission,
+  and non-`waiting_for_human` drift.
+
+#### Boundary
+
+- The gates read fixture bytes and mutate in-memory copies only. No OMP,
+  supervisor, remote service, network delivery, request, callback, child,
+  local execution, artifact/source/evidence descriptor, sandbox, command,
+  target verification execution, commit, or push occurred.
+
+#### Terminal verdict
+
+- **PASS:** P3f now freezes the external independently trusted supervisor
+  handoff as a precise fail-closed design contract without granting or
+  exercising local or remote execution authority.

@@ -12,6 +12,8 @@ const fixtureNames = [
   "preflight-red-flags-v1.canonical.json",
   "production-exec-fd-design-v1.canonical.json",
   "exec-fd-red-flags-v1.canonical.json",
+  "external-supervisor-handoff-v1.canonical.json",
+  "external-supervisor-red-flags-v1.canonical.json",
 ];
 const fixtureHashVersion = "ananke-omp-production-activation-contract-v1";
 const canonicalFixtureDigests = new Map([
@@ -19,6 +21,8 @@ const canonicalFixtureDigests = new Map([
   ["preflight-red-flags-v1.canonical.json", "73e8563b1cf7b9ab6c0319b2458d524ecdccea2448225be195ee5582dd808b9a"],
   ["production-exec-fd-design-v1.canonical.json", "9cc58dec80462815cc8a3fc282436587ae4cfae5556459eacad726a3c0d85cc5"],
   ["exec-fd-red-flags-v1.canonical.json", "f10f9c9df50a7120c8d59b07f86477f75221c5e2b5c963a33b9b4d86db78386c"],
+  ["external-supervisor-handoff-v1.canonical.json", "8c5d97165d8f26a06ba649176674174bebb6204041e649f9a2b01e8aa4e7b658"],
+  ["external-supervisor-red-flags-v1.canonical.json", "3fc57a4dd1040e684b2ea04546a37803edb37807bbcf3a17ddb940bf5a4dac92"],
 ]);
 const p3dCanonicalDigest = "9c8ca561416c82f98ad49d08c625bb5b11be468fb306cd254e7700468ac0e7f3";
 const p3dManifest = [
@@ -52,7 +56,7 @@ const hashPattern = /^sha256:[0-9a-f]{64}$/;
 const gitCommitPattern = /^[0-9a-f]{40}$/;
 const identifierPattern = /^[a-z][a-z0-9_]{2,63}$/;
 const timestampPattern = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?Z$/;
-const forbiddenRawFragments = ["command", "credential", "environment", "error", "exec", "instruction", "password", "path", "pid", "prompt", "prose", "secret", "socket", "token"];
+const forbiddenRawFragments = ["argument", "argv", "command", "credential", "environment", "error", "exec", "instruction", "password", "path", "pid", "prompt", "prose", "raw", "secret", "socket", "token"];
 
 function optionValue(name) {
   const index = process.argv.indexOf(name);
@@ -141,8 +145,10 @@ function normalizedKey(key) {
   return key.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-function isAllowedCredentialPolicy(path, key) {
-  return (path === "$" && key === "credential_policy") || (path === "$.credential_policy" && ["argv_credentials", "environment_credentials"].includes(key));
+function isAllowedAuthorityMetadata(path, key) {
+  return (path === "$" && key === "credential_policy")
+    || (path === "$.credential_policy" && ["argv_credentials", "environment_credentials"].includes(key))
+    || (path === "$.p3f_binding" && key === "exec_fd_design_fixture_sha256");
 }
 
 function assertNoRawAuthority(value, path = "$") {
@@ -154,7 +160,7 @@ function assertNoRawAuthority(value, path = "$") {
   for (const [key, entry] of Object.entries(value)) {
     const normalized = normalizedKey(key);
     assert.ok(
-      isAllowedCredentialPolicy(path, key) || !forbiddenRawFragments.some((fragment) => normalized === fragment || normalized.startsWith(fragment) || normalized.endsWith(fragment)),
+      isAllowedAuthorityMetadata(path, key) || !forbiddenRawFragments.some((fragment) => normalized === fragment || normalized.startsWith(fragment) || normalized.endsWith(fragment)),
       `forbidden raw authority field ${path}.${key}`,
     );
     assertNoRawAuthority(entry, `${path}.${key}`);
@@ -666,6 +672,275 @@ function verifyExecFdRedFlagsFixture(value, canonical) {
   });
 }
 
+function assertRemoteArtifactIdentity(value, name) {
+  expectKeys(value, ["build_identity_hash", "release_approval_hash", "release_attestation_hash", "supervisor_artifact_sha256"], name);
+  Object.entries(value).forEach(([key, entry]) => assertHash(entry, `${name}.${key}`));
+  assert.deepEqual(value, {
+    build_identity_hash: "sha256:771b9391bb1445c5186b7033c1eed137eafbc4afeca5a7dc712ea8993d57e0df",
+    release_approval_hash: "sha256:65509b813e0563c23b6f871e9005f4db76d5790cc325267e3963d3672cd60fe6",
+    release_attestation_hash: "sha256:2ac3954f26baa6a33f87f455f6081beeb9ed27725ad4d56961be2fda86662475",
+    supervisor_artifact_sha256: "sha256:fe7ce7ab9cb07d010a0a02526674efeb486fecc50ce07699acac5a305179588d",
+  }, `${name} independent supervisor artifact identity`);
+}
+
+function assertRemoteEvidenceIdentity(value, name) {
+  expectKeys(value, ["evidence_contract_hash", "evidence_schema_version", "typed_content"], name);
+  assertHash(value.evidence_contract_hash, `${name}.evidence_contract_hash`);
+  assert.deepEqual(value, {
+    evidence_contract_hash: "sha256:9309381f36076c263c60d6ef3db5e93b52694d645ffbbef25a4d87dce6459a05",
+    evidence_schema_version: "ananke.remote-supervisor-evidence.v1",
+    typed_content: "hashes_and_enums_only",
+  }, `${name} hash-only evidence identity`);
+}
+
+function assertRemoteRouteMapping(value, activation) {
+  expectKeys(value, ["p3d_route", "p3d_wrapper_kind", "supervisor_protocol", "supervisor_route", "supervisor_wrapper_kind"], "remote supervisor route mapping");
+  assert.deepEqual(value, {
+    p3d_route: activation.approved_wrapper.route,
+    p3d_wrapper_kind: activation.approved_wrapper.wrapper_kind,
+    supervisor_protocol: "ananke.remote-supervisor-handoff.v1",
+    supervisor_route: "ananke_remote_supervisor_omp_readonly_audit_v1",
+    supervisor_wrapper_kind: "ananke_remote_supervisor_omp_readonly_wrapper_v1",
+  }, "remote supervisor route-aware wrapper mapping");
+}
+
+function assertRemoteP3fBinding(value, activation, execFdDesign, anchor) {
+  expectKeys(value, ["activation_fixture_sha256", "exec_fd_design_fixture_sha256", "p3d_fixture_sha256", "p3d_host_spec_hash", "p3f_wrapper_binary_sha256", "source_manifest_hash", "source_snapshot_hash"], "remote supervisor P3d/P3f binding");
+  Object.entries(value).forEach(([key, entry]) => assertHash(entry, `remote supervisor P3d/P3f binding.${key}`));
+  assert.deepEqual(value, {
+    activation_fixture_sha256: `sha256:${canonicalFixtureDigests.get("production-activation-v1.canonical.json")}`,
+    exec_fd_design_fixture_sha256: `sha256:${canonicalFixtureDigests.get("production-exec-fd-design-v1.canonical.json")}`,
+    p3d_fixture_sha256: `sha256:${p3dCanonicalDigest}`,
+    p3d_host_spec_hash: anchor.host_spec_hash,
+    p3f_wrapper_binary_sha256: activation.approved_wrapper.binary_sha256,
+    source_manifest_hash: activation.source_manifest_hash,
+    source_snapshot_hash: anchor.required_source_snapshot_hash,
+  }, "remote supervisor must bind exact P3d/P3f identities");
+  assert.equal(execFdDesign.route_mapping.p3d_route, activation.approved_wrapper.route, "exec-by-FD route predecessor binding");
+}
+
+function assertSealedLaunchEnvelope(value, routeMapping, activation, anchor) {
+  expectKeys(value, ["attempt_cap", "attempt_number", "deadline", "envelope_hash", "evidence_identity", "fence_binding_hash", "handoff_id", "idempotency_key_hash", "route_mapping_hash", "schema_version", "source_identity", "supervisor_artifact_identity"], "sealed remote launch envelope");
+  assert.equal(value.schema_version, "ananke.remote-supervisor-sealed-launch-envelope.v1", "sealed launch envelope schema version");
+  assert.ok(Number.isInteger(value.attempt_number) && value.attempt_number === 1, "sealed launch envelope initial attempt");
+  assert.equal(value.attempt_cap, 3, "sealed launch envelope P3d attempt cap");
+  assertTimestamp(value.deadline, "sealed launch envelope deadline");
+  assert.equal(value.deadline, anchor.deadline, "sealed launch envelope P3d deadline binding");
+  assertIdentifier(value.handoff_id, "sealed launch envelope handoff id");
+  ["envelope_hash", "fence_binding_hash", "idempotency_key_hash", "route_mapping_hash"].forEach((key) => assertHash(value[key], `sealed launch envelope ${key}`));
+  assert.equal(value.fence_binding_hash, "sha256:9a4f8c7e6d5b3a2910f1e2d3c4b5a697887766554433221100ffeeddccbbaa99", "sealed launch envelope fence binding");
+  assert.equal(value.route_mapping_hash, hashCanonical(routeMapping), "sealed launch envelope route mapping hash");
+  expectKeys(value.source_identity, ["p3d_required_source_snapshot_hash", "repository_identity", "source_manifest_hash"], "sealed launch envelope source identity");
+  assert.deepEqual(value.source_identity, {
+    p3d_required_source_snapshot_hash: anchor.required_source_snapshot_hash,
+    repository_identity: repositoryIdentity,
+    source_manifest_hash: activation.source_manifest_hash,
+  }, "sealed launch envelope P3d/P3f source identity");
+  assertRemoteArtifactIdentity(value.supervisor_artifact_identity, "sealed launch envelope supervisor artifact identity");
+  assertRemoteEvidenceIdentity(value.evidence_identity, "sealed launch envelope evidence identity");
+  const { envelope_hash, ...hashInput } = value;
+  assert.equal(envelope_hash, hashCanonical(hashInput), "sealed launch envelope canonical hash");
+}
+
+function assertRemoteReleaseProvenance(value) {
+  expectKeys(value, ["artifact_identity", "attestation_schema_version", "independence", "release_root_id", "verification"], "remote supervisor release provenance");
+  assertRemoteArtifactIdentity(value.artifact_identity, "remote supervisor release artifact identity");
+  assert.deepEqual(value, {
+    artifact_identity: value.artifact_identity,
+    attestation_schema_version: "ananke.remote-supervisor-release-attestation.v1",
+    independence: "separate_from_ananke_builder_launcher_and_supervisor_runtime",
+    release_root_id: "ananke_remote_supervisor_release_root_v1",
+    verification: {
+      caller_supplied_artifact: "reject",
+      detached_attestation: "required",
+      dynamic_build: "reject",
+      independent_release_approval: "required",
+      self_consistency: "reject",
+      test_fixture: "reject",
+    },
+  }, "remote supervisor independently trusted release provenance");
+}
+
+function assertRemoteTrustRootRotation(value) {
+  expectKeys(value, ["active_root_id", "downgrade", "invalid_or_unknown_root", "rotation", "successor_root_id", "trust_bundle_hash"], "remote supervisor trust-root rotation");
+  assertHash(value.trust_bundle_hash, "remote supervisor trust-root bundle hash");
+  assert.deepEqual(value, {
+    active_root_id: "ananke_remote_supervisor_release_root_v1",
+    downgrade: "forbidden",
+    invalid_or_unknown_root: "waiting_for_human",
+    rotation: "cross_signed_active_and_successor_roots_with_validity_overlap",
+    successor_root_id: "ananke_remote_supervisor_release_root_v2",
+    trust_bundle_hash: "sha256:5d96e5453136ca8c722ee5d00e618eb14d3d4407df889c98a2cb982dff0caa15",
+  }, "remote supervisor trust-root rotation policy");
+}
+
+function assertRemoteCallbackResultContract(value) {
+  expectKeys(value, ["absent_or_unverifiable", "callback_authentication", "callback_schema_version", "result_content", "result_schema_version", "terminal_authority"], "remote supervisor callback/result contract");
+  assert.deepEqual(value, {
+    absent_or_unverifiable: "waiting_for_human_no_outcome_inference",
+    callback_authentication: "current_trust_root_signature_and_envelope_binding_required",
+    callback_schema_version: "ananke.remote-supervisor-callback.v1",
+    result_content: "typed_terminal_state_and_identity_hashes_only",
+    result_schema_version: "ananke.remote-supervisor-result.v1",
+    terminal_authority: "authenticated_callback_with_attested_evidence_only",
+  }, "remote supervisor callback/result no-inference policy");
+}
+
+function assertRemoteDurableAuthority(value) {
+  expectKeys(value, ["acceptance_receipt_schema_version", "authority_origin", "authority_state", "local_execution", "persistence"], "remote supervisor durable authority");
+  assert.deepEqual(value, {
+    acceptance_receipt_schema_version: "ananke.remote-supervisor-acceptance-receipt.v1",
+    authority_origin: "independently_trusted_supervisor_durable_receipt_only",
+    authority_state: "future_remote_supervisor_receipt_required_not_accepted",
+    local_execution: "forbidden_none_fail_closed_no_path_launch",
+    persistence: "envelope_hash_and_authenticated_receipt_identity_only",
+  }, "remote supervisor durable-authority boundary");
+}
+
+function assertRemoteReplayIdempotency(value) {
+  expectKeys(value, ["attempt_progression", "callback_deduplication", "conflict", "submission"], "remote supervisor replay/idempotency");
+  assert.deepEqual(value, {
+    attempt_progression: "strictly_increasing_same_handoff_within_attempt_cap",
+    callback_deduplication: "handoff_attempt_callback_identity_hash",
+    conflict: "same_identity_different_binding_waiting_for_human",
+    submission: "same_envelope_hash_and_idempotency_key_returns_same_receipt_only",
+  }, "remote supervisor replay/idempotency policy");
+}
+
+function assertRemoteCancellationRecovery(value) {
+  expectKeys(value, ["cancellation", "recovery"], "remote supervisor cancellation/recovery");
+  assert.deepEqual(value, {
+    cancellation: {
+      authorization: "authenticate_full_private_fence_and_durable_receipt",
+      outcome_before_attested_callback: "unknown_waiting_for_human",
+      replay: "same_cancel_identity_returns_same_acknowledgement_only",
+      scope: "bound_handoff_and_attempt_only",
+    },
+    recovery: {
+      no_response: "waiting_for_human",
+      outcome_inference: "forbidden",
+      reconciliation: "authenticated_current_trust_root_and_durable_receipt_only",
+      unverified_receipt: "waiting_for_human",
+    },
+  }, "remote supervisor cancellation/recovery no-inference policy");
+}
+
+function assertRemoteMoaTypedRoleGrantBoundary(value) {
+  expectKeys(value, ["fallback", "grant_requirement", "roles", "runtime_integration", "schema_version"], "MoA typed-role grant boundary");
+  assert.deepEqual(value, {
+    fallback: "forbidden",
+    grant_requirement: "typed_signed_grant_route_mapping_and_release_binding_required",
+    roles: [
+      { capability: "seal_identity_bound_envelope_only", role: "ananke_handoff_authority" },
+      { capability: "not_admitted_without_typed_signed_grant", role: "moa_route_selector" },
+      { capability: "not_admitted_without_typed_signed_grant", role: "moa_provider_delegate" },
+      { capability: "accept_exact_route_mapping_only", role: "remote_supervisor_runner" },
+      { capability: "append_attested_hash_bound_evidence_only", role: "remote_evidence_recorder" },
+    ],
+    runtime_integration: "absent",
+    schema_version: "ananke.moa-typed-role-grant-boundary.v1",
+  }, "MoA typed-role grant boundary");
+}
+
+function assertRemoteTransmissionBoundary(value) {
+  expectKeys(value, ["allowed_content", "forbidden_content", "local_path_execution"], "remote supervisor transmission boundary");
+  assert.deepEqual(value, {
+    allowed_content: "sealed_identity_hashes_bound_enums_and_attestation_references_only",
+    forbidden_content: ["secrets", "raw_paths", "prompt_authority", "raw_source", "raw_evidence"],
+    local_path_execution: "forbidden",
+  }, "remote supervisor no-secret/no-path/no-prompt transmission boundary");
+}
+
+function verifyRemoteHandoffFixture(value, activation, execFdDesign, anchor) {
+  assertNoRawAuthority(value);
+  expectKeys(value, ["callback_result_contract", "cancellation_recovery", "contract_state", "durable_authority", "failure_projection", "moa_typed_role_grant_boundary", "p3f_binding", "replay_idempotency", "route_mapping", "schema_version", "sealed_launch_envelope", "supervisor_release_provenance", "supervisor_trust_root_rotation", "transmission_boundary"], "remote supervisor handoff design fixture");
+  assert.equal(value.schema_version, "ananke.remote-supervisor-handoff-design.v1", "remote supervisor handoff design schema version");
+  assert.equal(value.contract_state, "design_only_no_remote_delivery_or_execution", "remote supervisor handoff must be design-only");
+  assertRemoteP3fBinding(value.p3f_binding, activation, execFdDesign, anchor);
+  assertRemoteRouteMapping(value.route_mapping, activation);
+  assertSealedLaunchEnvelope(value.sealed_launch_envelope, value.route_mapping, activation, anchor);
+  assertRemoteReleaseProvenance(value.supervisor_release_provenance);
+  assert.deepEqual(value.sealed_launch_envelope.supervisor_artifact_identity, value.supervisor_release_provenance.artifact_identity, "sealed envelope and release artifact identity binding");
+  assertRemoteTrustRootRotation(value.supervisor_trust_root_rotation);
+  assertRemoteCallbackResultContract(value.callback_result_contract);
+  assertRemoteDurableAuthority(value.durable_authority);
+  assertRemoteReplayIdempotency(value.replay_idempotency);
+  assertRemoteCancellationRecovery(value.cancellation_recovery);
+  assertRemoteMoaTypedRoleGrantBoundary(value.moa_typed_role_grant_boundary);
+  assertRemoteTransmissionBoundary(value.transmission_boundary);
+  assertFailClosed(value.failure_projection, "remote supervisor failure projection");
+}
+
+function assertRemoteRedFlagGiven(testCase) {
+  const expected = [
+    ["local_path_launcher", { mechanism: "execve_path" }],
+    ["local_fd_indirection", { mechanism: "dev_fd_indirection" }],
+    ["untrusted_supervisor_release", { provenance: "caller_supplied_artifact" }],
+    ["supervisor_route_mapping_drift", { supervisor_route: "other_route" }],
+    ["source_identity_drift", { source_snapshot_hash: `sha256:${"9".repeat(64)}` }],
+    ["artifact_identity_drift", { supervisor_artifact_sha256: `sha256:${"8".repeat(64)}` }],
+    ["evidence_identity_drift", { evidence_contract_hash: `sha256:${"7".repeat(64)}` }],
+    ["fence_authentication_downgrade", { authorization: "fence_fingerprint_only" }],
+    ["deadline_drift", { deadline: "2026-07-30T12:00:01Z" }],
+    ["attempt_cap_drift", { attempt_cap: 4 }],
+    ["unsigned_callback", { authentication: "unsigned" }],
+    ["unknown_callback_schema", { schema_version: "ananke.unknown-supervisor-callback.v1" }],
+    ["callback_outcome_inference", { decision: "infer_completed_without_authenticated_callback" }],
+    ["no_response", { response_state: "absent" }],
+    ["unauthenticated_cancellation", { authorization: "receipt_only" }],
+    ["recovery_outcome_inference", { decision: "infer_completed_from_missing_callback" }],
+    ["replay_binding_conflict", { binding: "same_handoff_different_envelope" }],
+    ["trust_root_rotation_downgrade", { rotation: "single_root_replace" }],
+    ["unknown_trust_root", { root_id: "ananke_remote_supervisor_release_root_unknown" }],
+    ["ungranted_moa_role", { role: "moa_provider_delegate" }],
+    ["moa_runtime_fallback", { fallback: "enabled" }],
+    ["forbidden_transmission_content", { content_class: "prompt_authority" }],
+    ["unknown_result_schema", { schema_version: "ananke.unknown-supervisor-result.v1" }],
+  ];
+  const match = expected.find(([kind]) => kind === testCase.kind);
+  assert.ok(match, `unsupported remote supervisor red flag ${testCase.kind}`);
+  expectKeys(testCase.given, Object.keys(match[1]), `${testCase.id} given`);
+  assert.deepEqual(testCase.given, match[1], `${testCase.id} given`);
+}
+
+function verifyRemoteRedFlagsFixture(value) {
+  assertNoRawAuthority(value);
+  expectKeys(value, ["cases", "schema_version"], "remote supervisor red flags fixture");
+  assert.equal(value.schema_version, "ananke.remote-supervisor-handoff-design.red-flags.v1", "remote supervisor red flags schema version");
+  const expected = [
+    ["local_path_launcher_waits_for_human", "local_path_launcher"],
+    ["local_fd_indirection_waits_for_human", "local_fd_indirection"],
+    ["caller_artifact_waits_for_human", "untrusted_supervisor_release"],
+    ["supervisor_route_mapping_drift_waits_for_human", "supervisor_route_mapping_drift"],
+    ["source_snapshot_identity_drift_waits_for_human", "source_identity_drift"],
+    ["supervisor_artifact_identity_drift_waits_for_human", "artifact_identity_drift"],
+    ["evidence_identity_drift_waits_for_human", "evidence_identity_drift"],
+    ["fence_authentication_downgrade_waits_for_human", "fence_authentication_downgrade"],
+    ["deadline_drift_waits_for_human", "deadline_drift"],
+    ["attempt_cap_drift_waits_for_human", "attempt_cap_drift"],
+    ["unsigned_callback_waits_for_human", "unsigned_callback"],
+    ["unknown_callback_schema_waits_for_human", "unknown_callback_schema"],
+    ["callback_outcome_inference_waits_for_human", "callback_outcome_inference"],
+    ["no_response_waits_for_human", "no_response"],
+    ["unauthenticated_cancellation_waits_for_human", "unauthenticated_cancellation"],
+    ["recovery_outcome_inference_waits_for_human", "recovery_outcome_inference"],
+    ["replay_binding_conflict_waits_for_human", "replay_binding_conflict"],
+    ["trust_root_rotation_downgrade_waits_for_human", "trust_root_rotation_downgrade"],
+    ["unknown_trust_root_waits_for_human", "unknown_trust_root"],
+    ["ungranted_moa_role_waits_for_human", "ungranted_moa_role"],
+    ["moa_runtime_fallback_waits_for_human", "moa_runtime_fallback"],
+    ["prompt_authority_transmission_waits_for_human", "forbidden_transmission_content"],
+    ["unknown_result_schema_waits_for_human", "unknown_result_schema"],
+  ];
+  assert.ok(Array.isArray(value.cases) && value.cases.length === expected.length, "remote supervisor red flag inventory");
+  value.cases.forEach((testCase, index) => {
+    expectKeys(testCase, ["given", "id", "kind", "then"], `remote supervisor red flag ${index + 1}`);
+    assert.deepEqual([testCase.id, testCase.kind], expected[index], `remote supervisor red flag ${index + 1} identity`);
+    assertRemoteRedFlagGiven(testCase);
+    assertFailClosed(testCase.then, `remote supervisor red flag ${testCase.id}`);
+  });
+}
+
 async function readManifest(directory) {
   const text = await readFile(join(directory, "fixtures.sha256"), "utf8");
   assert.ok(!text.endsWith("\n"), "fixtures.sha256 must not end with a newline");
@@ -716,6 +991,9 @@ async function verify(directory, p3dDirectory) {
   const execFdDesign = fixtures["production-exec-fd-design-v1.canonical.json"];
   verifyExecFdDesignFixture(execFdDesign, activation);
   verifyExecFdRedFlagsFixture(fixtures["exec-fd-red-flags-v1.canonical.json"], execFdDesign);
+  const remoteHandoff = fixtures["external-supervisor-handoff-v1.canonical.json"];
+  verifyRemoteHandoffFixture(remoteHandoff, activation, execFdDesign, anchor);
+  verifyRemoteRedFlagsFixture(fixtures["external-supervisor-red-flags-v1.canonical.json"]);
 }
 
 async function assertRejected(action, pattern, name) {
@@ -728,10 +1006,14 @@ async function selfTest() {
   const { anchor, value: p3dFixture } = await readP3dAnchor(sourceP3dFixtureDirectory);
   const canonicalFixture = fixtures["production-activation-v1.canonical.json"];
   const execFdDesign = fixtures["production-exec-fd-design-v1.canonical.json"];
+  const remoteHandoff = fixtures["external-supervisor-handoff-v1.canonical.json"];
+  const remoteRedFlags = fixtures["external-supervisor-red-flags-v1.canonical.json"];
   verifyCanonicalFixture(canonicalFixture, anchor);
   verifyRedFlagsFixture(fixtures["preflight-red-flags-v1.canonical.json"], canonicalFixture);
   verifyExecFdDesignFixture(execFdDesign, canonicalFixture);
   verifyExecFdRedFlagsFixture(fixtures["exec-fd-red-flags-v1.canonical.json"], execFdDesign);
+  verifyRemoteHandoffFixture(remoteHandoff, canonicalFixture, execFdDesign, anchor);
+  verifyRemoteRedFlagsFixture(remoteRedFlags);
 
   const drifted = structuredClone(canonicalFixture);
   drifted.source_manifest_hash = `sha256:${"9".repeat(64)}`;
@@ -786,6 +1068,26 @@ async function selfTest() {
     await assertRejected(async () => verifyExecFdDesignFixture(fixture, canonicalFixture), pattern, name);
   }
 
+  const remoteMutations = [
+    ["P3d/P3f binding", (fixture) => { fixture.p3f_binding.source_snapshot_hash = `sha256:${"4".repeat(64)}`; }, /exact P3d\/P3f identities/],
+    ["route mapping", (fixture) => { fixture.route_mapping.supervisor_route = "other_route"; }, /route-aware wrapper mapping/],
+    ["sealed envelope hash", (fixture) => { fixture.sealed_launch_envelope.idempotency_key_hash = `sha256:${"3".repeat(64)}`; }, /canonical hash/],
+    ["release provenance", (fixture) => { fixture.supervisor_release_provenance.verification.self_consistency = "accepted"; }, /independently trusted release provenance/],
+    ["trust-root rotation", (fixture) => { fixture.supervisor_trust_root_rotation.rotation = "single_root_replace"; }, /trust-root rotation policy/],
+    ["callback authentication", (fixture) => { fixture.callback_result_contract.callback_authentication = "unsigned"; }, /callback\/result no-inference policy/],
+    ["durable authority", (fixture) => { fixture.durable_authority.local_execution = "allowed"; }, /durable-authority boundary/],
+    ["replay conflict", (fixture) => { fixture.replay_idempotency.conflict = "accept"; }, /replay\/idempotency policy/],
+    ["recovery inference", (fixture) => { fixture.cancellation_recovery.recovery.outcome_inference = "allowed"; }, /cancellation\/recovery no-inference policy/],
+    ["MoA runtime integration", (fixture) => { fixture.moa_typed_role_grant_boundary.runtime_integration = "present"; }, /typed-role grant boundary/],
+    ["transmission boundary", (fixture) => { fixture.transmission_boundary.forbidden_content = []; }, /no-secret\/no-path\/no-prompt transmission boundary/],
+    ["raw authority", (fixture) => { fixture.sealed_launch_envelope.prompt = "forbidden"; }, /forbidden raw authority field/],
+  ];
+  for (const [name, mutate, pattern] of remoteMutations) {
+    const fixture = structuredClone(remoteHandoff);
+    mutate(fixture);
+    await assertRejected(async () => verifyRemoteHandoffFixture(fixture, canonicalFixture, execFdDesign, anchor), pattern, name);
+  }
+
   const p3dDrift = structuredClone(p3dFixture);
   p3dDrift.host_spec.adapter.route = "other_route";
   await assertRejected(async () => assertP3dAnchor(p3dDrift), /P3d route pair/, "P3d route chain drift");
@@ -803,15 +1105,22 @@ async function selfTest() {
   execFdRedFlags.cases[0] = structuredClone(fixtures["exec-fd-red-flags-v1.canonical.json"].cases[0]);
   execFdRedFlags.cases[8].given.fd = "7";
   await assertRejected(async () => verifyExecFdRedFlagsFixture(execFdRedFlags, execFdDesign), /given/, "exec-by-FD red flag drift");
+
+  const remoteFlags = structuredClone(remoteRedFlags);
+  remoteFlags.cases[13].then.state = "completed";
+  await assertRejected(async () => verifyRemoteRedFlagsFixture(remoteFlags), /normalized waiting_for_human/, "remote no-response information leak");
+  remoteFlags.cases[13] = structuredClone(remoteRedFlags.cases[13]);
+  remoteFlags.cases[17].given.rotation = "accepted";
+  await assertRejected(async () => verifyRemoteRedFlagsFixture(remoteFlags), /given/, "remote trust-root red flag drift");
 }
 
 if (process.argv.includes("--self-test")) {
   await selfTest();
-  console.log("P3f production activation self-test rejected source-manifest and P3d-chain drift, wrapper/route and FD/sandbox/cleanup-policy drift, credential channels, and all Darwin exec-by-FD design drift: path or /dev/fd launch, FD transport misuse, untrusted or fake artifacts, transcript/evidence, typed-role, cancellation/recovery, and non-waiting-for-human red flags.");
+  console.log("P3f production activation self-test rejected source-manifest and P3d-chain drift, wrapper/route and FD/sandbox/cleanup-policy drift, credential channels, Darwin exec-by-FD drift, and remote-supervisor handoff drift across authority, provenance, route, envelope, callback/result, cancellation/recovery, replay, trust-root, MoA, transmission, and waiting-for-human failures.");
 } else {
   await verify(
     resolve(optionValue("--fixtures") ?? sourceFixtureDirectory),
     resolve(optionValue("--p3d-fixtures") ?? sourceP3dFixtureDirectory),
   );
-  console.log("P3f production activation fixtures verified: P3d-bound activation, FD-only preflight, and the Darwin macOS 27 exec-by-FD design chain. Darwin has no admitted native FD image selector; the only allowed mechanism is none/fail-closed before a child, while a future independently trusted wrapper requires P3f-bound route, provenance, sandbox, FD, evidence, cleanup, and typed-role policy checks.");
+  console.log("P3f production activation fixtures verified: P3d-bound activation, FD-only preflight, the Darwin macOS 27 exec-by-FD design chain, and the external independently trusted supervisor handoff design. Darwin remains none/fail-closed before a child; remote authority is future-only and requires exact P3d/P3f bindings, sealed envelope, independent release provenance, authenticated fence/deadline/cap, trust-root rotation, typed results, no-inference recovery, and MoA grants.");
 }
