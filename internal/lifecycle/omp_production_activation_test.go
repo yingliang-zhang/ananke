@@ -2,14 +2,11 @@ package lifecycle
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,12 +14,10 @@ import (
 	"github.com/yingliang-zhang/ananke/internal/store"
 )
 
-const ompProductionFakeWrapperArtifactSHA256 = "sha256:844afd703c0709afe8d5861c214fd2e0fd04abc498d47e655e6d41472fe73ec1"
-
 const canonicalP3dSourceSnapshotSHA256 = "sha256:1d19f39b6c1f3db6164580e9903d4ac129a4c387d4eea25d5baab1b0f1c2d3e4"
 
-func TestOMPProductionActivationPreparesSealedFakeWrapperFDRequest(t *testing.T) {
-	approval := ompProductionFakeWrapperApproval(t)
+func TestOMPProductionActivationPreparesPinnedWrapperFDRequest(t *testing.T) {
+	approval := ompProductionApprovedWrapperIdentityForTest()
 	journal, fence := newP3fAdmittedFence(t)
 	preparer, err := newOMPProductionActivationPreparer(journal, approval, func() time.Time {
 		return time.Date(2026, 7, 30, 11, 0, 0, 0, time.UTC)
@@ -81,7 +76,7 @@ func TestOMPProductionActivationPreparationFailsClosed(t *testing.T) {
 		{name: "aliased descriptors", mutate: func(input *ompProductionActivationInput) { input.descriptors.manifest = input.descriptors.source }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			approval := ompProductionFakeWrapperApproval(t)
+			approval := ompProductionApprovedWrapperIdentityForTest()
 			journal, fence := newP3fAdmittedFence(t)
 			preparer, err := newOMPProductionActivationPreparer(journal, approval, func() time.Time {
 				return time.Date(2026, 7, 30, 11, 0, 0, 0, time.UTC)
@@ -99,7 +94,7 @@ func TestOMPProductionActivationPreparationFailsClosed(t *testing.T) {
 }
 
 func TestOMPProductionActivationPreparationRejectsExpiredDeadline(t *testing.T) {
-	approval := ompProductionFakeWrapperApproval(t)
+	approval := ompProductionApprovedWrapperIdentityForTest()
 	journal, fence := newP3fAdmittedFence(t)
 	preparer, err := newOMPProductionActivationPreparer(journal, approval, func() time.Time {
 		return time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
@@ -113,7 +108,7 @@ func TestOMPProductionActivationPreparationRejectsExpiredDeadline(t *testing.T) 
 }
 
 func TestOMPProductionActivationPreparationRejectsNilContext(t *testing.T) {
-	approval := ompProductionFakeWrapperApproval(t)
+	approval := ompProductionApprovedWrapperIdentityForTest()
 	journal, fence := newP3fAdmittedFence(t)
 	preparer, err := newOMPProductionActivationPreparer(journal, approval, func() time.Time {
 		return time.Date(2026, 7, 30, 11, 0, 0, 0, time.UTC)
@@ -127,7 +122,7 @@ func TestOMPProductionActivationPreparationRejectsNilContext(t *testing.T) {
 }
 
 func TestOMPProductionActivationRejectsUnapprovedWrapperManifest(t *testing.T) {
-	approval := ompProductionFakeWrapperApproval(t)
+	approval := ompProductionApprovedWrapperIdentityForTest()
 	for _, tc := range []struct {
 		name   string
 		mutate func(*ompApprovedWrapperIdentityManifest)
@@ -243,22 +238,8 @@ func normalizeOMPProductionASTName(value string) string {
 	}, strings.ToLower(value))
 }
 
-func ompProductionFakeWrapperApproval(t *testing.T) ompApprovedWrapperIdentityManifest {
-	t.Helper()
-	artifact, err := os.ReadFile(filepath.Join("testdata", "omp-production-fake-wrapper-v1"))
-	if err != nil {
-		t.Fatalf("read fake wrapper artifact: %v", err)
-	}
-	digest := sha256.Sum256(artifact)
-	if got := "sha256:" + hex.EncodeToString(digest[:]); got != ompProductionFakeWrapperArtifactSHA256 {
-		t.Fatalf("fake wrapper artifact SHA-256 = %q, want sealed %q", got, ompProductionFakeWrapperArtifactSHA256)
-	}
-	return ompApprovedWrapperIdentityManifest{
-		schemaVersion: "ananke.omp-production-wrapper-identity.v1",
-		binarySHA256:  ompProductionFakeWrapperArtifactSHA256,
-		kind:          "ananke_omp_readonly_wrapper_v1",
-		route:         "ananke_omp_read_only_audit_v1",
-	}
+func ompProductionApprovedWrapperIdentityForTest() ompApprovedWrapperIdentityManifest {
+	return ompProductionApprovedWrapperIdentity()
 }
 
 func ompProductionActivationInputForTest(t *testing.T, approval ompApprovedWrapperIdentityManifest, fence store.LaunchFence) ompProductionActivationInput {

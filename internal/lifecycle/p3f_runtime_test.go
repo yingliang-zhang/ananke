@@ -88,11 +88,15 @@ func TestP3FFakeChild(t *testing.T) {
 	}
 }
 
-// TestP3FProductionBuildExcludesFakeExecution proves that the P3f execution
+// TestP3FProductionBuildExcludesFakeExecution proves that every P3f execution
 // proof is test-only. It examines the compiler's non-test file set instead of
 // trusting a package-private comment or an unreachable callsite.
 func TestP3FProductionBuildExcludesFakeExecution(t *testing.T) {
-	const fakeRuntimeSource = "p3f_fake_runtime_test.go"
+	const (
+		fakeRuntimeSource   = "p3f_fake_runtime_test.go"
+		fakeExecutionSource = "omp_production_fake_execution_test.go"
+		productionExecution = "omp_production_execution.go"
+	)
 
 	command := exec.Command("go", "list", "-json", ".")
 	command.Env = os.Environ()
@@ -108,14 +112,17 @@ func TestP3FProductionBuildExcludesFakeExecution(t *testing.T) {
 		t.Fatalf("decode production lifecycle package listing: %v", err)
 	}
 	for _, name := range listed.GoFiles {
-		if strings.Contains(strings.ToLower(name), "p3f") {
-			t.Fatalf("P3f source %q is compiled into the production lifecycle package", name)
+		if strings.Contains(strings.ToLower(name), "p3f") || name == productionExecution {
+			t.Fatalf("P3f execution source %q is compiled into the production lifecycle package", name)
 		}
 	}
-	if p3fListedFile(listed.GoFiles, fakeRuntimeSource) || !p3fListedFile(listed.TestGoFiles, fakeRuntimeSource) {
-		t.Fatalf("fake runtime build selection = production:%v test:%v, want test-only %q", listed.GoFiles, listed.TestGoFiles, fakeRuntimeSource)
+	for _, source := range []string{fakeRuntimeSource, fakeExecutionSource} {
+		if p3fListedFile(listed.GoFiles, source) || !p3fListedFile(listed.TestGoFiles, source) {
+			t.Fatalf("fake execution build selection = production:%v test:%v, want test-only %q", listed.GoFiles, listed.TestGoFiles, source)
+		}
 	}
 	p3fAssertHardBoundTestExecution(t, fakeRuntimeSource)
+	p3fAssertHardBoundFakeWrapperExecution(t, fakeExecutionSource)
 }
 
 func p3fListedFile(files []string, want string) bool {
@@ -253,6 +260,53 @@ func p3fAssertSeatbeltUsesTestBinary(t *testing.T, file *ast.File) {
 	})
 	if !usesTestBinary {
 		t.Fatal("P3f Seatbelt launcher is not hard-bound to the test binary")
+	}
+}
+
+func p3fAssertHardBoundFakeWrapperExecution(t *testing.T, source string) {
+	t.Helper()
+	fileSet := token.NewFileSet()
+	parsed, err := parser.ParseFile(fileSet, source, nil, 0)
+	if err != nil {
+		t.Fatalf("parse fake wrapper execution source: %v", err)
+	}
+
+	var start *ast.FuncDecl
+	for _, declaration := range parsed.Decls {
+		candidate, ok := declaration.(*ast.FuncDecl)
+		if !ok || candidate.Name.Name != "start" || candidate.Recv == nil || len(candidate.Recv.List) != 1 {
+			continue
+		}
+		receiver, ok := candidate.Recv.List[0].Type.(*ast.Ident)
+		if ok && receiver.Name == "ompProductionFakeTestBinarySandbox" {
+			start = candidate
+			break
+		}
+	}
+	if start == nil {
+		t.Fatal("missing test-only fixed-binary fake wrapper sandbox")
+	}
+
+	usesTestBinary := false
+	usesFakeChild := false
+	ast.Inspect(start.Body, func(node ast.Node) bool {
+		switch current := node.(type) {
+		case *ast.IndexExpr:
+			arguments, ok := current.X.(*ast.SelectorExpr)
+			index, indexOK := current.Index.(*ast.BasicLit)
+			packageName, packageOK := arguments.X.(*ast.Ident)
+			if ok && indexOK && packageOK && arguments.Sel.Name == "Args" && packageName.Name == "os" && index.Value == "0" {
+				usesTestBinary = true
+			}
+		case *ast.Ident:
+			if current.Name == "ompProductionFakeWrapperChildArgument" {
+				usesFakeChild = true
+			}
+		}
+		return true
+	})
+	if !usesTestBinary || !usesFakeChild {
+		t.Fatalf("fake wrapper sandbox binding = test-binary:%v fake-child:%v, want both fixed", usesTestBinary, usesFakeChild)
 	}
 }
 

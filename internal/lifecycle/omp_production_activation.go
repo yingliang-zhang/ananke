@@ -15,6 +15,7 @@ const (
 	ompProductionP3dHostSpecHash              = "sha256:f176da10c1c055b930b17137d790580400c9a0e6963e967290a19cb608512e8b"
 	ompProductionP3dSourceSnapshotHash        = "sha256:1d19f39b6c1f3db6164580e9903d4ac129a4c387d4eea25d5baab1b0f1c2d3e4"
 	ompProductionSourceManifestHash           = "sha256:842188d5ce1e461839bf33fb50a4040a3bf9f2e44d94c31be640058f5765cc15"
+	ompProductionWrapperBinarySHA256          = "sha256:ac36f5816b1a6caaf4e4bed488e90d94c426cf9f126678c4c0f1eb50dc231a91"
 	ompProductionWrapperKind                  = "ananke_omp_readonly_wrapper_v1"
 	ompProductionWrapperRoute                 = "ananke_omp_read_only_audit_v1"
 )
@@ -137,11 +138,17 @@ func (preparer *ompProductionActivationPreparer) validFence(ctx context.Context,
 	return true
 }
 
+func ompProductionApprovedWrapperIdentity() ompApprovedWrapperIdentityManifest {
+	return ompApprovedWrapperIdentityManifest{
+		schemaVersion: ompProductionWrapperIdentitySchemaVersion,
+		binarySHA256:  ompProductionWrapperBinarySHA256,
+		kind:          ompProductionWrapperKind,
+		route:         ompProductionWrapperRoute,
+	}
+}
+
 func validOMPApprovedWrapperIdentity(identity ompApprovedWrapperIdentityManifest) bool {
-	return identity.schemaVersion == ompProductionWrapperIdentitySchemaVersion &&
-		validOMPSHA256(identity.binarySHA256) &&
-		identity.kind == ompProductionWrapperKind &&
-		identity.route == ompProductionWrapperRoute
+	return identity == ompProductionApprovedWrapperIdentity()
 }
 
 func validOMPProductionActivationDescriptors(descriptors ompProductionActivationDescriptors) bool {

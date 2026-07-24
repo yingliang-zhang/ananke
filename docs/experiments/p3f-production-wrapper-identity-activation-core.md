@@ -5,19 +5,28 @@ wrapper launcher, an OMP adapter, or an activation authority.
 
 ## Current boundary
 
-The core accepts one constructor-approved typed wrapper identity manifest. At
-preparation it requires the P3f wrapper kind/route, P3d source and HostSpec
-hashes, P3f source-manifest hash, exact deadline, P3c
+The core accepts only P3f's exact frozen wrapper identity manifest. At
+preparation it requires the P3f wrapper kind/route and binary identity, P3d
+source and HostSpec hashes, P3f source-manifest hash, exact deadline, P3c
 `retry_process_admission`, and a complete active P3b/P3c fence. It returns
 only the same three typed source/manifest/evidence descriptors; it opens,
 reads, duplicates, closes, or executes none of them.
 
-The test-only `omp-production-fake-wrapper-v1` artifact has a sealed SHA-256.
-It proves identity matching without making an executable available. The
-production package imports no execution package and exposes no executable,
-command, argv, environment, program, or path field. Any invalid, expired, or
-unknown input returns only the stable activation-preparation denial and no
-partially prepared request.
+`omp_production_fake_execution_test.go` contains the entire fake executor. It
+checks the fixed `testdata/omp-production-fake-wrapper-v1` artifact against its
+frozen SHA-256, but executes only the fixed Go test binary as
+`TestOMPProductionFakeWrapperChild`; no artifact path becomes a launcher. The
+compiler `GoFiles` test rejects a production build that includes that fake
+runtime or the removed production execution source. The production package
+therefore has no FD-to-path launcher surface, executable, command, argv,
+environment, program, or path field. Invalid, expired, or unknown input
+returns only the stable activation-preparation denial and no partially prepared
+request.
+
+Real production execution remains blocked. It requires a separately approved
+design for exec-by-FD plus independently trusted artifact identity; a caller
+digest, a dynamically built artifact, or an artifact that validates only its
+own supplied digest is not an approval mechanism.
 
 ## Future `ananke_hybrid_v1` inputs — out of scope
 

@@ -111,6 +111,11 @@ boundary, and every red flag remains `waiting_for_human`.
 Until then P3f is contract-only. It creates no sandbox, wrapper, worktree,
 source snapshot, file descriptor, process, OMP session, command, or child.
 
+Real production execution remains blocked pending a separate approved
+exec-by-FD design with independently trusted artifact identity. It must not
+fall back to a path launcher, caller-provided digest, dynamically built test
+artifact, or self-consistent artifact/digest pair.
+
 ## Artifacts and gate
 
 - `contracts/p3f/fixtures/production-activation-v1.canonical.json` — closed
