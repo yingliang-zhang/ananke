@@ -283,6 +283,67 @@ func (s *Store) ListPendingExternalSupervisorDeliveries(ctx context.Context) ([]
 	return handoffs, nil
 }
 
+// DeliverAndPersistExternalSupervisorReceipt holds the SQLite immediate lock
+// from full private-fence validation through in-process delivery, receipt
+// authentication, and durable receipt persistence. A receipt already durable
+// for the handoff is returned before the delivery callback is invoked.
+func (s *Store) DeliverAndPersistExternalSupervisorReceipt(ctx context.Context, handoffID string, root ExternalSupervisorTrustRoot, authenticator ExternalSupervisorAuthenticator, deliver func(ExternalSupervisorEnvelope) (ExternalSupervisorAcceptanceReceipt, error)) (ExternalSupervisorAcceptanceReceipt, error) {
+	if deliver == nil {
+		return ExternalSupervisorAcceptanceReceipt{}, fmt.Errorf("%w: nil delivery", ErrExternalSupervisorInvalid)
+	}
+	if authenticator == nil || validateExternalSupervisorTrustRoot(root) != nil {
+		return ExternalSupervisorAcceptanceReceipt{}, ErrExternalSupervisorTrustRoot
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ExternalSupervisorAcceptanceReceipt{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	handoff, found, err := loadExternalSupervisorHandoff(ctx, tx, handoffID)
+	if err != nil {
+		return ExternalSupervisorAcceptanceReceipt{}, err
+	}
+	if !found {
+		return ExternalSupervisorAcceptanceReceipt{}, ErrExternalSupervisorNotFound
+	}
+	boundary, err := loadLaunchRecoveryBoundary(ctx, tx, handoff.LaunchSpecHash)
+	if err != nil {
+		return ExternalSupervisorAcceptanceReceipt{}, fmt.Errorf("%w: %v", ErrExternalSupervisorFence, err)
+	}
+	if err := validateExternalSupervisorAdmission(ctx, tx, handoff.Envelope, boundary.Claim.Fence, time.Now().UTC()); err != nil {
+		return ExternalSupervisorAcceptanceReceipt{}, err
+	}
+	existing, found, err := loadExternalSupervisorReceipt(ctx, tx, handoffID)
+	if err != nil {
+		return ExternalSupervisorAcceptanceReceipt{}, err
+	}
+	if found {
+		return existing, nil
+	}
+	receipt, err := deliver(handoff.Envelope)
+	if err != nil {
+		return ExternalSupervisorAcceptanceReceipt{}, err
+	}
+	if err := validateExternalSupervisorReceipt(receipt); err != nil {
+		return ExternalSupervisorAcceptanceReceipt{}, err
+	}
+	if receipt.RootID != root.RootID || receipt.TrustBundleHash != root.TrustBundleHash || authenticator.VerifyExternalSupervisorReceipt(ctx, receipt, root) != nil {
+		return ExternalSupervisorAcceptanceReceipt{}, ErrExternalSupervisorTrustRoot
+	}
+	if err := validateExternalSupervisorReceiptBinding(receipt, handoff.Envelope); err != nil {
+		return ExternalSupervisorAcceptanceReceipt{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO external_supervisor_receipts
+		(receipt_identity_hash, handoff_id, envelope_hash, attempt_number, root_id, trust_bundle_hash, receipt_json, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, receipt.ReceiptIdentityHash, receipt.HandoffID, receipt.EnvelopeHash, receipt.AttemptNumber, receipt.RootID, receipt.TrustBundleHash, mustCanonicalExternalSupervisorReceipt(receipt), nowStamp()); err != nil {
+		return ExternalSupervisorAcceptanceReceipt{}, fmt.Errorf("insert external supervisor receipt: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return ExternalSupervisorAcceptanceReceipt{}, err
+	}
+	return receipt, nil
+}
+
 // WithExternalSupervisorDeliveryAdmission holds the SQLite immediate lock from
 // full private-fence validation through the caller's in-process delivery. No
 // delivery result is persisted by this method.

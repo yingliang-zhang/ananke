@@ -2019,3 +2019,52 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 - **PASS:** P3f now freezes the external independently trusted supervisor
   handoff as a precise fail-closed design contract without granting or
   exercising local or remote execution authority.
+
+### 2026-07-25 — P3f fake transport durable external-supervisor handoff
+
+#### Scope
+
+- Added `externalSupervisorHandoffTransport`, a three-method private production interface for sealed envelope delivery, receipt-bound reconciliation, and receipt-bound cancellation. The runtime retains only that interface; it exposes no endpoint, network/RPC import, or concrete transport.
+- The sole fake remains compiled only in `internal/lifecycle/external_supervisor_handoff_fake_test.go`. It accepts only a self-hashed sealed envelope, issues map-authenticated identity-only receipt/callback facts, supports a withheld response, and serializes its test controls and counters.
+- The runtime and store tests cover atomic delivery admission, sequential duplicate suppression before a second transport invocation, callback-before-durable-receipt rejection, current-root and receipt/envelope/attempt binding drift, cancellation and stale-fence recovery, no response, and exact normalized `waiting_for_human` output without a local Run outcome.
+
+#### Strict TDD
+
+- RED: `go test ./internal/lifecycle -run '^TestP3FExternalSupervisor(FakeTransportRejectsUnsealedEnvelope|ProductionCoreUsesInterfaceOnlyTransport)$' -count=1` rejected an unsealed fake delivery and the missing private transport interface.
+- RED: `go test ./internal/lifecycle -run '^TestP3FExternalSupervisorFakeTransportRejectsCallbackBeforeReceiptAndNoResponseInference$' -count=1` failed before withheld-response and callback-observation controls existed.
+- RED: `go test ./internal/lifecycle -run '^TestP3FExternalSupervisorFakeTransportRejectsAuthenticatedReceiptAndCallbackDrift$' -count=1` failed before authenticated drift controls existed. The focused green runs passed after the test-only fake behavior and private boundary were implemented.
+
+#### Verification
+
+- `go test ./internal/store ./internal/lifecycle -run 'ExternalSupervisor' -count=1 -timeout=120s` → PASS.
+- `go test ./internal/lifecycle -run '^TestP3FExternalSupervisor' -count=1 -timeout=120s` → PASS.
+- `go test ./... -count=1 -timeout=300s` → PASS (3 packages with tests; 3 packages without tests). `go test -race ./... -count=1 -timeout=360s` → PASS (same package inventory). `go vet ./...` → PASS.
+- `node --check contracts/p3d/verify.mjs && node contracts/p3d/verify.mjs && node contracts/p3d/verify.mjs --self-test` → PASS. `node --check contracts/p3f/verify.mjs && node contracts/p3f/verify.mjs && node contracts/p3f/verify.mjs --self-test` → PASS.
+
+#### Boundary
+
+- No production network/RPC endpoint, concrete transport, OMP integration, credentials, raw source/path/evidence channel, commit, or push was added. The durable facts remain identity-only and every public runtime projection stays `waiting_for_human`.
+
+### 2026-07-25 — P3f fake transport receipt-bound delivery and production-isolation repair
+
+#### Cause and repair
+
+- The prior delivery admission released its SQLite transaction after fake delivery and before authenticating and persisting the receipt. A concurrent recovery on a second store handle could therefore reach the fake again while the first receipt was still non-durable.
+- `DeliverAndPersistExternalSupervisorReceipt` now holds the existing immediate SQLite transaction through private-fence validation, fake delivery, receipt authentication, exact receipt binding, insert, and commit. A durable exact receipt returns before the delivery callback; the runtime has no new field, route, endpoint, credential, executable, argv, environment, path, process, OMP, or child capability.
+- `TestP3FExternalSupervisorConcurrentSubmitAndRecoverPersistReceiptBeforeDuplicateFakeDelivery` uses separate SQLite handles and goroutines. Its receipt-authentication gate exposes the old window, then proves one fake delivery attempt, one exact durable receipt identity, no callback/cancellation/reconciliation inference, and no local Run.
+- `TestP3FExternalSupervisorProductionCoreIsolatesInterfaceAndAuthenticator` now parses every compiler-selected non-test lifecycle source. It requires the exact runtime fields and transport signatures; rejects concrete transport/authenticator method sets; rejects endpoint/process/network imports (`net`, `net/url`, `os`, `os/exec`, HTTP, gRPC, WebSocket, and related process imports) in every external-supervisor source; rejects authority-bearing type/field/signature identifiers; and requires the fake source to be `_test.go`.
+
+#### Strict TDD
+
+- RED: `go test ./internal/lifecycle -run '^TestP3FExternalSupervisorConcurrentSubmitAndRecoverPersistReceiptBeforeDuplicateFakeDelivery$' -count=1 -timeout=30s` failed with `receipt-persistence boundary allowed duplicate fake delivery: attempts=2 deliveries=1`.
+- GREEN: the same command passed after receipt authentication and persistence moved inside the delivery-admission transaction.
+
+#### Verification
+
+- Focused: `go test ./internal/store ./internal/lifecycle -run 'ExternalSupervisor' -count=1 -timeout=120s` → PASS (2.82 s). The standalone concurrent regression → PASS (2.28 s); the full production-isolation guard → PASS (1.65 s).
+- Full: `go test ./... -count=1 -timeout=300s` → PASS (3 packages with tests, 3 without; 46.24 s). Race: `go test -race ./... -count=1 -timeout=360s` → PASS (same inventory; 147.38 s). `go vet ./...` → PASS (0.57 s).
+- `node --check contracts/p3d/verify.mjs && node contracts/p3d/verify.mjs && node contracts/p3d/verify.mjs --self-test && node --check contracts/p3f/verify.mjs && node contracts/p3f/verify.mjs && node contracts/p3f/verify.mjs --self-test` → PASS (0.35 s).
+
+#### Boundary
+
+- No network/RPC/OMP/real supervisor/child/local execution path, authority-bearing runtime configuration, commit, or push was added. The only delivery target remains the in-process `_test.go` fake; public runtime output remains exactly `waiting_for_human` with no inferred outcome.

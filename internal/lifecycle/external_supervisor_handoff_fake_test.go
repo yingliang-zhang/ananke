@@ -8,16 +8,19 @@ import (
 	"github.com/yingliang-zhang/ananke/internal/store"
 )
 
-// p3fInProcessFakeSupervisor is the sole test-only target. It runs entirely
-// in-process and cannot open a connection, spawn a child, or access inputs.
+// p3fInProcessFakeSupervisor is the sole test-only in-process transport and
+// supervisor. It cannot open a connection, spawn a child, or access inputs.
 type p3fInProcessFakeSupervisor struct {
-	mu             sync.Mutex
-	root           store.ExternalSupervisorTrustRoot
-	receipts       map[string]store.ExternalSupervisorAcceptanceReceipt
-	callbacks      map[string]store.ExternalSupervisorCallback
-	deliveryCount  int
-	reconcileCount int
-	cancelCount    int
+	mu                       sync.Mutex
+	root                     store.ExternalSupervisorTrustRoot
+	receipts                 map[string]store.ExternalSupervisorAcceptanceReceipt
+	callbacks                map[string]store.ExternalSupervisorCallback
+	deliveryCount            int
+	deliveryAttemptCount     int
+	withheldDeliveryResponse bool
+	reconcileCount           int
+	cancelCount              int
+	deliveryAttemptObserver  func(int)
 }
 
 func newP3FInProcessFakeSupervisor() *p3fInProcessFakeSupervisor {
@@ -29,11 +32,22 @@ func newP3FInProcessFakeSupervisor() *p3fInProcessFakeSupervisor {
 }
 
 func (fake *p3fInProcessFakeSupervisor) Deliver(_ context.Context, envelope store.ExternalSupervisorEnvelope) (store.ExternalSupervisorAcceptanceReceipt, error) {
+	if err := store.ValidateExternalSupervisorEnvelope(envelope); err != nil {
+		return store.ExternalSupervisorAcceptanceReceipt{}, errors.New("fake supervisor requires a sealed envelope")
+	}
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
+	fake.deliveryAttemptCount++
+	observer := fake.deliveryAttemptObserver
+	if observer != nil {
+		observer(fake.deliveryAttemptCount)
+	}
 	if receipt, found := fake.receipts[envelope.HandoffID]; found {
 		if receipt.EnvelopeHash != envelope.EnvelopeHash || receipt.AttemptNumber != envelope.AttemptNumber {
 			return store.ExternalSupervisorAcceptanceReceipt{}, errors.New("fake supervisor receipt conflict")
+		}
+		if fake.withheldDeliveryResponse {
+			return store.ExternalSupervisorAcceptanceReceipt{}, errors.New("fake supervisor withheld delivery response")
 		}
 		return receipt, nil
 	}
@@ -49,7 +63,35 @@ func (fake *p3fInProcessFakeSupervisor) Deliver(_ context.Context, envelope stor
 		SignatureHash:       p3fExternalSupervisorHash("receipt-signature:" + envelope.HandoffID),
 	}
 	fake.receipts[envelope.HandoffID] = receipt
+	if fake.withheldDeliveryResponse {
+		return store.ExternalSupervisorAcceptanceReceipt{}, errors.New("fake supervisor withheld delivery response")
+	}
 	return receipt, nil
+}
+
+func (fake *p3fInProcessFakeSupervisor) withholdDeliveryResponse() {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.withheldDeliveryResponse = true
+}
+
+func (fake *p3fInProcessFakeSupervisor) releaseDeliveryResponse() {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.withheldDeliveryResponse = false
+}
+
+func (fake *p3fInProcessFakeSupervisor) receiptFor(handoffID string) (store.ExternalSupervisorAcceptanceReceipt, bool) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	receipt, found := fake.receipts[handoffID]
+	return receipt, found
+}
+
+func (fake *p3fInProcessFakeSupervisor) replaceReceipt(receipt store.ExternalSupervisorAcceptanceReceipt) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.receipts[receipt.HandoffID] = receipt
 }
 
 func (fake *p3fInProcessFakeSupervisor) Reconcile(_ context.Context, receipt store.ExternalSupervisorAcceptanceReceipt) (*store.ExternalSupervisorCallback, error) {
@@ -118,6 +160,19 @@ func (fake *p3fInProcessFakeSupervisor) publishCallback(handoffID, terminalState
 	}
 }
 
+func (fake *p3fInProcessFakeSupervisor) callbackFor(handoffID string) (store.ExternalSupervisorCallback, bool) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	callback, found := fake.callbacks[handoffID]
+	return callback, found
+}
+
+func (fake *p3fInProcessFakeSupervisor) replaceCallback(callback store.ExternalSupervisorCallback) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.callbacks[callback.HandoffID] = callback
+}
+
 func (fake *p3fInProcessFakeSupervisor) setCurrentRoot(root store.ExternalSupervisorTrustRoot) {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
@@ -134,6 +189,20 @@ func (fake *p3fInProcessFakeSupervisor) deliveries() int {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	return fake.deliveryCount
+}
+
+func (fake *p3fInProcessFakeSupervisor) deliveryAttempts() int {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	return fake.deliveryAttemptCount
+}
+
+func (fake *p3fInProcessFakeSupervisor) observeDeliveryAttempts() <-chan int {
+	attempts := make(chan int, 2)
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.deliveryAttemptObserver = func(attempt int) { attempts <- attempt }
+	return attempts
 }
 
 func (fake *p3fInProcessFakeSupervisor) reconciliations() int {

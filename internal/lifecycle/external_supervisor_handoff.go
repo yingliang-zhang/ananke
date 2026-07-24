@@ -49,9 +49,9 @@ func externalSupervisorFailClosedOutput() externalSupervisorPublicOutput {
 	}
 }
 
-// externalSupervisorHandoffTarget is intentionally an in-process boundary.
-// This package supplies no concrete target; package tests supply the one fake.
-type externalSupervisorHandoffTarget interface {
+// externalSupervisorHandoffTransport is intentionally an in-process boundary.
+// This package supplies no concrete transport; package tests supply the one fake.
+type externalSupervisorHandoffTransport interface {
 	Deliver(context.Context, store.ExternalSupervisorEnvelope) (store.ExternalSupervisorAcceptanceReceipt, error)
 	Reconcile(context.Context, store.ExternalSupervisorAcceptanceReceipt) (*store.ExternalSupervisorCallback, error)
 	Cancel(context.Context, store.ExternalSupervisorCancellation) error
@@ -59,20 +59,20 @@ type externalSupervisorHandoffTarget interface {
 
 // externalSupervisorHandoffRuntime retains no route, endpoint, command,
 // credential, artifact, source, evidence, process, or OMP capability. It only
-// stages sealed identities and delegates to an injected in-process test target.
+// stages sealed identities and delegates to an injected test transport.
 type externalSupervisorHandoffRuntime struct {
 	journal       *store.Store
-	target        externalSupervisorHandoffTarget
+	transport     externalSupervisorHandoffTransport
 	authenticator store.ExternalSupervisorAuthenticator
 	currentRoot   func() store.ExternalSupervisorTrustRoot
 }
 
-func newExternalSupervisorHandoffRuntime(journal *store.Store, target externalSupervisorHandoffTarget, authenticator store.ExternalSupervisorAuthenticator, currentRoot func() store.ExternalSupervisorTrustRoot) (*externalSupervisorHandoffRuntime, error) {
-	if journal == nil || target == nil || authenticator == nil || currentRoot == nil {
+func newExternalSupervisorHandoffRuntime(journal *store.Store, transport externalSupervisorHandoffTransport, authenticator store.ExternalSupervisorAuthenticator, currentRoot func() store.ExternalSupervisorTrustRoot) (*externalSupervisorHandoffRuntime, error) {
+	if journal == nil || transport == nil || authenticator == nil || currentRoot == nil {
 		return nil, errExternalSupervisorRuntimeDenied
 	}
 	return &externalSupervisorHandoffRuntime{
-		journal: journal, target: target, authenticator: authenticator, currentRoot: currentRoot,
+		journal: journal, transport: transport, authenticator: authenticator, currentRoot: currentRoot,
 	}, nil
 }
 
@@ -114,7 +114,7 @@ func (runtime *externalSupervisorHandoffRuntime) recover(ctx context.Context, ha
 	var callback *store.ExternalSupervisorCallback
 	if err := runtime.journal.WithExternalSupervisorDeliveryAdmission(ctx, handoffID, func(store.ExternalSupervisorEnvelope) error {
 		var reconcileErr error
-		callback, reconcileErr = runtime.target.Reconcile(ctx, *boundary.Receipt)
+		callback, reconcileErr = runtime.transport.Reconcile(ctx, *boundary.Receipt)
 		return reconcileErr
 	}); err != nil || callback == nil {
 		return output
@@ -140,7 +140,7 @@ func (runtime *externalSupervisorHandoffRuntime) cancel(ctx context.Context, can
 	if err != nil {
 		return output
 	}
-	_ = runtime.target.Cancel(ctx, accepted)
+	_ = runtime.transport.Cancel(ctx, accepted)
 	return output
 }
 
@@ -149,16 +149,10 @@ func (runtime *externalSupervisorHandoffRuntime) deliver(ctx context.Context, ha
 	if err != nil || boundary.Receipt != nil || !validExternalSupervisorEnvelope(boundary.Handoff.Envelope) {
 		return
 	}
-	var receipt store.ExternalSupervisorAcceptanceReceipt
-	if err := runtime.journal.WithExternalSupervisorDeliveryAdmission(ctx, handoffID, func(envelope store.ExternalSupervisorEnvelope) error {
-		var deliveryErr error
-		receipt, deliveryErr = runtime.target.Deliver(ctx, envelope)
-		return deliveryErr
-	}); err != nil {
-		return
-	}
 	root := runtime.currentRoot()
-	_, _ = runtime.journal.AcceptExternalSupervisorReceipt(ctx, receipt, root, runtime.authenticator)
+	_, _ = runtime.journal.DeliverAndPersistExternalSupervisorReceipt(ctx, handoffID, root, runtime.authenticator, func(envelope store.ExternalSupervisorEnvelope) (store.ExternalSupervisorAcceptanceReceipt, error) {
+		return runtime.transport.Deliver(ctx, envelope)
+	})
 }
 
 func validExternalSupervisorEnvelope(envelope store.ExternalSupervisorEnvelope) bool {
