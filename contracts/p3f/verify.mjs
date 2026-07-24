@@ -7,11 +7,18 @@ import { fileURLToPath } from "node:url";
 const scriptPath = fileURLToPath(import.meta.url);
 const sourceFixtureDirectory = resolve(dirname(scriptPath), "fixtures");
 const sourceP3dFixtureDirectory = resolve(dirname(scriptPath), "..", "p3d", "fixtures");
-const fixtureNames = ["production-activation-v1.canonical.json", "preflight-red-flags-v1.canonical.json"];
+const fixtureNames = [
+  "production-activation-v1.canonical.json",
+  "preflight-red-flags-v1.canonical.json",
+  "production-exec-fd-design-v1.canonical.json",
+  "exec-fd-red-flags-v1.canonical.json",
+];
 const fixtureHashVersion = "ananke-omp-production-activation-contract-v1";
 const canonicalFixtureDigests = new Map([
   ["production-activation-v1.canonical.json", "49d5e64ba52f7521f4bc043bb55df7ece07ccd3504c5e6c3c927939b8ec5598a"],
   ["preflight-red-flags-v1.canonical.json", "73e8563b1cf7b9ab6c0319b2458d524ecdccea2448225be195ee5582dd808b9a"],
+  ["production-exec-fd-design-v1.canonical.json", "9cc58dec80462815cc8a3fc282436587ae4cfae5556459eacad726a3c0d85cc5"],
+  ["exec-fd-red-flags-v1.canonical.json", "f10f9c9df50a7120c8d59b07f86477f75221c5e2b5c963a33b9b4d86db78386c"],
 ]);
 const p3dCanonicalDigest = "9c8ca561416c82f98ad49d08c625bb5b11be468fb306cd254e7700468ac0e7f3";
 const p3dManifest = [
@@ -302,6 +309,166 @@ function verifyCanonicalFixture(value, p3dAnchor) {
   assertNormalizedOutput(value.normalized_output);
 }
 
+function assertExecFdP3fBinding(value, activation) {
+  expectKeys(value, ["activation_fixture_sha256", "route", "source_manifest_hash", "wrapper_binary_sha256", "wrapper_kind"], "exec-by-FD P3f binding");
+  assertHash(value.activation_fixture_sha256, "exec-by-FD P3f activation fixture hash");
+  assertHash(value.source_manifest_hash, "exec-by-FD P3f source manifest hash");
+  assertHash(value.wrapper_binary_sha256, "exec-by-FD P3f wrapper binary hash");
+  assert.deepEqual(value, {
+    activation_fixture_sha256: `sha256:${canonicalFixtureDigests.get("production-activation-v1.canonical.json")}`,
+    route: activation.approved_wrapper.route,
+    source_manifest_hash: activation.source_manifest_hash,
+    wrapper_binary_sha256: activation.approved_wrapper.binary_sha256,
+    wrapper_kind: activation.approved_wrapper.wrapper_kind,
+  }, "exec-by-FD P3f activation fixture binding");
+}
+
+function assertArtifactProvenance(value, activation) {
+  expectKeys(value, ["artifact_state", "attestation_schema_version", "claimed_p3f_binary_sha256", "independence", "release_root_id", "verification"], "exec-by-FD artifact provenance");
+  assertHash(value.claimed_p3f_binary_sha256, "exec-by-FD claimed P3f binary hash");
+  assert.equal(value.claimed_p3f_binary_sha256, activation.approved_wrapper.binary_sha256, "exec-by-FD artifact P3f binary binding");
+  assert.deepEqual(value, {
+    artifact_state: "future_independently_trusted_artifact_required_not_accepted",
+    attestation_schema_version: "ananke.wrapper-release-attestation.v1",
+    claimed_p3f_binary_sha256: activation.approved_wrapper.binary_sha256,
+    independence: "separate_release_authority_from_builder_launcher_and_executor",
+    release_root_id: "ananke_wrapper_release_root_v1",
+    verification: {
+      caller_supplied_digest: "reject",
+      detached_statement: "required",
+      dynamic_build: "reject",
+      release_approval: "required",
+      self_consistency: "reject",
+      test_fixture: "reject",
+    },
+  }, "exec-by-FD independently trusted artifact policy");
+}
+
+function assertExecFdPlatform(value) {
+  expectKeys(value, ["allowed_mechanism", "image_selection", "os_family", "sdk_identity", "unsupported_result"], "exec-by-FD platform profile");
+  assert.deepEqual(value, {
+    allowed_mechanism: "none_fail_closed",
+    image_selection: "native_fd_selector_unavailable",
+    os_family: "darwin_macos",
+    sdk_identity: "macosx_27_0",
+    unsupported_result: "waiting_for_human_before_child",
+  }, "Darwin exec-by-FD must be unavailable and fail closed");
+}
+
+function assertExecFdRouteMapping(value, activation) {
+  expectKeys(value, ["artifact_protocol", "p3d_route", "p3d_wrapper_kind", "route_class"], "exec-by-FD route mapping");
+  assert.deepEqual(value, {
+    artifact_protocol: "ananke.omp-wrapper-fd.v1",
+    p3d_route: activation.approved_wrapper.route,
+    p3d_wrapper_kind: activation.approved_wrapper.wrapper_kind,
+    route_class: "independently_trusted_local_wrapper",
+  }, "exec-by-FD P3d route mapping");
+}
+
+function assertExecFdFDInheritance(value) {
+  expectKeys(value, ["evidence_fd", "manifest_fd", "non_contract_fds", "source_fd", "wrapper_image_fd"], "exec-by-FD FD inheritance");
+  assert.deepEqual(value, {
+    evidence_fd: "fixed_5_write_only_inherit",
+    manifest_fd: "fixed_4_read_only_inherit",
+    non_contract_fds: "close_on_launch",
+    source_fd: "fixed_3_read_only_inherit",
+    wrapper_image_fd: "selector_only_close_on_launch",
+  }, "exec-by-FD FD inheritance policy");
+}
+
+function assertExecFdSandbox(value) {
+  expectKeys(value, ["evidence_access", "filesystem_writes", "network", "process_creation", "required_enforcement", "source_access", "unsupported_backend"], "exec-by-FD sandbox policy");
+  assert.deepEqual(value, {
+    evidence_access: "fixed_inherited_evidence_fd_only",
+    filesystem_writes: "deny_except_owned_evidence_fd",
+    network: "deny",
+    process_creation: "deny_except_bound_wrapper_image",
+    required_enforcement: "os_enforced",
+    source_access: "fixed_inherited_source_fd_read_only",
+    unsupported_backend: "waiting_for_human_before_child",
+  }, "exec-by-FD sandbox policy");
+}
+
+function assertExecFdCleanup(value) {
+  expectKeys(value, ["artifact_delivery", "order", "owned_descriptors", "owned_ephemeral_objects", "replacement_guard"], "exec-by-FD cleanup policy");
+  assert.deepEqual(value, {
+    artifact_delivery: "never_remove_release_artifact",
+    order: "reap_then_close_owned_descriptors_then_remove_owned_ephemeral_objects",
+    owned_descriptors: "activation_owned_device_inode_bound",
+    owned_ephemeral_objects: "remove_only_after_device_inode_revalidation",
+    replacement_guard: "preserve_unmatched_replacement",
+  }, "exec-by-FD cleanup policy");
+}
+
+function assertExecFdTranscriptEvidence(value) {
+  expectKeys(value, ["content", "event_schema_version", "evidence_schema_version", "public_failure_projection", "role_binding"], "exec-by-FD transcript and evidence policy");
+  assert.deepEqual(value, {
+    content: "typed_hash_bound_fields_only",
+    event_schema_version: "ananke.omp-wrapper-transcript.v1",
+    evidence_schema_version: "ananke.omp-wrapper-evidence.v1",
+    public_failure_projection: "normalized_waiting_for_human_only",
+    role_binding: "typed_role_and_signed_route_grant_required",
+  }, "exec-by-FD transcript and evidence policy");
+}
+
+function assertTypedRoleBoundary(value) {
+  expectKeys(value, ["fallback", "roles", "route_authority", "runtime_integration", "schema_version"], "hybrid-v1 typed-role boundary");
+  assert.deepEqual(value, {
+    fallback: "forbidden",
+    roles: [
+      { capability: "consume_fixed_fd_contract_only", role: "local_wrapper_executor" },
+      { capability: "not_admitted_without_future_signed_grant", role: "moa_route_selector" },
+      { capability: "not_admitted_without_future_signed_grant", role: "moa_provider_delegate" },
+      { capability: "append_typed_hash_bound_evidence_only", role: "transcript_evidence_recorder" },
+    ],
+    route_authority: "typed_signed_route_grant_required",
+    runtime_integration: "absent",
+    schema_version: "ananke.hybrid-v1-typed-role-boundary.v1",
+  }, "hybrid-v1 typed-role policy boundary");
+}
+
+function assertCancellationRecovery(value) {
+  expectKeys(value, ["cancellation", "recovery"], "exec-by-FD cancellation and recovery policy");
+  assert.deepEqual(value, {
+    cancellation: {
+      authorization: "authenticate_full_private_fence",
+      child_group: "terminate_bound_group_then_reap",
+      descriptor_disposition: "close_parent_owned_after_reap",
+      outcome_before_reap: "unknown_waiting_for_human",
+    },
+    recovery: {
+      durable_boundary: "launch_issued_without_attested_terminal_evidence",
+      process_state_inference: "forbidden",
+      required_action: "reconcile_with_authenticated_bound_child_identity",
+      unsupported_backend: "waiting_for_human",
+    },
+  }, "exec-by-FD cancellation and recovery policy");
+}
+
+function verifyExecFdDesignFixture(value, activation) {
+  assertNoRawAuthority(value);
+  expectKeys(value, ["artifact_provenance", "cancellation_recovery", "cleanup_policy", "contract_state", "credential_policy", "fake_test_boundary", "fd_inheritance", "normalized_output", "p3f_binding", "platform_profile", "route_mapping", "sandbox_policy", "schema_version", "transcript_evidence", "typed_role_boundary"], "exec-by-FD design fixture");
+  assert.equal(value.schema_version, "ananke.omp-production-exec-fd-design.v1", "exec-by-FD design schema version");
+  assert.equal(value.contract_state, "design_only_no_child_or_artifact_accepted", "exec-by-FD design must not accept a child or artifact");
+  assert.deepEqual(value.fake_test_boundary, {
+    artifact_class: "test_fixture_non_production",
+    authority: "none",
+    real_wrapper_substitution: "forbidden",
+  }, "fake test-only execution boundary");
+  assertExecFdP3fBinding(value.p3f_binding, activation);
+  assertArtifactProvenance(value.artifact_provenance, activation);
+  assertExecFdPlatform(value.platform_profile);
+  assertExecFdRouteMapping(value.route_mapping, activation);
+  assertExecFdFDInheritance(value.fd_inheritance);
+  assertExecFdSandbox(value.sandbox_policy);
+  assertExecFdCleanup(value.cleanup_policy);
+  assertCredentialPolicy(value.credential_policy);
+  assertNormalizedOutput(value.normalized_output);
+  assertExecFdTranscriptEvidence(value.transcript_evidence);
+  assertTypedRoleBoundary(value.typed_role_boundary);
+  assertCancellationRecovery(value.cancellation_recovery);
+}
+
 function assertFailClosed(value, name) {
   assert.deepEqual(value, failClosedOutput, `${name} must return only normalized waiting_for_human`);
 }
@@ -436,6 +603,69 @@ function verifyRedFlagsFixture(value, canonical) {
   });
 }
 
+function assertExecFdRedFlagGiven(testCase, canonical) {
+  const expected = {
+    unsupported_platform: { platform_profile: "darwin_macos_27_no_native_fd_selector" },
+    path_image_launcher: { mechanism: "execve_path" },
+    fd_indirection_launcher: { mechanism: "dev_fd_indirection" },
+    fd_transport_not_image_selector: { mechanism: "fileport_transport" },
+    untrusted_artifact_provenance: { approval_source: "caller_supplied_digest" },
+    fake_test_artifact: { artifact_class: canonical.fake_test_boundary.artifact_class },
+    route_mapping_drift: { route: "other_route" },
+    sandbox_not_os_enforced: { enforcement: "advisory" },
+    unexpected_inherited_fd: { fd: "6" },
+    credential_channel: null,
+    raw_transcript: { content_mode: "raw_text" },
+    unsupported_typed_role: { role: "moa_provider_delegate" },
+    hybrid_runtime_integration: { hybrid_runtime: "integrated" },
+    unauthenticated_cancellation: { fence: "fingerprint_only" },
+    recovery_process_inference: { recovery_decision: "infer_completed_from_process_handle" },
+    unknown_evidence_schema: { schema_version: "ananke.unknown-wrapper-evidence.v1" },
+    unknown_output_schema: { schema_version: "ananke.unknown-production-output.v1" },
+  };
+  assert.ok(Object.hasOwn(expected, testCase.kind), `unsupported exec-by-FD red flag ${testCase.kind}`);
+  if (testCase.kind === "credential_channel") {
+    expectKeys(testCase.given, ["channel"], `${testCase.id} given`);
+    assert.ok(["argv", "environment"].includes(testCase.given.channel), `${testCase.id} credential channel`);
+    return;
+  }
+  expectKeys(testCase.given, Object.keys(expected[testCase.kind]), `${testCase.id} given`);
+  assert.deepEqual(testCase.given, expected[testCase.kind], `${testCase.id} given`);
+}
+
+function verifyExecFdRedFlagsFixture(value, canonical) {
+  assertNoRawAuthority(value);
+  expectKeys(value, ["cases", "schema_version"], "exec-by-FD red flags fixture");
+  assert.equal(value.schema_version, "ananke.omp-production-exec-fd-design.red-flags.v1", "exec-by-FD red flags schema version");
+  const expected = [
+    ["darwin_no_native_fd_selector_waits_for_human", "unsupported_platform"],
+    ["path_image_launcher_waits_for_human", "path_image_launcher"],
+    ["fd_indirection_launcher_waits_for_human", "fd_indirection_launcher"],
+    ["fd_transport_not_image_selector_waits_for_human", "fd_transport_not_image_selector"],
+    ["caller_digest_artifact_waits_for_human", "untrusted_artifact_provenance"],
+    ["fake_test_artifact_waits_for_human", "fake_test_artifact"],
+    ["route_mapping_drift_waits_for_human", "route_mapping_drift"],
+    ["advisory_sandbox_waits_for_human", "sandbox_not_os_enforced"],
+    ["unexpected_inherited_fd_waits_for_human", "unexpected_inherited_fd"],
+    ["credential_argument_waits_for_human", "credential_channel"],
+    ["credential_environment_waits_for_human", "credential_channel"],
+    ["raw_transcript_waits_for_human", "raw_transcript"],
+    ["unsupported_typed_role_waits_for_human", "unsupported_typed_role"],
+    ["hybrid_runtime_integration_waits_for_human", "hybrid_runtime_integration"],
+    ["unauthenticated_cancellation_waits_for_human", "unauthenticated_cancellation"],
+    ["recovery_process_inference_waits_for_human", "recovery_process_inference"],
+    ["unknown_evidence_schema_waits_for_human", "unknown_evidence_schema"],
+    ["unknown_output_schema_waits_for_human", "unknown_output_schema"],
+  ];
+  assert.ok(Array.isArray(value.cases) && value.cases.length === expected.length, "exec-by-FD red flag inventory");
+  value.cases.forEach((testCase, index) => {
+    expectKeys(testCase, ["given", "id", "kind", "then"], `exec-by-FD red flag ${index + 1}`);
+    assert.deepEqual([testCase.id, testCase.kind], expected[index], `exec-by-FD red flag ${index + 1} identity`);
+    assertExecFdRedFlagGiven(testCase, canonical);
+    assertFailClosed(testCase.then, `exec-by-FD red flag ${testCase.id}`);
+  });
+}
+
 async function readManifest(directory) {
   const text = await readFile(join(directory, "fixtures.sha256"), "utf8");
   assert.ok(!text.endsWith("\n"), "fixtures.sha256 must not end with a newline");
@@ -480,8 +710,12 @@ async function verify(directory, p3dDirectory) {
   const manifest = await readManifest(directory);
   const fixtures = Object.fromEntries(await Promise.all(fixtureNames.map(async (name) => [name, await readCanonical(directory, name, manifest)])));
   const { anchor } = await readP3dAnchor(p3dDirectory);
-  verifyCanonicalFixture(fixtures["production-activation-v1.canonical.json"], anchor);
-  verifyRedFlagsFixture(fixtures["preflight-red-flags-v1.canonical.json"], fixtures["production-activation-v1.canonical.json"]);
+  const activation = fixtures["production-activation-v1.canonical.json"];
+  verifyCanonicalFixture(activation, anchor);
+  verifyRedFlagsFixture(fixtures["preflight-red-flags-v1.canonical.json"], activation);
+  const execFdDesign = fixtures["production-exec-fd-design-v1.canonical.json"];
+  verifyExecFdDesignFixture(execFdDesign, activation);
+  verifyExecFdRedFlagsFixture(fixtures["exec-fd-red-flags-v1.canonical.json"], execFdDesign);
 }
 
 async function assertRejected(action, pattern, name) {
@@ -493,8 +727,11 @@ async function selfTest() {
   const fixtures = Object.fromEntries(await Promise.all(fixtureNames.map(async (name) => [name, await readCanonical(sourceFixtureDirectory, name, manifest)])));
   const { anchor, value: p3dFixture } = await readP3dAnchor(sourceP3dFixtureDirectory);
   const canonicalFixture = fixtures["production-activation-v1.canonical.json"];
+  const execFdDesign = fixtures["production-exec-fd-design-v1.canonical.json"];
   verifyCanonicalFixture(canonicalFixture, anchor);
   verifyRedFlagsFixture(fixtures["preflight-red-flags-v1.canonical.json"], canonicalFixture);
+  verifyExecFdDesignFixture(execFdDesign, canonicalFixture);
+  verifyExecFdRedFlagsFixture(fixtures["exec-fd-red-flags-v1.canonical.json"], execFdDesign);
 
   const drifted = structuredClone(canonicalFixture);
   drifted.source_manifest_hash = `sha256:${"9".repeat(64)}`;
@@ -529,6 +766,26 @@ async function selfTest() {
     await assertRejected(async () => verifyCanonicalFixture(fixture, anchor), pattern, name);
   }
 
+  const execFdMutations = [
+    ["P3f fixture binding", (fixture) => { fixture.p3f_binding.activation_fixture_sha256 = `sha256:${"4".repeat(64)}`; }, /P3f activation fixture binding/],
+    ["artifact self-consistency", (fixture) => { fixture.artifact_provenance.verification.self_consistency = "accepted"; }, /independently trusted artifact policy/],
+    ["Darwin path fallback", (fixture) => { fixture.platform_profile.allowed_mechanism = "execve_path"; }, /Darwin exec-by-FD must be unavailable/],
+    ["route mapping", (fixture) => { fixture.route_mapping.p3d_route = "other_route"; }, /P3d route mapping/],
+    ["FD inheritance", (fixture) => { fixture.fd_inheritance.evidence_fd = "fixed_6_write_only_inherit"; }, /FD inheritance policy/],
+    ["sandbox", (fixture) => { fixture.sandbox_policy.required_enforcement = "advisory"; }, /sandbox policy/],
+    ["argument credentials", (fixture) => { fixture.credential_policy.argv_credentials = "allowed"; }, /argv and environment credentials are forbidden/],
+    ["transcript content", (fixture) => { fixture.transcript_evidence.content = "raw_text"; }, /transcript and evidence policy/],
+    ["hybrid integration", (fixture) => { fixture.typed_role_boundary.runtime_integration = "present"; }, /typed-role policy boundary/],
+    ["recovery inference", (fixture) => { fixture.cancellation_recovery.recovery.process_state_inference = "allowed"; }, /cancellation and recovery policy/],
+    ["fake test authority", (fixture) => { fixture.fake_test_boundary.authority = "production"; }, /fake test-only execution boundary/],
+    ["raw authority", (fixture) => { fixture.platform_profile.command = "forbidden"; }, /forbidden raw authority field/],
+  ];
+  for (const [name, mutate, pattern] of execFdMutations) {
+    const fixture = structuredClone(execFdDesign);
+    mutate(fixture);
+    await assertRejected(async () => verifyExecFdDesignFixture(fixture, canonicalFixture), pattern, name);
+  }
+
   const p3dDrift = structuredClone(p3dFixture);
   p3dDrift.host_spec.adapter.route = "other_route";
   await assertRejected(async () => assertP3dAnchor(p3dDrift), /P3d route pair/, "P3d route chain drift");
@@ -539,15 +796,22 @@ async function selfTest() {
   redFlags.cases[17] = structuredClone(fixtures["preflight-red-flags-v1.canonical.json"].cases[17]);
   redFlags.cases[14].given.channel = "socket";
   await assertRejected(async () => verifyRedFlagsFixture(redFlags, canonicalFixture), /credential channel/, "credential red flag drift");
+
+  const execFdRedFlags = structuredClone(fixtures["exec-fd-red-flags-v1.canonical.json"]);
+  execFdRedFlags.cases[0].then.state = "completed";
+  await assertRejected(async () => verifyExecFdRedFlagsFixture(execFdRedFlags, execFdDesign), /normalized waiting_for_human/, "exec-by-FD red flag information leak");
+  execFdRedFlags.cases[0] = structuredClone(fixtures["exec-fd-red-flags-v1.canonical.json"].cases[0]);
+  execFdRedFlags.cases[8].given.fd = "7";
+  await assertRejected(async () => verifyExecFdRedFlagsFixture(execFdRedFlags, execFdDesign), /given/, "exec-by-FD red flag drift");
 }
 
 if (process.argv.includes("--self-test")) {
   await selfTest();
-  console.log("P3f production activation self-test rejected source-manifest derivation and P3d-chain drift, wrapper/route and FD/sandbox/cleanup-policy drift, argv or environment credentials, launch-time fence/action/deadline checks, raw authority, and non-waiting-for-human red-flag outputs.");
+  console.log("P3f production activation self-test rejected source-manifest and P3d-chain drift, wrapper/route and FD/sandbox/cleanup-policy drift, credential channels, and all Darwin exec-by-FD design drift: path or /dev/fd launch, FD transport misuse, untrusted or fake artifacts, transcript/evidence, typed-role, cancellation/recovery, and non-waiting-for-human red flags.");
 } else {
   await verify(
     resolve(optionValue("--fixtures") ?? sourceFixtureDirectory),
     resolve(optionValue("--p3d-fixtures") ?? sourceP3dFixtureDirectory),
   );
-  console.log("P3f production activation fixtures verified: tracked git commit to canonical JCS source manifest/hash, P3d-bound approved wrapper route pair, inherited FD-only interface, OS-enforced sandbox declaration, owned descriptor/inode cleanup, credential denial, launch-time full-fence checks, normalized output, and waiting_for_human preflight red flags.");
+  console.log("P3f production activation fixtures verified: P3d-bound activation, FD-only preflight, and the Darwin macOS 27 exec-by-FD design chain. Darwin has no admitted native FD image selector; the only allowed mechanism is none/fail-closed before a child, while a future independently trusted wrapper requires P3f-bound route, provenance, sandbox, FD, evidence, cleanup, and typed-role policy checks.");
 }

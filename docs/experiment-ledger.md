@@ -1878,3 +1878,67 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 #### Boundary
 
 - No OMP or production-wrapper artifact was executed. The repair adds no process, argv, environment, path, program, command, or executable authority to the production core.
+
+### 2026-07-24 — P3f Darwin exec-by-FD and trusted-wrapper artifact design contract
+
+#### Scope and local platform result
+
+- Added P3f's two canonical design fixtures, extended the existing dependency-free
+  verifier and SHA-256 manifest, added the design-contract/plan documents, and
+  linked the existing P3f documents to the successor boundary. No Go/runtime,
+  lifecycle, store, UI, wrapper, OMP, target, staging, sandbox, or process code
+  changed.
+- Local inspection of the MacOSX 27 SDK found path-argument `exec*` and
+  `posix_spawn*` APIs, FD-inheritance helpers, fileport FD transport, and
+  signature-loading controls, but no `fexecve`, `execveat`, or `AT_EMPTY_PATH`
+  declaration. P3f therefore freezes the sole Darwin mechanism as
+  `none_fail_closed` before a child; `/dev/fd`, path launch, spawn, fileport,
+  and test-binary re-exec are denial cases, not fallbacks.
+
+#### Contract boundary
+
+- The canonical chain is P3d canonical fixture → existing P3f activation
+  fixture → P3f exec-by-FD design fixture. It pins the existing P3f source
+  manifest/wrapper hash/kind/route and maps only the P3d read-only audit route
+  to `ananke.omp-wrapper-fd.v1`.
+- P3f's wrapper hash remains an identity declaration, not accepted production
+  provenance. A future artifact needs an activation-owned, revalidated regular
+  FD; its SHA-256; detached attestation and release approval; and a release
+  authority distinct from builder, launcher, wrapper, and test harness. Caller
+  digests, self-consistency, dynamic builds, and test fixtures fail closed.
+- The declaration freezes fixed source/manifest/evidence FD 3/4/5, selector-only
+  wrapper FD, empty credential-free environment, fixed non-secret argv, OS
+  sandbox requirements, typed hash-only transcript/evidence schemas,
+  replacement-safe cleanup, full-fence cancellation/recovery no-inference, and
+  `ananke.hybrid-v1-typed-role-boundary.v1` with absent runtime integration and
+  forbidden fallback.
+- Existing fake execution remains distinct: it is test-only, re-executes only
+  the Go test binary, has no production authority, and is explicitly rejected
+  as future wrapper provenance.
+
+#### Verification
+
+- Passed exactly:
+
+  ```sh
+  node --check contracts/p3d/verify.mjs
+  node contracts/p3d/verify.mjs
+  node contracts/p3d/verify.mjs --self-test
+  node --check contracts/p3f/verify.mjs
+  node contracts/p3f/verify.mjs
+  node contracts/p3f/verify.mjs --self-test
+  go test ./internal/lifecycle -run '^TestP3FProductionBuildExcludesFakeExecution$' -count=1 -timeout 60s
+  ```
+
+- The P3f normal gate checked the P3d→P3f→exec-by-FD canonical-byte chain. Its
+  self-test rejected chain, provenance, Darwin mechanism, route, FD, sandbox,
+  credential, transcript/evidence, hybrid-role, cancellation/recovery,
+  fake-artifact, raw-authority, and non-fail-closed-vector drift. The focused
+  Go test preserved the fake-execution production-build exclusion.
+
+#### Boundary
+
+- No production execution, real OMP/wrapper/target/staging, artifact creation,
+  source/evidence descriptor open, sandbox application, commit, or push was
+  performed. Contract commands read fixture bytes and mutate copies in memory
+  only; the focused Go test checked test-only build selection.

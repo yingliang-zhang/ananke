@@ -111,10 +111,11 @@ boundary, and every red flag remains `waiting_for_human`.
 Until then P3f is contract-only. It creates no sandbox, wrapper, worktree,
 source snapshot, file descriptor, process, OMP session, command, or child.
 
-Real production execution remains blocked pending a separate approved
-exec-by-FD design with independently trusted artifact identity. It must not
-fall back to a path launcher, caller-provided digest, dynamically built test
-artifact, or self-consistent artifact/digest pair.
+The successor `p3f-production-exec-by-fd-artifact-design-contract` now freezes
+the local Darwin macOS 27 conclusion: no native FD image selector is admitted,
+so its exact allowed mechanism is `none_fail_closed` before a child. It retains
+the future independently trusted artifact/FD/sandbox/evidence requirements but
+does not accept an artifact or enable real production execution.
 
 ## Artifacts and gate
 
@@ -123,6 +124,10 @@ artifact, or self-consistent artifact/digest pair.
 - `contracts/p3f/fixtures/preflight-red-flags-v1.canonical.json` — complete
   fail-closed preflight-red-flag inventory.
 - `contracts/p3f/fixtures/fixtures.sha256` — exact canonical fixture bytes.
+- `contracts/p3f/fixtures/production-exec-fd-design-v1.canonical.json` —
+  P3d→P3f-bound Darwin no-mechanism and future trusted-artifact design.
+- `contracts/p3f/fixtures/exec-fd-red-flags-v1.canonical.json` — complete
+  fail-closed design-denial vectors.
 - `contracts/p3f/verify.mjs` — dependency-free normal and in-memory self-test
   verifier, including the P3d chain check.
 

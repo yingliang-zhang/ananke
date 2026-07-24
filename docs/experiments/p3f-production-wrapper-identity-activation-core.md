@@ -23,24 +23,24 @@ environment, program, or path field. Invalid, expired, or unknown input
 returns only the stable activation-preparation denial and no partially prepared
 request.
 
-Real production execution remains blocked. It requires a separately approved
-design for exec-by-FD plus independently trusted artifact identity; a caller
-digest, a dynamically built artifact, or an artifact that validates only its
-own supplied digest is not an approval mechanism.
+Real production execution remains blocked. The separate
+`p3f-production-exec-by-fd-artifact-design-contract` now records that the
+locally inspected Darwin macOS 27 SDK exposes no admitted native FD image
+selector; P3f therefore permits only `none_fail_closed` before a child. A
+caller digest, dynamically built artifact, test fixture, or artifact that
+validates only its own supplied digest remains invalid provenance.
 
-## Future `ananke_hybrid_v1` inputs — out of scope
+## `ananke_hybrid_v1` typed-role boundary — no runtime integration
 
-These are non-binding design inputs for a later separately accepted design:
+The successor design fixture reserves the non-executable
+`ananke.hybrid-v1-typed-role-boundary.v1`: `local_wrapper_executor` may consume
+only the fixed FD contract; `moa_route_selector` and `moa_provider_delegate`
+are not admitted without a future signed route grant; and
+`transcript_evidence_recorder` may append typed hash-bound evidence only. A
+role label grants no route authority. Fallback is forbidden.
 
-- an explicit hybrid-mode identity and version;
-- a route-selection authority between a locally pinned wrapper and any future
-  MoA path;
-- provider/model and delegation capability identities;
-- credential and evidence ownership boundaries; and
-- a final-boundary proof that the selected route still matches the active
-  fence, deadline, and source bindings.
-
-No `ananke_hybrid_v1` schema, API, persistence, route selection, MoA routing,
-wrapper execution, OMP invocation, or fallback is integrated here. A future
-hybrid design must retain P3f's FD-only, pinned-identity, and fail-closed
-constraints before it can participate in any activation path.
+No `ananke_hybrid_v1` runtime schema/API, persistence, route selection, MoA
+routing, wrapper execution, OMP invocation, or fallback is integrated here.
+The design fixture has no artifact acceptance or launch authority. A later
+accepted implementation must retain P3f's FD-only, independently trusted
+identity, and fail-closed constraints before it can participate in activation.
