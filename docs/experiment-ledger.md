@@ -1497,3 +1497,56 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 - **PASS:** P3c aggregate recovery preserves per-hash corrupt-authority
   isolation while returning cancellation and other operational read failures
   unchanged instead of masking them as `waiting_for_human`.
+
+### 2026-07-24 — P3d controlled read-only OMP adapter contract
+
+#### Scope
+
+- Added only `contracts/p3d` canonical, adversarial, and crash fixture vectors;
+  their SHA-256 manifest; a dependency-free Node verifier and in-memory
+  self-test; the P3d contract and TDD-plan documents; and this ledger entry.
+- The frozen HostSpec binds P3a's exact launch hash, read-only provider/model,
+  deadline, cap, sealed materialization hash/nonce, and the P3c
+  `retry_process_admission` boundary. It permits only the named Ananke
+  route-aware OMP audit wrapper, never bare `omp`.
+- The self-hosted target is the canonical repository identity
+  `github.com/yingliang-zhang/ananke` with trusted-root and required-source
+  snapshot hashes, not a filesystem location. The bounded request/result/event
+  IR contains no token, socket, path, raw error, command, prompt, prose, or
+  transcript body.
+- Unknown transcript source, dialect, and event vectors have a fixed
+  less-information `waiting_for_human` outcome. Crash vectors retain absent
+  result/terminal facts while naming only bounded admission, reconnect, or
+  cancellation obligations.
+
+#### Verification
+
+- Passed exactly:
+
+  ```sh
+  node --check contracts/p3d/verify.mjs
+  node contracts/p3d/verify.mjs
+  node contracts/p3d/verify.mjs --self-test
+  ```
+
+- The normal gate verified exact canonical fixture hashes, closed HostSpec and
+  P3a/P3b/P3c bindings, canonical repository/source identity, normalized IR,
+  fail-closed public outputs, and no-guess crash facts. The in-process self-test
+  rejected static fixture drift; route/provider/model/wrapper drift; renderer
+  authority and private-field injection; sealed materialization or predecessor
+  binding drift; noncanonical target and transcript drift; unearned results;
+  and crash-result, terminal, or action guesses.
+
+#### Scope constraints
+
+- No OMP, model, frozen verification command, adapter, daemon, Tauri/UI,
+  renderer, runtime, socket, worktree, target source snapshot, or target-file
+  materialization was created, opened, invoked, or started. The self-test reads
+  fixture bytes and mutates values in memory only. No commit or push command was
+  run.
+
+#### Terminal verdict
+
+- **PASS:** P3d freezes a controlled, bounded, read-only future OMP audit
+  envelope and public fail-closed boundary without implementing or exercising
+  any adapter runtime behavior.
