@@ -84,9 +84,10 @@ type migration struct {
 // v4 adds the durable transcript-finalization handoff; v5 adds durable
 // cancellation intent; v6 adds durable transcript file identity; v7 adds the
 // P1b durable task-proposal journal; v8 repairs v7 identity constraints; v9
-// makes the Approval and RevisionLifecycle pair reciprocal; v10 adds the
-// P2b review-only Grill journal; and v11 adds P3b's fenced, model-only
-// launch-admission authority.
+// makes the Approval and RevisionLifecycle pair reciprocal; v10 adds P2b review
+// journal; v11 adds P3b's fenced launch-admission authority; v12 adds P3f's
+// immutable external-supervisor handoff envelope, delivery outbox, and identity
+// facts.
 var migrations = []migration{
 	{version: 1, up: migrateV1},
 	{version: 2, up: migrateV2},
@@ -99,6 +100,7 @@ var migrations = []migration{
 	{version: 9, up: migrateV9},
 	{version: 10, up: migrateV10},
 	{version: 11, up: migrateV11},
+	{version: 12, up: migrateV12},
 }
 
 // SchemaVersion reports the highest applied migration version.

@@ -1,8 +1,7 @@
 # P3f external independently trusted supervisor / remote execution handoff design contract
 
-**Status:** frozen design-only successor contract and fixture oracle.
-
-**Scope:** this documents a future independently trusted remote-supervisor handoff. It does not open a connection, construct a request, start a supervisor or OMP, read a source/artifact/evidence object, create a child, or modify runtime authority.
+**Status:** accepted design contract with a private Ananke-side durable identity runtime and an in-process test-only fake supervisor.
+**Scope:** the runtime seals and validates identity-only envelopes, persists immutable envelope/outbox/receipt/callback/cancellation facts, and exercises only the fake supervisor. It opens no connection, creates no RPC/request, starts no supervisor or OMP, reads no source/artifact/evidence object, creates no child, and modifies no Run or execution authority.
 
 ## Decision
 
@@ -41,7 +40,7 @@ No bare OMP route, other wrapper, route fallback, provider selection, or local l
 - P3d snapshot/P3f manifest/repository identity;
 - supervisor artifact, build, attestation, release-approval, evidence-contract, and evidence-schema identities.
 
-The local durable record permitted by this design is only the sealed-envelope hash plus the future authenticated receipt identity. The receipt must be durable before it is reported, signed under the current trusted supervisor root, and bound to the envelope, route, and full private fence. A caller-supplied digest, self-consistent artifact/digest pair, dynamic build, or test fixture cannot create authority.
+The runtime durably stores canonical immutable envelope bytes and hash, its immutable delivery outbox obligation, and receipt/callback/cancellation identity facts in their own transactions. A receipt is durable only after the configured verifier authenticates it under the current trust-root identity and binds it to the exact envelope, route, and full private fence. A caller-supplied digest, self-consistent artifact/digest pair, dynamic build, or test fixture cannot create authority.
 
 The handoff transmits only sealed identity hashes, fixed enums, and attestation references. It never transmits secrets, raw paths, source/evidence bytes, prompt or prose authority, commands, argv, environment, or an endpoint capable of becoming executable authority.
 
@@ -49,30 +48,24 @@ The handoff transmits only sealed identity hashes, fixed enums, and attestation 
 
 A future supervisor release requires a detached `ananke.remote-supervisor-release-attestation.v1`, independent release approval, and identities for artifact, build, attestation, and approval. Its release authority is explicitly distinct from Ananke, a builder, launch machinery, and the supervisor runtime.
 
-The frozen trust policy has an active root, successor root, and trust-bundle hash. Rotation is cross-signed by active and successor roots with a validity overlap. Root downgrade is forbidden. Unknown, invalid, expired, revoked, or unproven roots must produce `waiting_for_human`; no stale root is silently retained and no successor is accepted merely because it is locally named.
-
-These identities are fixture declarations. No artifact, signature, root, or rotation event exists or is verified in this slice.
+The production core contains no release verifier, root key, signature implementation, target, or transport. Its only configured target/verifier is the in-process fake compiled into package tests; that fake is an identity-flow oracle, not a release, artifact, signature, or root implementation.
 
 ## Callback/result, cancellation, and recovery
 
-The future callback uses `ananke.remote-supervisor-callback.v1`; the typed result uses `ananke.remote-supervisor-result.v1`; evidence uses `ananke.remote-supervisor-evidence.v1`. A terminal result is authoritative only when a callback is authenticated by the current trust root, bound to the sealed envelope, and carries attested typed evidence identities. The result schema carries typed terminal state plus identities only, never raw transcript, source, prompt, path, or error material.
+The runtime accepts `ananke.remote-supervisor-callback.v1` only after an authenticated durable `ananke.remote-supervisor-acceptance-receipt.v1`. Its typed `ananke.remote-supervisor-result.v1` is identity hashes plus one terminal enum; it never changes a local Run state or exposes the result publicly. Before persistence, the callback verifier must bind the current trust root, envelope hash, receipt identity, handoff, attempt, and typed evidence identity.
 
-Ananke must not infer execution from elapsed time, a missing callback, a process/connection handle, an acknowledgement, or an absent receipt. An unknown schema, invalid signature, no response, unverified receipt, unavailable reconciliation backend, or any other incomplete state returns exactly:
+No response, unverified receipt, unknown schema, failed verifier, stale root, stale full fence, expired deadline, attempt-cap mismatch, delivery error, reconciliation error, cancellation, or missing callback creates an outcome. Every public return is exactly:
 
 ```json
 {"events":[],"result":null,"schema_version":"ananke.omp-production-output.v1","state":"waiting_for_human","verification_state":"not_run"}
 ```
 
-Cancellation first authenticates the complete private fence and durable receipt and binds only one handoff/attempt. Before an attested callback, its effect is unknown. Recovery reconciles only through an authenticated current root and durable receipt; it never guesses completion, cancellation, failure, evidence, or cleanup.
+Cancellation first authenticates the complete private fence and durable receipt and persists only one handoff/attempt-bound cancellation identity. Recovery retries the immutable delivery obligation or asks the fake target for a callback only while the full private fence, deadline, and attempt remain current. It never guesses completion, cancellation, failure, evidence, or cleanup.
 
-## Replay and idempotency
-
-- Repeated submission for the same envelope hash and idempotency-key hash returns the same receipt only.
-- Callback de-duplication keys on handoff, attempt, and callback identity hashes.
-- Attempts increase strictly within P3d's cap.
-- The same identity with a different envelope, route, evidence, artifact, or fence binding is a conflict and projects `waiting_for_human`.
-
-No replay behavior is implemented or exercised here.
+- Staging the same sealed envelope and idempotency-key hash returns the same durable handoff; any shared handoff, envelope, or idempotency identity with different bindings is a conflict.
+- Delivery is receipt-idempotent: a durable receipt suppresses another fake delivery.
+- Receipt, callback, and cancellation identity replays are idempotent only when every typed field agrees; a different binding is a conflict and projects `waiting_for_human`.
+- Attempts equal the active P3b/P3c claim attempt and remain strictly within P3d's cap.
 
 ## MoA typed-role grant boundary
 
@@ -97,4 +90,4 @@ All commands inspect fixture bytes or mutate in-memory copies only.
 
 ## Explicit non-goals
 
-No local exec, remote supervisor, OMP, network, RPC/request, callback receiver, release/signature/root implementation, source/artifact/evidence I/O, child, lifecycle/store/UI/API change, prompt/command/transcript/verification execution, commit, or push is authorized by this contract.
+No local exec, remote supervisor, network/RPC/request, OMP, release/signature/root implementation, source/artifact/evidence I/O, child, public lifecycle/API/UI integration, prompt/command/transcript/verification execution, commit, or push is authorized by this implementation.

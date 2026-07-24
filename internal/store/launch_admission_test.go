@@ -79,8 +79,8 @@ func TestP3BMigratesP2HeadToFencedLaunchAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion: %v", err)
 	}
-	if version != 11 {
-		t.Fatalf("schema version = %d, want 11", version)
+	if version != len(migrations) {
+		t.Fatalf("schema version = %d, want %d", version, len(migrations))
 	}
 	for _, table := range []string{
 		"launch_specs", "task_claims", "launch_claim_heads", "launch_materializations",
