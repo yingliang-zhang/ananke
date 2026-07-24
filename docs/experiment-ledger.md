@@ -1859,3 +1859,22 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 
 - The P3f contract fixtures remain declaration-only: they contain no archive bytes to authenticate. The fixture binding added here is the canonical manifest created for each temporary synthetic Git archive; no static archive digest was fabricated.
 - This repair remains test-only. It invoked no real OMP, wrapper, target, or repository commit, and performed no commit or push.
+
+### 2026-07-24 — P3f production-wrapper identity-core repair
+
+#### Cause and repair
+
+- `internal/lifecycle/omp_production_activation.go` had a malformed P3d source-snapshot value: its suffix was not P3d's canonical SHA-256. The core now pins `sha256:1d19f39b6c1f3db6164580e9903d4ac129a4c387d4eea25d5baab1b0f1c2d3e4`, the exact `required_source_snapshot_hash` in `contracts/p3d/fixtures/omp-audit-v1.canonical.json`.
+- The preparer now requires that input source-snapshot value to be a lower-case, 64-hex SHA-256 before exact canonical equality. The independent positive-test constant uses the same P3d value; malformed uppercase hex, a 63-hex digest, and a different well-formed digest all produce the stable denied request.
+- The production-core AST guard now rejects `os/exec`, `os.StartProcess`, `syscall.Exec`, `os.Args`, `os.Environ`, and normalized struct or field names `argv`, `env`, `path`, `program`, `command`, and `executable`. The core remains private and descriptor-only: preparation carries the exact caller-owned source, manifest, and evidence `*os.File` values without opening, reading, writing, closing, duplicating, resolving, or executing them.
+
+#### Strict TDD and verification
+
+- RED: `go test ./internal/lifecycle -run '^TestOMPProductionActivation|^TestOMPProductionP3dSourceSnapshotHashPinsCanonicalSHA256$' -count=1` failed before the repair: preparation denied the canonical P3d test input and the pinned core value differed from the canonical P3d SHA-256.
+- GREEN: the same focused command passed after the exact pin and format check. It covers the canonical FD-only positive path, malformed/bad-length/drift source-snapshot denials, full-fence and identity drift denials, and the production-core AST execution-surface guard.
+- Full: `go test ./... -count=1 -timeout 300s` → PASS (3 packages with tests, 3 without). Race: `go test -race ./... -count=1 -timeout 360s` → PASS (same package inventory). `go vet ./...` → PASS.
+- Contract syntax, normal verification, and in-memory self-tests passed for P1a, P1c, P2a, P2c, P3a, P3d, and P3f.
+
+#### Boundary
+
+- No OMP or production-wrapper artifact was executed. The repair adds no process, argv, environment, path, program, command, or executable authority to the production core.
