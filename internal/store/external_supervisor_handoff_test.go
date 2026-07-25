@@ -138,123 +138,29 @@ func TestExternalSupervisorHandoffRejectsFenceDeadlineAttemptAndReplayConflicts(
 func TestExternalSupervisorReceiptCallbackCancellationAndRecoveryRemainBound(t *testing.T) {
 	ctx := context.Background()
 	s, _, claim, envelope := newExternalSupervisorHandoffFixture(t, time.Now().UTC().Add(time.Hour))
+	envelope, receipt := externalSupervisorAuthenticatedReceiptFixture(t, envelope)
 	staged, err := s.StageExternalSupervisorHandoff(ctx, envelope, claim.Fence)
 	if err != nil {
 		t.Fatalf("stage handoff: %v", err)
 	}
-	root := ExternalSupervisorTrustRoot{RootID: "remote_supervisor_root_v1", TrustBundleHash: externalSupervisorTestHash("trust-bundle-v1")}
-	verifier := externalSupervisorTestAuthenticator{}
-	receipt := ExternalSupervisorAcceptanceReceipt{
-		SchemaVersion:       ExternalSupervisorReceiptSchemaVersion,
-		HandoffID:           envelope.HandoffID,
-		EnvelopeHash:        envelope.EnvelopeHash,
-		ReceiptIdentityHash: externalSupervisorTestHash("receipt-001"),
-		AttemptNumber:       envelope.AttemptNumber,
-		RootID:              root.RootID,
-		TrustBundleHash:     root.TrustBundleHash,
-		SignatureHash:       externalSupervisorTestHash("receipt-signature-001"),
+	verifier := externalSupervisorPersistentAuthenticator{trustBundleHash: receipt.Delivery.TrustBundleHash}
+	acceptedReceipt, err := s.DeliverAndPersistExternalSupervisorReceipt(ctx, envelope.HandoffID, verifier, func(ExternalSupervisorEnvelope) (ExternalSupervisorAuthenticatedReceipt, error) {
+		return receipt, nil
+	})
+	if err != nil || acceptedReceipt != receipt {
+		t.Fatalf("authenticated receipt = %+v, %v", acceptedReceipt, err)
 	}
-	callback := ExternalSupervisorCallback{
-		SchemaVersion:        ExternalSupervisorCallbackSchemaVersion,
-		HandoffID:            envelope.HandoffID,
-		EnvelopeHash:         envelope.EnvelopeHash,
-		ReceiptIdentityHash:  receipt.ReceiptIdentityHash,
-		CallbackIdentityHash: externalSupervisorTestHash("callback-001"),
-		AttemptNumber:        envelope.AttemptNumber,
-		RootID:               root.RootID,
-		TrustBundleHash:      root.TrustBundleHash,
-		SignatureHash:        externalSupervisorTestHash("callback-signature-001"),
-		Result: ExternalSupervisorResult{
-			SchemaVersion:        ExternalSupervisorResultSchemaVersion,
-			TerminalState:        "completed",
-			EnvelopeHash:         envelope.EnvelopeHash,
-			ReceiptIdentityHash:  receipt.ReceiptIdentityHash,
-			EvidenceIdentityHash: externalSupervisorTestHash("evidence-001"),
-		},
+	callback := externalSupervisorAuthenticatedCallbackFixture(t, envelope, receipt)
+	acceptedCallback, err := s.ReconcileAndPersistExternalSupervisorCallback(ctx, envelope.HandoffID, verifier, func(ExternalSupervisorEnvelope, ExternalSupervisorAuthenticatedReceipt) (*ExternalSupervisorAuthenticatedCallback, error) {
+		return &callback, nil
+	})
+	if err != nil || acceptedCallback == nil || *acceptedCallback != callback {
+		t.Fatalf("authenticated callback = %+v, %v", acceptedCallback, err)
 	}
-	if _, err := s.AcceptExternalSupervisorCallback(ctx, callback, root, verifier); !errors.Is(err, ErrExternalSupervisorReceiptRequired) {
-		t.Fatalf("callback without durable receipt error = %v, want %v", err, ErrExternalSupervisorReceiptRequired)
-	}
-	if _, err := s.RecordExternalSupervisorCancellation(ctx, ExternalSupervisorCancellation{
-		SchemaVersion:            ExternalSupervisorCancellationSchemaVersion,
-		HandoffID:                envelope.HandoffID,
-		EnvelopeHash:             envelope.EnvelopeHash,
-		ReceiptIdentityHash:      receipt.ReceiptIdentityHash,
-		CancellationIdentityHash: externalSupervisorTestHash("cancel-001"),
-		AttemptNumber:            envelope.AttemptNumber,
-	}, claim.Fence); !errors.Is(err, ErrExternalSupervisorReceiptRequired) {
-		t.Fatalf("cancellation without durable receipt error = %v, want %v", err, ErrExternalSupervisorReceiptRequired)
-	}
-
-	acceptedReceipt, err := s.AcceptExternalSupervisorReceipt(ctx, receipt, root, verifier)
-	if err != nil {
-		t.Fatalf("AcceptExternalSupervisorReceipt: %v", err)
-	}
-	if acceptedReceipt != receipt {
-		t.Fatalf("accepted receipt = %+v, want %+v", acceptedReceipt, receipt)
-	}
-	if _, err := s.AcceptExternalSupervisorReceipt(ctx, receipt, root, verifier); err != nil {
-		t.Fatalf("idempotent receipt acceptance: %v", err)
-	}
-	assertExternalSupervisorTableCount(t, s, "external_supervisor_receipts", 1)
-
-	if _, err := s.AcceptExternalSupervisorCallback(ctx, callback, ExternalSupervisorTrustRoot{RootID: "remote_supervisor_root_v2", TrustBundleHash: externalSupervisorTestHash("trust-bundle-v2")}, verifier); !errors.Is(err, ErrExternalSupervisorTrustRoot) {
-		t.Fatalf("callback under a non-current root error = %v, want %v", err, ErrExternalSupervisorTrustRoot)
-	}
-	acceptedCallback, err := s.AcceptExternalSupervisorCallback(ctx, callback, root, verifier)
-	if err != nil {
-		t.Fatalf("AcceptExternalSupervisorCallback: %v", err)
-	}
-	if acceptedCallback != callback {
-		t.Fatalf("accepted callback = %+v, want %+v", acceptedCallback, callback)
-	}
-	if _, err := s.AcceptExternalSupervisorCallback(ctx, callback, root, verifier); err != nil {
-		t.Fatalf("idempotent callback acceptance: %v", err)
-	}
-	conflict := callback
-	conflict.Result.TerminalState = "failed"
-	if _, err := s.AcceptExternalSupervisorCallback(ctx, conflict, root, verifier); !errors.Is(err, ErrExternalSupervisorConflict) {
-		t.Fatalf("conflicting callback replay error = %v, want %v", err, ErrExternalSupervisorConflict)
-	}
-	assertExternalSupervisorTableCount(t, s, "external_supervisor_callbacks", 1)
-
-	cancellation := ExternalSupervisorCancellation{
-		SchemaVersion:            ExternalSupervisorCancellationSchemaVersion,
-		HandoffID:                envelope.HandoffID,
-		EnvelopeHash:             envelope.EnvelopeHash,
-		ReceiptIdentityHash:      receipt.ReceiptIdentityHash,
-		CancellationIdentityHash: externalSupervisorTestHash("cancel-001"),
-		AttemptNumber:            envelope.AttemptNumber,
-	}
-	acceptedCancellation, err := s.RecordExternalSupervisorCancellation(ctx, cancellation, claim.Fence)
-	if err != nil {
-		t.Fatalf("RecordExternalSupervisorCancellation: %v", err)
-	}
-	if acceptedCancellation != cancellation {
-		t.Fatalf("accepted cancellation = %+v, want %+v", acceptedCancellation, cancellation)
-	}
-	if _, err := s.RecordExternalSupervisorCancellation(ctx, cancellation, claim.Fence); err != nil {
-		t.Fatalf("idempotent cancellation: %v", err)
-	}
-	assertExternalSupervisorTableCount(t, s, "external_supervisor_cancellations", 1)
-
 	boundary, err := s.GetExternalSupervisorRecoveryBoundary(ctx, staged.Envelope.HandoffID)
-	if err != nil {
-		t.Fatalf("GetExternalSupervisorRecoveryBoundary: %v", err)
+	if err != nil || boundary.Handoff != staged || boundary.Receipt == nil || *boundary.Receipt != receipt || boundary.Callback == nil || *boundary.Callback != callback || boundary.Cancellation != nil {
+		t.Fatalf("recovery boundary = %+v, %v", boundary, err)
 	}
-	if boundary.Handoff != staged || boundary.Receipt == nil || *boundary.Receipt != receipt || boundary.Callback == nil || *boundary.Callback != callback || boundary.Cancellation == nil || *boundary.Cancellation != cancellation {
-		t.Fatalf("recovery boundary = %+v, want exact durable identities without inferred outcome", boundary)
-	}
-}
-
-type externalSupervisorTestAuthenticator struct{}
-
-func (externalSupervisorTestAuthenticator) VerifyExternalSupervisorReceipt(context.Context, ExternalSupervisorAcceptanceReceipt, ExternalSupervisorTrustRoot) error {
-	return nil
-}
-
-func (externalSupervisorTestAuthenticator) VerifyExternalSupervisorCallback(context.Context, ExternalSupervisorCallback, ExternalSupervisorTrustRoot) error {
-	return nil
 }
 
 func newExternalSupervisorHandoffFixture(t *testing.T, deadline time.Time) (*Store, LaunchAdmissionRequest, TaskClaim, ExternalSupervisorEnvelope) {

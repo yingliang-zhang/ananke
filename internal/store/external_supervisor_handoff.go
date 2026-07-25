@@ -12,9 +12,6 @@ import (
 
 const (
 	ExternalSupervisorEnvelopeSchemaVersion     = "ananke.remote-supervisor-sealed-launch-envelope.v1"
-	ExternalSupervisorReceiptSchemaVersion      = "ananke.remote-supervisor-acceptance-receipt.v1"
-	ExternalSupervisorCallbackSchemaVersion     = "ananke.remote-supervisor-callback.v1"
-	ExternalSupervisorResultSchemaVersion       = "ananke.remote-supervisor-result.v1"
 	ExternalSupervisorCancellationSchemaVersion = "ananke.remote-supervisor-cancellation.v1"
 )
 
@@ -28,6 +25,15 @@ var (
 	ErrExternalSupervisorReceiptRequired = errors.New("external supervisor handoff requires a durable receipt")
 	ErrExternalSupervisorTrustRoot       = errors.New("external supervisor handoff trust root is invalid")
 )
+
+// ExternalSupervisorPredecessorReleaseIdentity is local admission configuration.
+// It is never serialized; later detached authorization records remain separate.
+type ExternalSupervisorPredecessorReleaseIdentity struct {
+	SupervisorArtifactSHA256 string `json:"-"`
+	BuildIdentityHash        string `json:"-"`
+	ReleaseAttestationHash   string `json:"-"`
+	ReleaseApprovalHash      string `json:"-"`
+}
 
 // ExternalSupervisorEnvelope contains only sealed identity bindings. It has no
 // executable, endpoint, credential, path, source, or evidence-content field.
@@ -53,53 +59,6 @@ type ExternalSupervisorEnvelope struct {
 	EnvelopeHash             string `json:"envelope_hash"`
 }
 
-// ExternalSupervisorTrustRoot is the current, independently authenticated
-// trust-bundle identity supplied by the caller that owns root verification.
-type ExternalSupervisorTrustRoot struct {
-	RootID          string
-	TrustBundleHash string
-}
-
-// ExternalSupervisorAcceptanceReceipt is the only acknowledgement accepted by
-// the handoff journal. It is identity-only and must be authenticated by the
-// current trust root before persistence.
-type ExternalSupervisorAcceptanceReceipt struct {
-	SchemaVersion       string `json:"schema_version"`
-	HandoffID           string `json:"handoff_id"`
-	EnvelopeHash        string `json:"envelope_hash"`
-	ReceiptIdentityHash string `json:"receipt_identity_hash"`
-	AttemptNumber       int    `json:"attempt_number"`
-	RootID              string `json:"root_id"`
-	TrustBundleHash     string `json:"trust_bundle_hash"`
-	SignatureHash       string `json:"signature_hash"`
-}
-
-// ExternalSupervisorResult carries a typed terminal claim and identity hashes
-// only. It does not change any local Run state.
-type ExternalSupervisorResult struct {
-	SchemaVersion        string `json:"schema_version"`
-	TerminalState        string `json:"terminal_state"`
-	EnvelopeHash         string `json:"envelope_hash"`
-	ReceiptIdentityHash  string `json:"receipt_identity_hash"`
-	EvidenceIdentityHash string `json:"evidence_identity_hash"`
-}
-
-// ExternalSupervisorCallback is accepted only after its exact receipt is
-// durable and an independently supplied verifier authenticates it under the
-// current trust root.
-type ExternalSupervisorCallback struct {
-	SchemaVersion        string                   `json:"schema_version"`
-	HandoffID            string                   `json:"handoff_id"`
-	EnvelopeHash         string                   `json:"envelope_hash"`
-	ReceiptIdentityHash  string                   `json:"receipt_identity_hash"`
-	CallbackIdentityHash string                   `json:"callback_identity_hash"`
-	AttemptNumber        int                      `json:"attempt_number"`
-	RootID               string                   `json:"root_id"`
-	TrustBundleHash      string                   `json:"trust_bundle_hash"`
-	SignatureHash        string                   `json:"signature_hash"`
-	Result               ExternalSupervisorResult `json:"result"`
-}
-
 // ExternalSupervisorCancellation records an authenticated cancellation intent.
 // It intentionally has no terminal result or outcome field.
 type ExternalSupervisorCancellation struct {
@@ -111,11 +70,13 @@ type ExternalSupervisorCancellation struct {
 	AttemptNumber            int    `json:"attempt_number"`
 }
 
-// ExternalSupervisorAuthenticator owns detached receipt/callback authentication.
-// Production provides no implementation; tests use a strictly in-process fake.
+// ExternalSupervisorAuthenticator re-verifies self-contained durable transport
+// evidence from pinned public roots. It retains no process-local replay state.
 type ExternalSupervisorAuthenticator interface {
-	VerifyExternalSupervisorReceipt(context.Context, ExternalSupervisorAcceptanceReceipt, ExternalSupervisorTrustRoot) error
-	VerifyExternalSupervisorCallback(context.Context, ExternalSupervisorCallback, ExternalSupervisorTrustRoot) error
+	VerifyExternalSupervisorEnvelope(context.Context, ExternalSupervisorEnvelope) error
+	VerifyExternalSupervisorReceipt(context.Context, ExternalSupervisorEnvelope, ExternalSupervisorAuthenticatedReceipt) error
+	VerifyExternalSupervisorCallback(context.Context, ExternalSupervisorEnvelope, ExternalSupervisorAuthenticatedReceipt, ExternalSupervisorAuthenticatedCallback) error
+	VerifyExternalSupervisorCancellation(context.Context, ExternalSupervisorEnvelope, ExternalSupervisorAuthenticatedReceipt, ExternalSupervisorAuthenticatedCancellation) error
 }
 
 // ExternalSupervisorHandoff is a durable staged envelope. The complete private
@@ -127,13 +88,13 @@ type ExternalSupervisorHandoff struct {
 	CreatedAt      time.Time
 }
 
-// ExternalSupervisorRecoveryBoundary reports identities already durable for a
-// handoff. Nil means absent, never an inferred execution or cancellation state.
+// ExternalSupervisorRecoveryBoundary reports exact authenticated durable
+// records. Nil means absent, never an inferred execution state.
 type ExternalSupervisorRecoveryBoundary struct {
 	Handoff      ExternalSupervisorHandoff
-	Receipt      *ExternalSupervisorAcceptanceReceipt
-	Callback     *ExternalSupervisorCallback
-	Cancellation *ExternalSupervisorCancellation
+	Receipt      *ExternalSupervisorAuthenticatedReceipt
+	Callback     *ExternalSupervisorAuthenticatedCallback
+	Cancellation *ExternalSupervisorAuthenticatedCancellation
 }
 
 // SealExternalSupervisorEnvelope validates the immutable content and derives
@@ -283,275 +244,6 @@ func (s *Store) ListPendingExternalSupervisorDeliveries(ctx context.Context) ([]
 	return handoffs, nil
 }
 
-// DeliverAndPersistExternalSupervisorReceipt holds the SQLite immediate lock
-// from full private-fence validation through in-process delivery, receipt
-// authentication, and durable receipt persistence. A receipt already durable
-// for the handoff is returned before the delivery callback is invoked.
-func (s *Store) DeliverAndPersistExternalSupervisorReceipt(ctx context.Context, handoffID string, root ExternalSupervisorTrustRoot, authenticator ExternalSupervisorAuthenticator, deliver func(ExternalSupervisorEnvelope) (ExternalSupervisorAcceptanceReceipt, error)) (ExternalSupervisorAcceptanceReceipt, error) {
-	if deliver == nil {
-		return ExternalSupervisorAcceptanceReceipt{}, fmt.Errorf("%w: nil delivery", ErrExternalSupervisorInvalid)
-	}
-	if authenticator == nil || validateExternalSupervisorTrustRoot(root) != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, ErrExternalSupervisorTrustRoot
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, err
-	}
-	defer func() { _ = tx.Rollback() }()
-	handoff, found, err := loadExternalSupervisorHandoff(ctx, tx, handoffID)
-	if err != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, err
-	}
-	if !found {
-		return ExternalSupervisorAcceptanceReceipt{}, ErrExternalSupervisorNotFound
-	}
-	boundary, err := loadLaunchRecoveryBoundary(ctx, tx, handoff.LaunchSpecHash)
-	if err != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, fmt.Errorf("%w: %v", ErrExternalSupervisorFence, err)
-	}
-	if err := validateExternalSupervisorAdmission(ctx, tx, handoff.Envelope, boundary.Claim.Fence, time.Now().UTC()); err != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, err
-	}
-	existing, found, err := loadExternalSupervisorReceipt(ctx, tx, handoffID)
-	if err != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, err
-	}
-	if found {
-		return existing, nil
-	}
-	receipt, err := deliver(handoff.Envelope)
-	if err != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, err
-	}
-	if err := validateExternalSupervisorReceipt(receipt); err != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, err
-	}
-	if receipt.RootID != root.RootID || receipt.TrustBundleHash != root.TrustBundleHash || authenticator.VerifyExternalSupervisorReceipt(ctx, receipt, root) != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, ErrExternalSupervisorTrustRoot
-	}
-	if err := validateExternalSupervisorReceiptBinding(receipt, handoff.Envelope); err != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, err
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO external_supervisor_receipts
-		(receipt_identity_hash, handoff_id, envelope_hash, attempt_number, root_id, trust_bundle_hash, receipt_json, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, receipt.ReceiptIdentityHash, receipt.HandoffID, receipt.EnvelopeHash, receipt.AttemptNumber, receipt.RootID, receipt.TrustBundleHash, mustCanonicalExternalSupervisorReceipt(receipt), nowStamp()); err != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, fmt.Errorf("insert external supervisor receipt: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, err
-	}
-	return receipt, nil
-}
-
-// WithExternalSupervisorDeliveryAdmission holds the SQLite immediate lock from
-// full private-fence validation through the caller's in-process delivery. No
-// delivery result is persisted by this method.
-func (s *Store) WithExternalSupervisorDeliveryAdmission(ctx context.Context, handoffID string, invoke func(ExternalSupervisorEnvelope) error) error {
-	if invoke == nil {
-		return fmt.Errorf("%w: nil delivery", ErrExternalSupervisorInvalid)
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	handoff, found, err := loadExternalSupervisorHandoff(ctx, tx, handoffID)
-	if err != nil {
-		return err
-	}
-	if !found {
-		return ErrExternalSupervisorNotFound
-	}
-	boundary, err := loadLaunchRecoveryBoundary(ctx, tx, handoff.LaunchSpecHash)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrExternalSupervisorFence, err)
-	}
-	if err := validateExternalSupervisorAdmission(ctx, tx, handoff.Envelope, boundary.Claim.Fence, time.Now().UTC()); err != nil {
-		return err
-	}
-	return invoke(handoff.Envelope)
-}
-
-// AcceptExternalSupervisorReceipt authenticates and durably records the exact
-// typed receipt. A duplicate exact receipt is idempotent; any other identity
-// for the handoff is a conflict.
-func (s *Store) AcceptExternalSupervisorReceipt(ctx context.Context, receipt ExternalSupervisorAcceptanceReceipt, root ExternalSupervisorTrustRoot, authenticator ExternalSupervisorAuthenticator) (ExternalSupervisorAcceptanceReceipt, error) {
-	if err := validateExternalSupervisorReceipt(receipt); err != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, err
-	}
-	if err := validateExternalSupervisorTrustRoot(root); err != nil || receipt.RootID != root.RootID || receipt.TrustBundleHash != root.TrustBundleHash {
-		return ExternalSupervisorAcceptanceReceipt{}, ErrExternalSupervisorTrustRoot
-	}
-	if authenticator == nil || authenticator.VerifyExternalSupervisorReceipt(ctx, receipt, root) != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, ErrExternalSupervisorTrustRoot
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, err
-	}
-	defer func() { _ = tx.Rollback() }()
-	handoff, found, err := loadExternalSupervisorHandoff(ctx, tx, receipt.HandoffID)
-	if err != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, err
-	}
-	if !found {
-		return ExternalSupervisorAcceptanceReceipt{}, ErrExternalSupervisorNotFound
-	}
-	if err := validateExternalSupervisorReceiptBinding(receipt, handoff.Envelope); err != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, err
-	}
-	boundary, err := loadLaunchRecoveryBoundary(ctx, tx, handoff.LaunchSpecHash)
-	if err != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, fmt.Errorf("%w: %v", ErrExternalSupervisorFence, err)
-	}
-	if err := validateExternalSupervisorAdmission(ctx, tx, handoff.Envelope, boundary.Claim.Fence, time.Now().UTC()); err != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, err
-	}
-	existing, found, err := loadExternalSupervisorReceipt(ctx, tx, receipt.HandoffID)
-	if err != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, err
-	}
-	if found {
-		if existing != receipt {
-			return ExternalSupervisorAcceptanceReceipt{}, ErrExternalSupervisorConflict
-		}
-		return existing, nil
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO external_supervisor_receipts
-		(receipt_identity_hash, handoff_id, envelope_hash, attempt_number, root_id, trust_bundle_hash, receipt_json, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, receipt.ReceiptIdentityHash, receipt.HandoffID, receipt.EnvelopeHash, receipt.AttemptNumber, receipt.RootID, receipt.TrustBundleHash, mustCanonicalExternalSupervisorReceipt(receipt), nowStamp()); err != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, fmt.Errorf("insert external supervisor receipt: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, err
-	}
-	return receipt, nil
-}
-
-// AcceptExternalSupervisorCallback requires an existing exact durable receipt,
-// verifies root and envelope binding, and appends the typed callback identity.
-// It does not project a terminal local execution state.
-func (s *Store) AcceptExternalSupervisorCallback(ctx context.Context, callback ExternalSupervisorCallback, root ExternalSupervisorTrustRoot, authenticator ExternalSupervisorAuthenticator) (ExternalSupervisorCallback, error) {
-	if err := validateExternalSupervisorCallback(callback); err != nil {
-		return ExternalSupervisorCallback{}, err
-	}
-	if err := validateExternalSupervisorTrustRoot(root); err != nil || callback.RootID != root.RootID || callback.TrustBundleHash != root.TrustBundleHash {
-		return ExternalSupervisorCallback{}, ErrExternalSupervisorTrustRoot
-	}
-	if authenticator == nil || authenticator.VerifyExternalSupervisorCallback(ctx, callback, root) != nil {
-		return ExternalSupervisorCallback{}, ErrExternalSupervisorTrustRoot
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return ExternalSupervisorCallback{}, err
-	}
-	defer func() { _ = tx.Rollback() }()
-	handoff, found, err := loadExternalSupervisorHandoff(ctx, tx, callback.HandoffID)
-	if err != nil {
-		return ExternalSupervisorCallback{}, err
-	}
-	if !found {
-		return ExternalSupervisorCallback{}, ErrExternalSupervisorNotFound
-	}
-	receipt, found, err := loadExternalSupervisorReceipt(ctx, tx, callback.HandoffID)
-	if err != nil {
-		return ExternalSupervisorCallback{}, err
-	}
-	if !found {
-		return ExternalSupervisorCallback{}, ErrExternalSupervisorReceiptRequired
-	}
-	if err := validateExternalSupervisorCallbackBinding(callback, handoff.Envelope, receipt, root); err != nil {
-		return ExternalSupervisorCallback{}, err
-	}
-	boundary, err := loadLaunchRecoveryBoundary(ctx, tx, handoff.LaunchSpecHash)
-	if err != nil {
-		return ExternalSupervisorCallback{}, fmt.Errorf("%w: %v", ErrExternalSupervisorFence, err)
-	}
-	if err := validateExternalSupervisorAdmission(ctx, tx, handoff.Envelope, boundary.Claim.Fence, time.Now().UTC()); err != nil {
-		return ExternalSupervisorCallback{}, err
-	}
-	existing, found, err := loadExternalSupervisorCallback(ctx, tx, callback.HandoffID)
-	if err != nil {
-		return ExternalSupervisorCallback{}, err
-	}
-	if found {
-		if existing != callback {
-			return ExternalSupervisorCallback{}, ErrExternalSupervisorConflict
-		}
-		return existing, nil
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO external_supervisor_callbacks
-		(callback_identity_hash, handoff_id, envelope_hash, receipt_identity_hash, attempt_number, root_id, trust_bundle_hash, callback_json, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, callback.CallbackIdentityHash, callback.HandoffID, callback.EnvelopeHash, callback.ReceiptIdentityHash, callback.AttemptNumber, callback.RootID, callback.TrustBundleHash, mustCanonicalExternalSupervisorCallback(callback), nowStamp()); err != nil {
-		return ExternalSupervisorCallback{}, fmt.Errorf("insert external supervisor callback: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return ExternalSupervisorCallback{}, err
-	}
-	return callback, nil
-}
-
-// RecordExternalSupervisorCancellation records a receipt-bound cancellation
-// intent only after reauthenticating the complete active fence. It never infers
-// a terminal result from cancellation, delivery, silence, or elapsed time.
-func (s *Store) RecordExternalSupervisorCancellation(ctx context.Context, cancellation ExternalSupervisorCancellation, fence LaunchFence) (ExternalSupervisorCancellation, error) {
-	if err := validateExternalSupervisorCancellation(cancellation); err != nil {
-		return ExternalSupervisorCancellation{}, err
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return ExternalSupervisorCancellation{}, err
-	}
-	defer func() { _ = tx.Rollback() }()
-	handoff, found, err := loadExternalSupervisorHandoff(ctx, tx, cancellation.HandoffID)
-	if err != nil {
-		return ExternalSupervisorCancellation{}, err
-	}
-	if !found {
-		return ExternalSupervisorCancellation{}, ErrExternalSupervisorNotFound
-	}
-	boundary, err := loadLaunchRecoveryBoundary(ctx, tx, handoff.LaunchSpecHash)
-	if err != nil {
-		return ExternalSupervisorCancellation{}, fmt.Errorf("%w: %v", ErrExternalSupervisorFence, err)
-	}
-	if boundary.Claim.Fence != fence || HashExternalSupervisorFenceBinding(fence) != handoff.Envelope.FenceBindingHash {
-		return ExternalSupervisorCancellation{}, ErrExternalSupervisorFence
-	}
-	if err := validateExternalSupervisorAdmission(ctx, tx, handoff.Envelope, fence, time.Now().UTC()); err != nil {
-		return ExternalSupervisorCancellation{}, err
-	}
-	receipt, found, err := loadExternalSupervisorReceipt(ctx, tx, cancellation.HandoffID)
-	if err != nil {
-		return ExternalSupervisorCancellation{}, err
-	}
-	if !found {
-		return ExternalSupervisorCancellation{}, ErrExternalSupervisorReceiptRequired
-	}
-	if cancellation.EnvelopeHash != handoff.Envelope.EnvelopeHash || cancellation.ReceiptIdentityHash != receipt.ReceiptIdentityHash || cancellation.AttemptNumber != handoff.Envelope.AttemptNumber {
-		return ExternalSupervisorCancellation{}, ErrExternalSupervisorConflict
-	}
-	existing, found, err := loadExternalSupervisorCancellation(ctx, tx, cancellation.HandoffID)
-	if err != nil {
-		return ExternalSupervisorCancellation{}, err
-	}
-	if found {
-		if existing != cancellation {
-			return ExternalSupervisorCancellation{}, ErrExternalSupervisorConflict
-		}
-		return existing, nil
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO external_supervisor_cancellations
-		(cancellation_identity_hash, handoff_id, envelope_hash, receipt_identity_hash, attempt_number, cancellation_json, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`, cancellation.CancellationIdentityHash, cancellation.HandoffID, cancellation.EnvelopeHash, cancellation.ReceiptIdentityHash, cancellation.AttemptNumber, mustCanonicalExternalSupervisorCancellation(cancellation), nowStamp()); err != nil {
-		return ExternalSupervisorCancellation{}, fmt.Errorf("insert external supervisor cancellation: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return ExternalSupervisorCancellation{}, err
-	}
-	return cancellation, nil
-}
-
 // GetExternalSupervisorRecoveryBoundary reads durable identities only. It never
 // calls a target or derives an outcome from missing rows.
 func (s *Store) GetExternalSupervisorRecoveryBoundary(ctx context.Context, handoffID string) (ExternalSupervisorRecoveryBoundary, error) {
@@ -597,77 +289,6 @@ func validateExternalSupervisorEnvelopeContent(envelope ExternalSupervisorEnvelo
 		if !launchHashPattern.MatchString(hash) {
 			return fmt.Errorf("%w: identity hash", ErrExternalSupervisorInvalid)
 		}
-	}
-	return nil
-}
-
-func validateExternalSupervisorTrustRoot(root ExternalSupervisorTrustRoot) error {
-	if !validExternalSupervisorIdentifier(root.RootID) || !launchHashPattern.MatchString(root.TrustBundleHash) {
-		return ErrExternalSupervisorTrustRoot
-	}
-	return nil
-}
-
-func validateExternalSupervisorReceipt(receipt ExternalSupervisorAcceptanceReceipt) error {
-	if receipt.SchemaVersion != ExternalSupervisorReceiptSchemaVersion || !validExternalSupervisorIdentifier(receipt.HandoffID) ||
-		receipt.AttemptNumber < 1 || !validExternalSupervisorIdentifier(receipt.RootID) {
-		return ErrExternalSupervisorInvalid
-	}
-	for _, hash := range []string{receipt.EnvelopeHash, receipt.ReceiptIdentityHash, receipt.TrustBundleHash, receipt.SignatureHash} {
-		if !launchHashPattern.MatchString(hash) {
-			return ErrExternalSupervisorInvalid
-		}
-	}
-	return nil
-}
-
-func validateExternalSupervisorCallback(callback ExternalSupervisorCallback) error {
-	if callback.SchemaVersion != ExternalSupervisorCallbackSchemaVersion || !validExternalSupervisorIdentifier(callback.HandoffID) ||
-		callback.AttemptNumber < 1 || !validExternalSupervisorIdentifier(callback.RootID) {
-		return ErrExternalSupervisorInvalid
-	}
-	for _, hash := range []string{callback.EnvelopeHash, callback.ReceiptIdentityHash, callback.CallbackIdentityHash, callback.TrustBundleHash, callback.SignatureHash} {
-		if !launchHashPattern.MatchString(hash) {
-			return ErrExternalSupervisorInvalid
-		}
-	}
-	if callback.Result.SchemaVersion != ExternalSupervisorResultSchemaVersion || callback.Result.EnvelopeHash != callback.EnvelopeHash ||
-		callback.Result.ReceiptIdentityHash != callback.ReceiptIdentityHash || !launchHashPattern.MatchString(callback.Result.EvidenceIdentityHash) {
-		return ErrExternalSupervisorInvalid
-	}
-	switch callback.Result.TerminalState {
-	case "completed", "failed", "cancelled":
-		return nil
-	default:
-		return ErrExternalSupervisorInvalid
-	}
-}
-
-func validateExternalSupervisorCancellation(cancellation ExternalSupervisorCancellation) error {
-	if cancellation.SchemaVersion != ExternalSupervisorCancellationSchemaVersion || !validExternalSupervisorIdentifier(cancellation.HandoffID) || cancellation.AttemptNumber < 1 {
-		return ErrExternalSupervisorInvalid
-	}
-	for _, hash := range []string{cancellation.EnvelopeHash, cancellation.ReceiptIdentityHash, cancellation.CancellationIdentityHash} {
-		if !launchHashPattern.MatchString(hash) {
-			return ErrExternalSupervisorInvalid
-		}
-	}
-	return nil
-}
-
-func validateExternalSupervisorReceiptBinding(receipt ExternalSupervisorAcceptanceReceipt, envelope ExternalSupervisorEnvelope) error {
-	if receipt.HandoffID != envelope.HandoffID || receipt.EnvelopeHash != envelope.EnvelopeHash || receipt.AttemptNumber != envelope.AttemptNumber {
-		return ErrExternalSupervisorConflict
-	}
-	return nil
-}
-
-func validateExternalSupervisorCallbackBinding(callback ExternalSupervisorCallback, envelope ExternalSupervisorEnvelope, receipt ExternalSupervisorAcceptanceReceipt, root ExternalSupervisorTrustRoot) error {
-	if callback.HandoffID != envelope.HandoffID || callback.EnvelopeHash != envelope.EnvelopeHash ||
-		callback.AttemptNumber != envelope.AttemptNumber || callback.ReceiptIdentityHash != receipt.ReceiptIdentityHash ||
-		callback.RootID != receipt.RootID || callback.TrustBundleHash != receipt.TrustBundleHash ||
-		callback.RootID != root.RootID || callback.TrustBundleHash != root.TrustBundleHash {
-		return ErrExternalSupervisorConflict
 	}
 	return nil
 }
@@ -726,60 +347,6 @@ func externalSupervisorEnvelopeCanonicalValue(envelope ExternalSupervisorEnvelop
 		value["envelope_hash"] = envelope.EnvelopeHash
 	}
 	return value
-}
-
-func externalSupervisorReceiptCanonicalValue(receipt ExternalSupervisorAcceptanceReceipt) map[string]any {
-	return map[string]any{
-		"schema_version": receipt.SchemaVersion, "handoff_id": receipt.HandoffID, "envelope_hash": receipt.EnvelopeHash,
-		"receipt_identity_hash": receipt.ReceiptIdentityHash, "attempt_number": receipt.AttemptNumber, "root_id": receipt.RootID,
-		"trust_bundle_hash": receipt.TrustBundleHash, "signature_hash": receipt.SignatureHash,
-	}
-}
-
-func externalSupervisorCallbackCanonicalValue(callback ExternalSupervisorCallback) map[string]any {
-	return map[string]any{
-		"schema_version": callback.SchemaVersion, "handoff_id": callback.HandoffID, "envelope_hash": callback.EnvelopeHash,
-		"receipt_identity_hash": callback.ReceiptIdentityHash, "callback_identity_hash": callback.CallbackIdentityHash,
-		"attempt_number": callback.AttemptNumber, "root_id": callback.RootID, "trust_bundle_hash": callback.TrustBundleHash,
-		"signature_hash": callback.SignatureHash,
-		"result": map[string]any{
-			"schema_version": callback.Result.SchemaVersion, "terminal_state": callback.Result.TerminalState,
-			"envelope_hash": callback.Result.EnvelopeHash, "receipt_identity_hash": callback.Result.ReceiptIdentityHash,
-			"evidence_identity_hash": callback.Result.EvidenceIdentityHash,
-		},
-	}
-}
-
-func externalSupervisorCancellationCanonicalValue(cancellation ExternalSupervisorCancellation) map[string]any {
-	return map[string]any{
-		"schema_version": cancellation.SchemaVersion, "handoff_id": cancellation.HandoffID,
-		"envelope_hash": cancellation.EnvelopeHash, "receipt_identity_hash": cancellation.ReceiptIdentityHash,
-		"cancellation_identity_hash": cancellation.CancellationIdentityHash, "attempt_number": cancellation.AttemptNumber,
-	}
-}
-
-func mustCanonicalExternalSupervisorReceipt(receipt ExternalSupervisorAcceptanceReceipt) string {
-	value, err := canonicalJSON(externalSupervisorReceiptCanonicalValue(receipt))
-	if err != nil {
-		panic("external supervisor receipt must be canonicalizable")
-	}
-	return string(value)
-}
-
-func mustCanonicalExternalSupervisorCallback(callback ExternalSupervisorCallback) string {
-	value, err := canonicalJSON(externalSupervisorCallbackCanonicalValue(callback))
-	if err != nil {
-		panic("external supervisor callback must be canonicalizable")
-	}
-	return string(value)
-}
-
-func mustCanonicalExternalSupervisorCancellation(cancellation ExternalSupervisorCancellation) string {
-	value, err := canonicalJSON(externalSupervisorCancellationCanonicalValue(cancellation))
-	if err != nil {
-		panic("external supervisor cancellation must be canonicalizable")
-	}
-	return string(value)
 }
 
 type externalSupervisorQueryer interface {
@@ -843,50 +410,70 @@ func loadExternalSupervisorHandoff(ctx context.Context, queryer externalSupervis
 	return ExternalSupervisorHandoff{Envelope: envelope, LaunchSpecHash: launchSpecHash, CreatedAt: createdAt}, true, nil
 }
 
-func loadExternalSupervisorReceipt(ctx context.Context, queryer externalSupervisorQueryer, handoffID string) (ExternalSupervisorAcceptanceReceipt, bool, error) {
+func loadExternalSupervisorReceipt(ctx context.Context, queryer externalSupervisorQueryer, handoffID string) (ExternalSupervisorAuthenticatedReceipt, bool, error) {
 	var raw string
 	err := queryer.QueryRowContext(ctx, `SELECT receipt_json FROM external_supervisor_receipts WHERE handoff_id = ?`, handoffID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return ExternalSupervisorAcceptanceReceipt{}, false, nil
+		return ExternalSupervisorAuthenticatedReceipt{}, false, nil
 	}
 	if err != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, false, err
+		return ExternalSupervisorAuthenticatedReceipt{}, false, err
 	}
-	var receipt ExternalSupervisorAcceptanceReceipt
-	if err := decodeCanonicalExternalSupervisorValue(raw, &receipt, externalSupervisorReceiptCanonicalValue); err != nil || validateExternalSupervisorReceipt(receipt) != nil {
-		return ExternalSupervisorAcceptanceReceipt{}, false, fmt.Errorf("%w: corrupt receipt", ErrExternalSupervisorInvalid)
+	var receipt ExternalSupervisorAuthenticatedReceipt
+	if err := decodeCanonicalExternalSupervisorProtocol(raw, &receipt); err != nil {
+		return ExternalSupervisorAuthenticatedReceipt{}, false, fmt.Errorf("%w: corrupt authenticated receipt", ErrExternalSupervisorInvalid)
+	}
+	handoff, found, err := loadExternalSupervisorHandoff(ctx, queryer, handoffID)
+	if err != nil || !found || validateAuthenticatedExternalSupervisorReceipt(receipt, handoff.Envelope) != nil {
+		return ExternalSupervisorAuthenticatedReceipt{}, false, fmt.Errorf("%w: corrupt authenticated receipt binding", ErrExternalSupervisorInvalid)
 	}
 	return receipt, true, nil
 }
 
-func loadExternalSupervisorCallback(ctx context.Context, queryer externalSupervisorQueryer, handoffID string) (ExternalSupervisorCallback, bool, error) {
+func loadExternalSupervisorCallback(ctx context.Context, queryer externalSupervisorQueryer, handoffID string) (ExternalSupervisorAuthenticatedCallback, bool, error) {
 	var raw string
 	err := queryer.QueryRowContext(ctx, `SELECT callback_json FROM external_supervisor_callbacks WHERE handoff_id = ?`, handoffID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return ExternalSupervisorCallback{}, false, nil
+		return ExternalSupervisorAuthenticatedCallback{}, false, nil
 	}
 	if err != nil {
-		return ExternalSupervisorCallback{}, false, err
+		return ExternalSupervisorAuthenticatedCallback{}, false, err
 	}
-	var callback ExternalSupervisorCallback
-	if err := decodeCanonicalExternalSupervisorValue(raw, &callback, externalSupervisorCallbackCanonicalValue); err != nil || validateExternalSupervisorCallback(callback) != nil {
-		return ExternalSupervisorCallback{}, false, fmt.Errorf("%w: corrupt callback", ErrExternalSupervisorInvalid)
+	var callback ExternalSupervisorAuthenticatedCallback
+	if err := decodeCanonicalExternalSupervisorProtocol(raw, &callback); err != nil {
+		return ExternalSupervisorAuthenticatedCallback{}, false, fmt.Errorf("%w: corrupt authenticated callback", ErrExternalSupervisorInvalid)
+	}
+	handoff, found, err := loadExternalSupervisorHandoff(ctx, queryer, handoffID)
+	if err != nil || !found {
+		return ExternalSupervisorAuthenticatedCallback{}, false, fmt.Errorf("%w: corrupt callback handoff", ErrExternalSupervisorInvalid)
+	}
+	receipt, found, err := loadExternalSupervisorReceipt(ctx, queryer, handoffID)
+	if err != nil || !found || validateAuthenticatedExternalSupervisorCallback(callback, handoff.Envelope, receipt) != nil {
+		return ExternalSupervisorAuthenticatedCallback{}, false, fmt.Errorf("%w: corrupt authenticated callback binding", ErrExternalSupervisorInvalid)
 	}
 	return callback, true, nil
 }
 
-func loadExternalSupervisorCancellation(ctx context.Context, queryer externalSupervisorQueryer, handoffID string) (ExternalSupervisorCancellation, bool, error) {
+func loadExternalSupervisorCancellation(ctx context.Context, queryer externalSupervisorQueryer, handoffID string) (ExternalSupervisorAuthenticatedCancellation, bool, error) {
 	var raw string
 	err := queryer.QueryRowContext(ctx, `SELECT cancellation_json FROM external_supervisor_cancellations WHERE handoff_id = ?`, handoffID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return ExternalSupervisorCancellation{}, false, nil
+		return ExternalSupervisorAuthenticatedCancellation{}, false, nil
 	}
 	if err != nil {
-		return ExternalSupervisorCancellation{}, false, err
+		return ExternalSupervisorAuthenticatedCancellation{}, false, err
 	}
-	var cancellation ExternalSupervisorCancellation
-	if err := decodeCanonicalExternalSupervisorValue(raw, &cancellation, externalSupervisorCancellationCanonicalValue); err != nil || validateExternalSupervisorCancellation(cancellation) != nil {
-		return ExternalSupervisorCancellation{}, false, fmt.Errorf("%w: corrupt cancellation", ErrExternalSupervisorInvalid)
+	var cancellation ExternalSupervisorAuthenticatedCancellation
+	if err := decodeCanonicalExternalSupervisorProtocol(raw, &cancellation); err != nil {
+		return ExternalSupervisorAuthenticatedCancellation{}, false, fmt.Errorf("%w: corrupt authenticated cancellation", ErrExternalSupervisorInvalid)
+	}
+	handoff, found, err := loadExternalSupervisorHandoff(ctx, queryer, handoffID)
+	if err != nil || !found {
+		return ExternalSupervisorAuthenticatedCancellation{}, false, fmt.Errorf("%w: corrupt cancellation handoff", ErrExternalSupervisorInvalid)
+	}
+	receipt, found, err := loadExternalSupervisorReceipt(ctx, queryer, handoffID)
+	if err != nil || !found || validateAuthenticatedExternalSupervisorCancellation(cancellation, handoff.Envelope, receipt) != nil {
+		return ExternalSupervisorAuthenticatedCancellation{}, false, fmt.Errorf("%w: corrupt authenticated cancellation binding", ErrExternalSupervisorInvalid)
 	}
 	return cancellation, true, nil
 }

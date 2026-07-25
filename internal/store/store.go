@@ -87,7 +87,8 @@ type migration struct {
 // makes the Approval and RevisionLifecycle pair reciprocal; v10 adds P2b review
 // journal; v11 adds P3b's fenced launch-admission authority; v12 adds P3f's
 // immutable external-supervisor handoff envelope, delivery outbox, and identity
-// facts; v13 adds P4's immutable evidence/verifier/admission journal.
+// facts; v13 adds P4's immutable evidence/verifier/admission journal; v14 adds
+// durable P3f transport nonce/channel/signature replay evidence.
 var migrations = []migration{
 	{version: 1, up: migrateV1},
 	{version: 2, up: migrateV2},
@@ -102,6 +103,7 @@ var migrations = []migration{
 	{version: 11, up: migrateV11},
 	{version: 12, up: migrateV12},
 	{version: 13, up: migrateV13},
+	{version: 14, up: migrateV14},
 }
 
 // SchemaVersion reports the highest applied migration version.

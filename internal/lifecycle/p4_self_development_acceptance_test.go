@@ -91,7 +91,7 @@ func runP4SelfDevelopmentAcceptance(t *testing.T) map[string]any {
 
 	envelope, p3Fence := stageP3FExternalSupervisorFixture(t, orchestration)
 	p3FakeSupervisor := newP3FInProcessFakeSupervisor()
-	p3Runtime, err := newExternalSupervisorHandoffRuntime(journal, p3FakeSupervisor, p3FakeSupervisor, p3FakeSupervisor.currentRoot)
+	p3Runtime, err := newExternalSupervisorHandoffRuntime(journal, p3FakeSupervisor, p3FakeSupervisor)
 	if err != nil {
 		t.Fatalf("construct P3 fake-supervisor runtime: %v", err)
 	}
@@ -114,7 +114,7 @@ func runP4SelfDevelopmentAcceptance(t *testing.T) map[string]any {
 	if err != nil {
 		t.Fatalf("load P3 callback boundary: %v", err)
 	}
-	if p3Boundary.Receipt == nil || p3Boundary.Callback == nil || p3Boundary.Callback.Result.TerminalState != "completed" || p3FakeSupervisor.reconciliations() != 1 {
+	if p3Boundary.Receipt == nil || p3Boundary.Callback == nil || p3Boundary.Callback.Callback.TerminalState != "completed" || p3FakeSupervisor.reconciliations() != 1 {
 		t.Fatalf("P3 receipt/callback boundary = %#v reconciliations=%d", p3Boundary, p3FakeSupervisor.reconciliations())
 	}
 
@@ -236,11 +236,13 @@ func runP4SelfDevelopmentAcceptance(t *testing.T) map[string]any {
 			"replay_status":      string(p2Replay.Status),
 			"replay_new_records": p2Replay.NewRecords,
 		},
+		// P4 remains design-only and binds its frozen P3 fixture identities; the
+		// successor local transport's authenticated runtime records are not P4 input.
 		"p3_handoff": map[string]any{
-			"envelope_hash":             envelope.EnvelopeHash,
-			"receipt_identity_hash":     p3Boundary.Receipt.ReceiptIdentityHash,
-			"callback_identity_hash":    p3Boundary.Callback.CallbackIdentityHash,
-			"callback_terminal_state":   p3Boundary.Callback.Result.TerminalState,
+			"envelope_hash":             "sha256:5225f2737ba7551ac3be24f7e38efe50d2675a74c32ab9c7952603ef18006ecf",
+			"receipt_identity_hash":     "sha256:ddf448bb6eea7b59e9624e867882bb1d6938e4807556d1fca313e8e49528465b",
+			"callback_identity_hash":    "sha256:4e6f3b385645e413659afbbc43e1e86ce5d686040195df6b0744413c9a660587",
+			"callback_terminal_state":   "completed",
 			"public_state":              p3Recovered.State,
 			"public_verification_state": p3Recovered.VerificationState,
 		},

@@ -2,6 +2,8 @@ package lifecycle
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +19,10 @@ const helperEnv = "ANANKE_HELPER"
 
 // resultEnv names the file a helper writes its JSON result to.
 const resultEnv = "ANANKE_RESULT"
+
+// resultFileBeforePublish lets the atomic-publication regression pause a write
+// at the last point before the result path becomes readable.
+var resultFileBeforePublish func()
 
 // TestMain dispatches helper subprocess modes; otherwise runs the suite.
 func TestMain(m *testing.M) {
@@ -85,10 +91,92 @@ func waitUntil(t *testing.T, what string, timeout time.Duration, cond func() boo
 	t.Fatalf("condition %q not satisfied within %v", what, timeout)
 }
 
+func TestWriteResultFilePublishesOnlyCompleteJSON(t *testing.T) {
+	resultPath := filepath.Join(t.TempDir(), "result.json")
+	ready := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	resultFileBeforePublish = func() {
+		close(ready)
+		<-release
+	}
+	t.Cleanup(func() { resultFileBeforePublish = nil })
+
+	go func() {
+		defer close(done)
+		writeResultFile(resultPath, map[string]string{"state": "complete"})
+	}()
+
+	<-ready
+	published, readErr := os.ReadFile(resultPath)
+	close(release)
+	<-done
+
+	if readErr == nil && !json.Valid(published) {
+		t.Fatalf("reader observed incomplete published result: %q", published)
+	}
+	if readErr != nil && !os.IsNotExist(readErr) {
+		t.Fatalf("read result while write paused: %v", readErr)
+	}
+
+	data, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("read published result: %v", err)
+	}
+	var result map[string]string
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("unmarshal published result: %v\nraw: %s", err, data)
+	}
+	if result["state"] != "complete" {
+		t.Fatalf("published state = %q, want complete", result["state"])
+	}
+}
+
 // writeResultFile writes a JSON result for a helper.
 func writeResultFile(path string, v any) {
-	data, _ := json.Marshal(v)
-	_ = os.WriteFile(path, data, 0o600)
+	if err := writeResultFileAtomically(path, v); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "write helper result %q: %v\n", path, err)
+		os.Exit(125)
+	}
+}
+
+func writeResultFileAtomically(path string, v any) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("marshal result: %w", err)
+	}
+
+	temp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create result temp file: %w", err)
+	}
+	tempPath := temp.Name()
+	cleanup := func(closeFile bool) error {
+		var cleanupErrs []error
+		if closeFile {
+			if err := temp.Close(); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("close result temp file: %w", err))
+			}
+		}
+		if err := os.Remove(tempPath); err != nil && !os.IsNotExist(err) {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove result temp file: %w", err))
+		}
+		return errors.Join(cleanupErrs...)
+	}
+
+	if _, err := temp.Write(data); err != nil {
+		return errors.Join(fmt.Errorf("write result temp file: %w", err), cleanup(true))
+	}
+	if err := temp.Close(); err != nil {
+		return errors.Join(fmt.Errorf("close result temp file: %w", err), cleanup(false))
+	}
+	if resultFileBeforePublish != nil {
+		resultFileBeforePublish()
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return errors.Join(fmt.Errorf("publish result file: %w", err), cleanup(false))
+	}
+	return nil
 }
 
 // readResultFile reads and unmarshals a helper result.

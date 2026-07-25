@@ -23,6 +23,17 @@ const (
 	externalSupervisorOutputSchemaVersion    = "ananke.omp-production-output.v1"
 )
 
+// ExternalSupervisorPredecessorReleaseIdentity returns the frozen local P3f
+// predecessor pins used by both lifecycle admission and transport authentication.
+func ExternalSupervisorPredecessorReleaseIdentity() store.ExternalSupervisorPredecessorReleaseIdentity {
+	return store.ExternalSupervisorPredecessorReleaseIdentity{
+		SupervisorArtifactSHA256: externalSupervisorArtifactSHA256,
+		BuildIdentityHash:        externalSupervisorBuildIdentityHash,
+		ReleaseAttestationHash:   externalSupervisorReleaseAttestationHash,
+		ReleaseApprovalHash:      externalSupervisorReleaseApprovalHash,
+	}
+}
+
 var errExternalSupervisorRuntimeDenied = errors.New("external supervisor handoff runtime denied")
 
 // externalSupervisorPublicOutput is deliberately a normalized no-authority
@@ -49,38 +60,53 @@ func externalSupervisorFailClosedOutput() externalSupervisorPublicOutput {
 	}
 }
 
-// externalSupervisorHandoffTransport is intentionally an in-process boundary.
-// This package supplies no concrete transport; package tests supply the one fake.
+// externalSupervisorHandoffTransport carries only exact authenticated P3f
+// records. Reconcile and cancel must receive the durable envelope and receipt.
 type externalSupervisorHandoffTransport interface {
-	Deliver(context.Context, store.ExternalSupervisorEnvelope) (store.ExternalSupervisorAcceptanceReceipt, error)
-	Reconcile(context.Context, store.ExternalSupervisorAcceptanceReceipt) (*store.ExternalSupervisorCallback, error)
-	Cancel(context.Context, store.ExternalSupervisorCancellation) error
+	Deliver(context.Context, store.ExternalSupervisorEnvelope) (store.ExternalSupervisorAuthenticatedReceipt, error)
+	Reconcile(context.Context, store.ExternalSupervisorEnvelope, store.ExternalSupervisorAuthenticatedReceipt) (*store.ExternalSupervisorAuthenticatedCallback, error)
+	Cancel(context.Context, store.ExternalSupervisorEnvelope, store.ExternalSupervisorAuthenticatedReceipt, store.ExternalSupervisorCancellation) (store.ExternalSupervisorAuthenticatedCancellation, error)
 }
+
+// ExternalSupervisorHandoffTransport exposes the existing identity-only seam
+// for production composition roots. Implementations remain outside lifecycle.
+type ExternalSupervisorHandoffTransport = externalSupervisorHandoffTransport
 
 // externalSupervisorHandoffRuntime retains no route, endpoint, command,
 // credential, artifact, source, evidence, process, or OMP capability. It only
-// stages sealed identities and delegates to an injected test transport.
+// stages sealed identities and delegates to an injected transport.
 type externalSupervisorHandoffRuntime struct {
 	journal       *store.Store
 	transport     externalSupervisorHandoffTransport
 	authenticator store.ExternalSupervisorAuthenticator
-	currentRoot   func() store.ExternalSupervisorTrustRoot
 }
 
-func newExternalSupervisorHandoffRuntime(journal *store.Store, transport externalSupervisorHandoffTransport, authenticator store.ExternalSupervisorAuthenticator, currentRoot func() store.ExternalSupervisorTrustRoot) (*externalSupervisorHandoffRuntime, error) {
-	if journal == nil || transport == nil || authenticator == nil || currentRoot == nil {
+// ExternalSupervisorHandoffRuntime and ExternalSupervisorPublicOutput expose
+// the existing fail-closed runtime without widening its authority or fields.
+type ExternalSupervisorHandoffRuntime = externalSupervisorHandoffRuntime
+type ExternalSupervisorPublicOutput = externalSupervisorPublicOutput
+
+func newExternalSupervisorHandoffRuntime(journal *store.Store, transport externalSupervisorHandoffTransport, authenticator store.ExternalSupervisorAuthenticator) (*externalSupervisorHandoffRuntime, error) {
+	if journal == nil || transport == nil || authenticator == nil {
 		return nil, errExternalSupervisorRuntimeDenied
 	}
-	return &externalSupervisorHandoffRuntime{
-		journal: journal, transport: transport, authenticator: authenticator, currentRoot: currentRoot,
-	}, nil
+	return &externalSupervisorHandoffRuntime{journal: journal, transport: transport, authenticator: authenticator}, nil
 }
 
-// submit persists before in-process fake delivery. It returns the same closed
+// NewExternalSupervisorHandoffRuntime injects a production transport and its
+// independent receipt/callback authenticator into the existing private seam.
+func NewExternalSupervisorHandoffRuntime(journal *store.Store, transport ExternalSupervisorHandoffTransport, authenticator store.ExternalSupervisorAuthenticator) (*ExternalSupervisorHandoffRuntime, error) {
+	return newExternalSupervisorHandoffRuntime(journal, transport, authenticator)
+}
+
+// submit persists before delivery through the injected seam. It returns the same closed
 // output on success and every failure; a receipt is not a terminal outcome.
 func (runtime *externalSupervisorHandoffRuntime) submit(ctx context.Context, envelope store.ExternalSupervisorEnvelope, fence store.LaunchFence) externalSupervisorPublicOutput {
 	output := externalSupervisorFailClosedOutput()
 	if runtime == nil || ctx == nil || !validExternalSupervisorEnvelope(envelope) {
+		return output
+	}
+	if runtime.authenticator.VerifyExternalSupervisorEnvelope(ctx, envelope) != nil {
 		return output
 	}
 	handoff, err := runtime.journal.StageExternalSupervisorHandoff(ctx, envelope, fence)
@@ -89,6 +115,12 @@ func (runtime *externalSupervisorHandoffRuntime) submit(ctx context.Context, env
 	}
 	runtime.deliver(ctx, handoff.Envelope.HandoffID)
 	return output
+}
+
+// Submit stages and delivers an exact sealed handoff while retaining the
+// normalized waiting_for_human projection.
+func (runtime *externalSupervisorHandoffRuntime) Submit(ctx context.Context, envelope store.ExternalSupervisorEnvelope, fence store.LaunchFence) ExternalSupervisorPublicOutput {
+	return runtime.submit(ctx, envelope, fence)
 }
 
 // recover replays only an immutable delivery obligation or authenticated
@@ -111,37 +143,34 @@ func (runtime *externalSupervisorHandoffRuntime) recover(ctx context.Context, ha
 		return output
 	}
 
-	var callback *store.ExternalSupervisorCallback
-	if err := runtime.journal.WithExternalSupervisorDeliveryAdmission(ctx, handoffID, func(store.ExternalSupervisorEnvelope) error {
-		var reconcileErr error
-		callback, reconcileErr = runtime.transport.Reconcile(ctx, *boundary.Receipt)
-		return reconcileErr
-	}); err != nil || callback == nil {
-		return output
-	}
-	root := runtime.currentRoot()
-	_, _ = runtime.journal.AcceptExternalSupervisorCallback(ctx, *callback, root, runtime.authenticator)
+	_, _ = runtime.journal.ReconcileAndPersistExternalSupervisorCallback(ctx, handoffID, runtime.authenticator, func(envelope store.ExternalSupervisorEnvelope, receipt store.ExternalSupervisorAuthenticatedReceipt) (*store.ExternalSupervisorAuthenticatedCallback, error) {
+		return runtime.transport.Reconcile(ctx, envelope, receipt)
+	})
 	return output
 }
 
+// Recover reconciles only the exact durable handoff boundary.
+func (runtime *externalSupervisorHandoffRuntime) Recover(ctx context.Context, handoffID string) ExternalSupervisorPublicOutput {
+	return runtime.recover(ctx, handoffID)
+}
+
 // cancel persists only a receipt-bound cancellation intent after the journal
-// reauthenticates the full private fence. A fake cancellation acknowledgement
-// never becomes a terminal result.
+// reauthenticates the full private fence. A cancellation acknowledgement never
+// becomes a terminal result.
 func (runtime *externalSupervisorHandoffRuntime) cancel(ctx context.Context, cancellation store.ExternalSupervisorCancellation, fence store.LaunchFence) externalSupervisorPublicOutput {
 	output := externalSupervisorFailClosedOutput()
 	if runtime == nil || ctx == nil {
 		return output
 	}
-	handoff, err := runtime.journal.GetExternalSupervisorHandoff(ctx, cancellation.HandoffID)
-	if err != nil || !validExternalSupervisorEnvelope(handoff.Envelope) {
-		return output
-	}
-	accepted, err := runtime.journal.RecordExternalSupervisorCancellation(ctx, cancellation, fence)
-	if err != nil {
-		return output
-	}
-	_ = runtime.transport.Cancel(ctx, accepted)
+	_, _ = runtime.journal.CancelAndPersistExternalSupervisorCancellation(ctx, cancellation, fence, runtime.authenticator, func(envelope store.ExternalSupervisorEnvelope, receipt store.ExternalSupervisorAuthenticatedReceipt, exact store.ExternalSupervisorCancellation) (store.ExternalSupervisorAuthenticatedCancellation, error) {
+		return runtime.transport.Cancel(ctx, envelope, receipt, exact)
+	})
 	return output
+}
+
+// Cancel records and transports only a receipt-bound cancellation intent.
+func (runtime *externalSupervisorHandoffRuntime) Cancel(ctx context.Context, cancellation store.ExternalSupervisorCancellation, fence store.LaunchFence) ExternalSupervisorPublicOutput {
+	return runtime.cancel(ctx, cancellation, fence)
 }
 
 func (runtime *externalSupervisorHandoffRuntime) deliver(ctx context.Context, handoffID string) {
@@ -149,8 +178,7 @@ func (runtime *externalSupervisorHandoffRuntime) deliver(ctx context.Context, ha
 	if err != nil || boundary.Receipt != nil || !validExternalSupervisorEnvelope(boundary.Handoff.Envelope) {
 		return
 	}
-	root := runtime.currentRoot()
-	_, _ = runtime.journal.DeliverAndPersistExternalSupervisorReceipt(ctx, handoffID, root, runtime.authenticator, func(envelope store.ExternalSupervisorEnvelope) (store.ExternalSupervisorAcceptanceReceipt, error) {
+	_, _ = runtime.journal.DeliverAndPersistExternalSupervisorReceipt(ctx, handoffID, runtime.authenticator, func(envelope store.ExternalSupervisorEnvelope) (store.ExternalSupervisorAuthenticatedReceipt, error) {
 		return runtime.transport.Deliver(ctx, envelope)
 	})
 }

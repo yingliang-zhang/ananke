@@ -2139,3 +2139,29 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 - Focused: `go test ./internal/store ./internal/lifecycle -run '^TestP4' -count=1 -timeout=120s` → PASS (2.11 s).
 - Full: `go test ./... -count=1 -timeout=300s` → PASS (3 packages with tests, 3 without; 48.63 s). Race: `go test -race ./... -count=1 -timeout=300s` → PASS (3 packages with tests, 3 without; 155.19 s). `go vet ./...` → PASS (1.20 s).
 - Contracts: `node --check contracts/p3d/verify.mjs && node contracts/p3d/verify.mjs && node contracts/p3d/verify.mjs --self-test && node --check contracts/p3f/verify.mjs && node contracts/p3f/verify.mjs && node contracts/p3f/verify.mjs --self-test && node --check contracts/p4/verify.mjs && node contracts/p4/verify.mjs && node contracts/p4/verify.mjs --self-test` → PASS (0.46 s). P4 self-test exercised its exact ordered 38-case denial-mutator inventory; every denial retained the closed `waiting_for_human` projection.
+
+### 2026-07-25 — P5 local trusted-supervisor Unix transport
+
+#### Strict TDD
+
+- RED: `go test ./internal/store ./internal/trustedsupervisor -run '^(TestExternalSupervisorAuthorizationIdentifiersUseFrozenP3FSafeOpaqueSemantics|TestEd25519AuthorizationRejectsSignedForbiddenOpaqueIdentifierValues|TestUnixClientNeverTransmitsSignedForbiddenAuthorizationIdentifierValues)$' -count=1` proved that grammar-valid URL/authority/credential/secret/private-key/command/argv/environment/source/artifact/evidence/path values could be sealed, signed, and reach the transport boundary.
+- GREEN: release `approval_id` and MoA `grant_id` now use the frozen P3f safe-opaque grammar and marker denial. Signed delivery/reconcile/cancel tests prove forged, correctly self-hashed and Ed25519-signed forbidden values fail authentication before dialing. The recursive wire scanner rejects forbidden field names and string values while explicitly accepting legitimate schema versions, hashes, public Ed25519 material, and the frozen revocation enum.
+- GREEN: restored structural admission tests pin the exact lifecycle runtime, transport, and store authenticator inventories; reject authority-bearing lifecycle imports/identifiers and concrete production implementations; prove every selected fake/server file is test-only; and reject route-policy drift before transport.
+
+#### Production boundary
+
+- `internal/trustedsupervisor` implements one-request/one-response Unix connections with four-byte big-endian frames, RFC 8785 canonical JSON, a hard 64 KiB maximum, deadlines capped at 10 seconds, bounded nonce/replay/authentication tables, exact replay and conflict detection, and fail-closed error classes.
+- The operator socket and trust-bundle paths and expected peer UID/PID exist only in `trustedsupervisor.Config` and command flags. Socket/endpoint fields, credentials, raw source, artifact/evidence bytes, commands, argv, and environment are absent from the framed protocol. Recursive tests inspect every request field and string value; only closed schemas, enums, hashes, signatures, public keys, and safe opaque identifiers pass.
+- Mandatory authentication is real Ed25519 verification, not a pin-only hook: canonical public trust-bundle self-hash; active/successor release, approval, and MoA roots; cross-signed rotations; successor-signed revocations; root validity/revocation selection; root-signed leaf certificates; detached authorization signatures; and peer-possession signatures over the exact request/channel/message bindings. Optional `AuthenticationHooks` run after and cannot replace these checks.
+- `cmd/ananke-trusted-supervisor-transport` is a separate one-shot production composition root requiring `--store`, `--socket`, `--trust-bundle`, `--peer-uid`, and `--peer-pid`. It injects the same client as transport and authenticator. The store rechecks the complete current private fence before delivery/reconciliation/cancellation; public output remains exactly `waiting_for_human` / `not_run` with empty events and no result.
+- The signed server is a separate re-executed test-binary process in `internal/trustedsupervisor/process_e2e_test.go`; its private keys and server implementation are excluded from production builds. **No production trusted-supervisor server exists.** There is still no OMP execution, project-audit execution, production child, source/artifact/evidence access, repair, repair-admission execution, or Run creation in this slice.
+
+#### Verification
+
+- Focused: `go test ./internal/trustedsupervisor ./internal/lifecycle ./cmd/ananke-trusted-supervisor-transport -run '^(TestUnixClient|TestP3FExternalSupervisor|TestP3FUnixTransportInjection|TestTrustedSupervisorTransportBinary)' -count=1 -timeout=120s` → PASS (3 packages).
+- Vet: `go vet ./internal/trustedsupervisor ./internal/lifecycle ./cmd/ananke-trusted-supervisor-transport` → PASS.
+- Contracts: syntax, normal verification, and self-test all pass for `contracts/p3d/verify.mjs`, `contracts/p3f/verify.mjs`, and `contracts/p4/verify.mjs`. P3f retains canonical adapter fixture `sha256:956cc3e2a7fb6426dc084f87fa55595ce8cf8767741b66eda77489db32c5cf44` and its exact 37-case denial fixture `sha256:6c69ac6ceaac825098fc716e4bb6576ee2bf1a3f7e0b4ca9ad3ba42b3d47b525`; P4 retains its exact closed `waiting_for_human` evidence/repair-admission projection.
+
+#### Terminal verdict
+
+- **PASS:** the minimum deployable local transport is a bounded, canonical, credential-and-pin-bound adapter injected through the existing fail-closed external-supervisor seam. It advances only sealed identity delivery toward a future read-only audit and creates no execution or repair authority.
