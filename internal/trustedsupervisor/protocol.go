@@ -14,9 +14,10 @@ import (
 )
 
 const (
-	requestSchemaVersion               = "ananke.local-trusted-supervisor-request.v3"
-	responseSchemaVersion              = "ananke.local-trusted-supervisor-response.v2"
-	wireEnvelopeReferenceSchemaVersion = "ananke.local-trusted-supervisor-envelope-reference.v1"
+	requestSchemaVersion                   = "ananke.local-trusted-supervisor-request.v4"
+	responseSchemaVersion                  = "ananke.local-trusted-supervisor-response.v2"
+	wireEnvelopeReferenceSchemaVersion     = "ananke.local-trusted-supervisor-envelope-reference.v2"
+	wirePredecessorProjectionSchemaVersion = "ananke.local-trusted-supervisor-predecessor-projection.v1"
 
 	operationDeliver   = "deliver"
 	operationReconcile = "reconcile"
@@ -83,24 +84,102 @@ type Config struct {
 	Timeout                            time.Duration
 	TrustBundle                        store.ExternalSupervisorTrustBundle
 }
+type wirePredecessorProjection struct {
+	SchemaVersion             string `json:"schema_version"`
+	EnvelopeSchemaVersion     string `json:"envelope_schema_version"`
+	HandoffID                 string `json:"handoff_id"`
+	IdempotencyKeyHash        string `json:"idempotency_key_hash"`
+	LaunchSpecHash            string `json:"launch_spec_hash"`
+	FenceBindingHash          string `json:"fence_binding_hash"`
+	Deadline                  string `json:"deadline"`
+	AttemptNumber             int    `json:"attempt_number"`
+	AttemptCap                int    `json:"attempt_cap"`
+	RouteMappingHash          string `json:"route_mapping_hash"`
+	SourceSnapshotHash        string `json:"source_snapshot_hash"`
+	SourceManifestHash        string `json:"source_manifest_hash"`
+	RepositoryIdentityHash    string `json:"repository_identity_hash"`
+	SupervisorArtifactSHA256  string `json:"supervisor_artifact_sha256"`
+	BuildIdentityHash         string `json:"build_identity_hash"`
+	ReleaseAttestationHash    string `json:"release_attestation_hash"`
+	ReleaseApprovalHash       string `json:"release_approval_hash"`
+	EvidenceContractHash      string `json:"evidence_contract_hash"`
+	EvidenceSchemaVersion     string `json:"evidence_schema_version"`
+	EnvelopeHash              string `json:"envelope_hash"`
+	PredecessorProjectionHash string `json:"predecessor_projection_hash,omitempty"`
+}
+
 type wireEnvelopeReference struct {
-	SchemaVersion         string `json:"schema_version"`
-	DurableEnvelopeHash   string `json:"durable_envelope_hash"`
-	EnvelopeReferenceHash string `json:"envelope_reference_hash"`
+	SchemaVersion         string                    `json:"schema_version"`
+	DurableEnvelopeHash   string                    `json:"durable_envelope_hash"`
+	PredecessorProjection wirePredecessorProjection `json:"predecessor_projection"`
+	EnvelopeReferenceHash string                    `json:"envelope_reference_hash,omitempty"`
+}
+
+func sealWirePredecessorProjection(envelope store.ExternalSupervisorEnvelope) (wirePredecessorProjection, error) {
+	if store.ValidateExternalSupervisorEnvelope(envelope) != nil {
+		return wirePredecessorProjection{}, ErrProtocol
+	}
+	projection := wirePredecessorProjection{
+		SchemaVersion: wirePredecessorProjectionSchemaVersion, EnvelopeSchemaVersion: envelope.SchemaVersion,
+		HandoffID: envelope.HandoffID, IdempotencyKeyHash: envelope.IdempotencyKeyHash,
+		LaunchSpecHash: envelope.LaunchSpecHash, FenceBindingHash: envelope.FenceBindingHash,
+		Deadline: envelope.Deadline, AttemptNumber: envelope.AttemptNumber, AttemptCap: envelope.AttemptCap,
+		RouteMappingHash: envelope.RouteMappingHash, SourceSnapshotHash: envelope.SourceSnapshotHash,
+		SourceManifestHash: envelope.SourceManifestHash, RepositoryIdentityHash: repositoryIdentityHash(envelope.RepositoryIdentity),
+		SupervisorArtifactSHA256: envelope.SupervisorArtifactSHA256, BuildIdentityHash: envelope.BuildIdentityHash,
+		ReleaseAttestationHash: envelope.ReleaseAttestationHash, ReleaseApprovalHash: envelope.ReleaseApprovalHash,
+		EvidenceContractHash: envelope.EvidenceContractHash, EvidenceSchemaVersion: envelope.EvidenceSchemaVersion,
+		EnvelopeHash: envelope.EnvelopeHash,
+	}
+	hash, err := canonicalHash(projection)
+	if err != nil {
+		return wirePredecessorProjection{}, err
+	}
+	projection.PredecessorProjectionHash = hash
+	return projection, nil
+}
+
+func validateWirePredecessorProjection(projection wirePredecessorProjection) error {
+	if projection.SchemaVersion != wirePredecessorProjectionSchemaVersion ||
+		projection.EnvelopeSchemaVersion != store.ExternalSupervisorEnvelopeSchemaVersion ||
+		!protocolIdentifierPattern.MatchString(projection.HandoffID) || projection.AttemptNumber < 1 ||
+		projection.AttemptCap < 1 || projection.AttemptNumber > projection.AttemptCap ||
+		projection.EvidenceSchemaVersion != "ananke.remote-supervisor-evidence.v1" {
+		return ErrProtocol
+	}
+	if _, err := time.Parse(time.RFC3339Nano, projection.Deadline); err != nil {
+		return ErrProtocol
+	}
+	for _, hash := range []string{
+		projection.IdempotencyKeyHash, projection.LaunchSpecHash, projection.FenceBindingHash,
+		projection.RouteMappingHash, projection.SourceSnapshotHash, projection.SourceManifestHash,
+		projection.RepositoryIdentityHash, projection.SupervisorArtifactSHA256, projection.BuildIdentityHash,
+		projection.ReleaseAttestationHash, projection.ReleaseApprovalHash, projection.EvidenceContractHash,
+		projection.EnvelopeHash, projection.PredecessorProjectionHash,
+	} {
+		if !protocolHashPattern.MatchString(hash) {
+			return ErrProtocol
+		}
+	}
+	claimedHash := projection.PredecessorProjectionHash
+	projection.PredecessorProjectionHash = ""
+	computed, err := canonicalHash(projection)
+	if err != nil || computed != claimedHash {
+		return ErrProtocol
+	}
+	return nil
 }
 
 func sealWireEnvelopeReference(envelope store.ExternalSupervisorEnvelope) (wireEnvelopeReference, error) {
-	if store.ValidateExternalSupervisorEnvelope(envelope) != nil {
-		return wireEnvelopeReference{}, ErrProtocol
+	projection, err := sealWirePredecessorProjection(envelope)
+	if err != nil {
+		return wireEnvelopeReference{}, err
 	}
 	reference := wireEnvelopeReference{
-		SchemaVersion:       wireEnvelopeReferenceSchemaVersion,
-		DurableEnvelopeHash: envelope.EnvelopeHash,
+		SchemaVersion: wireEnvelopeReferenceSchemaVersion, DurableEnvelopeHash: envelope.EnvelopeHash,
+		PredecessorProjection: projection,
 	}
-	hash, err := canonicalHash(map[string]any{
-		"schema_version":        reference.SchemaVersion,
-		"durable_envelope_hash": reference.DurableEnvelopeHash,
-	})
+	hash, err := canonicalHash(reference)
 	if err != nil {
 		return wireEnvelopeReference{}, err
 	}
@@ -111,14 +190,15 @@ func sealWireEnvelopeReference(envelope store.ExternalSupervisorEnvelope) (wireE
 func validateWireEnvelopeReference(reference wireEnvelopeReference) error {
 	if reference.SchemaVersion != wireEnvelopeReferenceSchemaVersion ||
 		!protocolHashPattern.MatchString(reference.DurableEnvelopeHash) ||
-		!protocolHashPattern.MatchString(reference.EnvelopeReferenceHash) {
+		!protocolHashPattern.MatchString(reference.EnvelopeReferenceHash) ||
+		validateWirePredecessorProjection(reference.PredecessorProjection) != nil ||
+		reference.DurableEnvelopeHash != reference.PredecessorProjection.EnvelopeHash {
 		return ErrProtocol
 	}
-	hash, err := canonicalHash(map[string]any{
-		"schema_version":        reference.SchemaVersion,
-		"durable_envelope_hash": reference.DurableEnvelopeHash,
-	})
-	if err != nil || hash != reference.EnvelopeReferenceHash {
+	claimedHash := reference.EnvelopeReferenceHash
+	reference.EnvelopeReferenceHash = ""
+	computed, err := canonicalHash(reference)
+	if err != nil || computed != claimedHash {
 		return ErrProtocol
 	}
 	return nil

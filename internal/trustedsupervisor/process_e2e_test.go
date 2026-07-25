@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	cryptorand "crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -77,7 +77,11 @@ func TestSignedUnixSupervisorProcessHelper(t *testing.T) {
 	if err != nil || connections < 1 || directory == "" || (mode != "strict" && mode != "impostor") {
 		t.Fatalf("invalid signed-supervisor helper configuration: dir=%q mode=%q connections=%q", directory, mode, os.Getenv(processSignedSupervisorCount))
 	}
-	fixture := newProcessSignedAuthorizationFixture(t, time.Now().UTC().Truncate(time.Second))
+	identityNamespace := ""
+	if mode == "impostor" {
+		identityNamespace = "impostor"
+	}
+	fixture := newProcessSignedAuthorizationFixture(t, time.Now().UTC().Truncate(time.Second), identityNamespace)
 	server := processSignedUnixServer{
 		fixture:   fixture,
 		mode:      mode,
@@ -191,6 +195,7 @@ func TestProductionCommandRejectsSameUIDWrongKeyPathReplacement(t *testing.T) {
 	binary := buildProductionTransportCommand(t)
 	legitimate := startProcessSignedSupervisor(t, "strict", 1)
 	impostor := startProcessSignedSupervisor(t, "impostor", 1)
+	assertProcessImpostorIdentityPreconditions(t, legitimate, impostor)
 	if err := os.Remove(legitimate.socketPath); err != nil {
 		t.Fatalf("unlink legitimate socket path: %v", err)
 	}
@@ -200,6 +205,7 @@ func TestProductionCommandRejectsSameUIDWrongKeyPathReplacement(t *testing.T) {
 
 	databasePath := filepath.Join(t.TempDir(), "path-replacement.sqlite")
 	handoff := seedProcessProductionHandoff(t, databasePath, "replacement", false)
+	assertFrozenProcessEnvelope(t, handoff.envelope)
 	runProductionTransportCommandWithPID(t, binary, legitimate.bundlePath, legitimate.socketPath, impostor.pid, databasePath, map[string]any{
 		"operation": "submit", "envelope": handoff.envelope, "fence": handoff.fence,
 	})
@@ -210,6 +216,33 @@ func TestProductionCommandRejectsSameUIDWrongKeyPathReplacement(t *testing.T) {
 	impostor.wait(t)
 	frames := readProcessWireFrames(t, impostor.tracePath)
 	assertProcessWireFrames(t, frames, legitimate.socketPath, map[string]bool{handoff.envelope.EnvelopeHash: true}, map[string]int{operationDeliver: 1})
+}
+func assertProcessImpostorIdentityPreconditions(t *testing.T, legitimate, impostor *processSignedSupervisor) {
+	t.Helper()
+	legitimatePeer := legitimate.bundle.SupervisorPeer.Certificate
+	impostorPeer := impostor.bundle.SupervisorPeer.Certificate
+	if legitimatePeer.SubjectPublicKey == impostorPeer.SubjectPublicKey {
+		t.Fatal("legitimate and impostor peer public keys unexpectedly match")
+	}
+	if legitimatePeer.SubjectKeySPKISHA256 == impostorPeer.SubjectKeySPKISHA256 {
+		t.Fatal("legitimate and impostor peer SPKI hashes unexpectedly match")
+	}
+	if legitimatePeer.IssuerRootID == impostorPeer.IssuerRootID ||
+		legitimate.bundle.ReleaseRoots.Active.RootID == impostor.bundle.ReleaseRoots.Active.RootID {
+		t.Fatal("legitimate and impostor peer root identities unexpectedly match")
+	}
+	if legitimate.bundle.TrustBundleHash == impostor.bundle.TrustBundleHash {
+		t.Fatal("legitimate and impostor trust-bundle hashes unexpectedly match")
+	}
+	for _, server := range []*processSignedSupervisor{legitimate, impostor} {
+		bundleBytes, err := os.ReadFile(server.bundlePath)
+		if err != nil {
+			t.Fatalf("read %s public trust bundle precondition: %v", server.mode, err)
+		}
+		if bytes.Contains(bytes.ToLower(bundleBytes), []byte("private")) {
+			t.Fatalf("%s helper exposed private data through its public trust bundle", server.mode)
+		}
+	}
 }
 
 func TestSeparateProcessSignedSupervisorIsTestOnly(t *testing.T) {
@@ -359,7 +392,7 @@ func (server *processSignedUnixServer) validateRequest(request wireRequest) erro
 			delivery.MoARoleGrantHash != server.fixture.bundle.Authorization.MoARoleGrant.GrantHash {
 			return ErrAuthentication
 		}
-		expectedDeliveryChannel, err := deriveMessageChannelBinding(request.ChannelBindingHash, "delivery", delivery.NonceHash, request.EnvelopeReference.EnvelopeReferenceHash)
+		expectedDeliveryChannel, err := deriveMessageChannelBinding(request.ChannelBindingHash, "delivery", delivery.NonceHash, request.EnvelopeReference.PredecessorProjection.PredecessorProjectionHash)
 		if err != nil || delivery.ChannelBindingHash != expectedDeliveryChannel {
 			return ErrAuthentication
 		}
@@ -399,22 +432,26 @@ func verifyProcessReceiptSignatures(fixture signedAuthorizationFixture, receipt 
 	return nil
 }
 
-func newProcessSignedAuthorizationFixture(t *testing.T, now time.Time) signedAuthorizationFixture {
+func newProcessSignedAuthorizationFixture(t *testing.T, now time.Time, identityNamespace string) signedAuthorizationFixture {
 	t.Helper()
+	seedNamespace := ""
+	rootNamespace := ""
+	if identityNamespace != "" {
+		seedNamespace = identityNamespace + ":"
+		rootNamespace = "_" + identityNamespace
+	}
 	keys := make(map[string]ed25519.PrivateKey)
 	for _, name := range []string{
 		"release-active", "release-successor", "approval-active", "approval-successor",
 		"moa-active", "moa-successor", "attestor", "approver", "grantor", "peer",
 	} {
-		_, privateKey, err := ed25519.GenerateKey(cryptorand.Reader)
-		if err != nil {
-			t.Fatalf("generate child-only %s key: %v", name, err)
-		}
+		digest := sha256.Sum256([]byte("ananke-process-test-ed25519:" + seedNamespace + name))
+		privateKey := ed25519.NewKeyFromSeed(digest[:])
 		keys[name] = privateKey
 	}
 	rootLifecycle := func(kind, activeName, successorName string) store.ExternalSupervisorTrustRootLifecycle {
 		activeKey, successorKey := keys[activeName], keys[successorName]
-		activeID, successorID := "ananke_"+kind+"_root_v1", "ananke_"+kind+"_root_v2"
+		activeID, successorID := "ananke_"+kind+"_root"+rootNamespace+"_v1", "ananke_"+kind+"_root"+rootNamespace+"_v2"
 		activeNotAfter, successorValidFrom := now.Add(4*time.Hour), now.Add(2*time.Hour)
 		rotation, err := store.SealExternalSupervisorRootRotation(store.ExternalSupervisorRootRotation{
 			SchemaVersion:               store.ExternalSupervisorRootRotationSchemaVersion,

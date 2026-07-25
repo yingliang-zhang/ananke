@@ -122,3 +122,45 @@ func TestExternalSupervisorAuthorizationIdentifiersUseFrozenP3FSafeOpaqueSemanti
 		})
 	}
 }
+
+func TestExternalSupervisorCallbackExplicitlyRepresentsAuditNotRunWaitingForHuman(t *testing.T) {
+	validHash := "sha256:" + strings.Repeat("a", 64)
+	callback := ExternalSupervisorProtocolCallback{
+		SchemaVersion:              ExternalSupervisorProtocolCallbackSchemaVersion,
+		AttemptNumber:              1,
+		CallbackChannelBindingHash: validHash,
+		CallbackID:                 "audit_callback_001",
+		DeliveryHash:               validHash,
+		EnvelopeHash:               validHash,
+		EvidenceHash:               validHash,
+		IssuedAt:                   "2026-07-25T00:00:00Z",
+		NonceHash:                  validHash,
+		ReceiptHash:                validHash,
+		ResultSchemaVersion:        ExternalSupervisorAuditNotRunResultSchemaVersion,
+		RouteMappingHash:           validHash,
+		SignerKeySPKISHA256:        validHash,
+		TerminalState:              ExternalSupervisorWaitingForHumanState,
+		TrustRootID:                "release_root_001",
+	}
+	sealed, err := SealExternalSupervisorProtocolCallback(callback)
+	if err != nil {
+		t.Fatalf("seal audit-not-run callback: %v", err)
+	}
+	if sealed.CallbackHash == "" || sealed.ResultSchemaVersion != ExternalSupervisorAuditNotRunResultSchemaVersion ||
+		sealed.TerminalState != ExternalSupervisorWaitingForHumanState {
+		t.Fatalf("sealed callback lost explicit no-audit state: %+v", sealed)
+	}
+
+	for _, mutate := range []func(*ExternalSupervisorProtocolCallback){
+		func(value *ExternalSupervisorProtocolCallback) {
+			value.ResultSchemaVersion = "ananke.independent-supervisor-result.v1"
+		},
+		func(value *ExternalSupervisorProtocolCallback) { value.TerminalState = "completed" },
+	} {
+		drifted := callback
+		mutate(&drifted)
+		if _, err := SealExternalSupervisorProtocolCallback(drifted); !errors.Is(err, ErrExternalSupervisorInvalid) {
+			t.Fatalf("half-drifted no-audit callback error = %v, want %v", err, ErrExternalSupervisorInvalid)
+		}
+	}
+}

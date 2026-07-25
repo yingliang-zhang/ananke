@@ -25,6 +25,8 @@ const (
 	ExternalSupervisorAuthenticatedCallbackSchemaVersion       = "ananke.local-trusted-supervisor-authenticated-callback.v1"
 	ExternalSupervisorCancellationAcknowledgementSchemaVersion = "ananke.local-trusted-supervisor-cancellation-acknowledgement.v1"
 	ExternalSupervisorAuthenticatedCancellationSchemaVersion   = "ananke.local-trusted-supervisor-authenticated-cancellation.v1"
+	ExternalSupervisorAuditNotRunResultSchemaVersion           = "ananke.independent-supervisor-audit-not-run.v1"
+	ExternalSupervisorWaitingForHumanState                     = "waiting_for_human"
 )
 
 var (
@@ -424,10 +426,13 @@ func SealExternalSupervisorProtocolReceipt(value ExternalSupervisorProtocolRecei
 
 func SealExternalSupervisorProtocolCallback(value ExternalSupervisorProtocolCallback) (ExternalSupervisorProtocolCallback, error) {
 	value.CallbackHash = ""
+	legacyTerminal := value.ResultSchemaVersion == "ananke.independent-supervisor-result.v1" &&
+		(value.TerminalState == "completed" || value.TerminalState == "failed" || value.TerminalState == "cancelled")
+	auditNotRun := value.ResultSchemaVersion == ExternalSupervisorAuditNotRunResultSchemaVersion &&
+		value.TerminalState == ExternalSupervisorWaitingForHumanState
 	if value.SchemaVersion != ExternalSupervisorProtocolCallbackSchemaVersion || !validExternalSupervisorIdentifier(value.CallbackID) ||
 		!validExternalSupervisorIdentifier(value.TrustRootID) || value.AttemptNumber < 1 || !externalSupervisorValidTime(value.IssuedAt) ||
-		value.ResultSchemaVersion != "ananke.independent-supervisor-result.v1" ||
-		(value.TerminalState != "completed" && value.TerminalState != "failed" && value.TerminalState != "cancelled") ||
+		(!legacyTerminal && !auditNotRun) ||
 		!externalSupervisorHashes(value.CallbackChannelBindingHash, value.DeliveryHash, value.EnvelopeHash, value.EvidenceHash,
 			value.NonceHash, value.ReceiptHash, value.RouteMappingHash, value.SignerKeySPKISHA256) {
 		return ExternalSupervisorProtocolCallback{}, ErrExternalSupervisorInvalid

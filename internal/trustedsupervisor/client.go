@@ -536,7 +536,7 @@ func (client *Client) exchange(ctx context.Context, request wireRequest) (wireRe
 	}
 	request.ChannelBindingHash = channel.BindingHash
 	if request.Delivery != nil {
-		deliveryChannel, err := deriveMessageChannelBinding(channel.BindingHash, "delivery", request.Delivery.NonceHash, request.EnvelopeReference.EnvelopeReferenceHash)
+		deliveryChannel, err := deriveMessageChannelBinding(channel.BindingHash, "delivery", request.Delivery.NonceHash, request.EnvelopeReference.PredecessorProjection.PredecessorProjectionHash)
 		if err != nil {
 			return wireResponse{}, wireRequest{}, err
 		}

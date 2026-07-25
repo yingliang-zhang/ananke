@@ -728,9 +728,7 @@ func assertClosedWireEnvelopeReference(t *testing.T, frame []byte, durableEnvelo
 		t.Fatal("wire request omitted closed envelope reference")
 	}
 	exactFields := map[string]struct{}{
-		"durable_envelope_hash":   {},
-		"envelope_reference_hash": {},
-		"schema_version":          {},
+		"durable_envelope_hash": {}, "envelope_reference_hash": {}, "predecessor_projection": {}, "schema_version": {},
 	}
 	actualFields := make(map[string]struct{}, len(reference))
 	for field := range reference {
@@ -744,8 +742,47 @@ func assertClosedWireEnvelopeReference(t *testing.T, frame []byte, durableEnvelo
 			t.Fatalf("wire envelope reference omitted frozen field %q: %v", field, actualFields)
 		}
 	}
-	if reference["schema_version"] != "ananke.local-trusted-supervisor-envelope-reference.v1" || reference["durable_envelope_hash"] != durableEnvelopeHash {
+	if reference["schema_version"] != wireEnvelopeReferenceSchemaVersion || reference["durable_envelope_hash"] != durableEnvelopeHash {
 		t.Fatalf("wire envelope reference lost durable binding: %v", reference)
+	}
+	projection, ok := reference["predecessor_projection"].(map[string]any)
+	if !ok {
+		t.Fatalf("wire predecessor projection = %T", reference["predecessor_projection"])
+	}
+	projectionFields := []string{
+		"schema_version", "envelope_schema_version", "handoff_id", "idempotency_key_hash", "launch_spec_hash",
+		"fence_binding_hash", "deadline", "attempt_number", "attempt_cap", "route_mapping_hash", "source_snapshot_hash",
+		"source_manifest_hash", "repository_identity_hash", "supervisor_artifact_sha256", "build_identity_hash",
+		"release_attestation_hash", "release_approval_hash", "evidence_contract_hash", "evidence_schema_version",
+		"envelope_hash", "predecessor_projection_hash",
+	}
+	if len(projection) != len(projectionFields) {
+		t.Fatalf("wire predecessor projection field count = %d, want %d: %v", len(projection), len(projectionFields), projection)
+	}
+	for _, field := range projectionFields {
+		if _, found := projection[field]; !found {
+			t.Fatalf("wire predecessor projection omitted %q", field)
+		}
+	}
+	if projection["schema_version"] != wirePredecessorProjectionSchemaVersion ||
+		projection["envelope_schema_version"] != store.ExternalSupervisorEnvelopeSchemaVersion ||
+		projection["evidence_schema_version"] != "ananke.remote-supervisor-evidence.v1" ||
+		projection["envelope_hash"] != durableEnvelopeHash {
+		t.Fatalf("wire predecessor projection lost fixed or durable binding: %v", projection)
+	}
+	projectionSelfHash, ok := projection["predecessor_projection_hash"].(string)
+	if !ok {
+		t.Fatalf("wire predecessor projection hash = %T", projection["predecessor_projection_hash"])
+	}
+	projectionInput := make(map[string]any, len(projection)-1)
+	for field, fieldValue := range projection {
+		if field != "predecessor_projection_hash" {
+			projectionInput[field] = fieldValue
+		}
+	}
+	canonicalProjection, err := canonicalHash(projectionInput)
+	if err != nil || projectionSelfHash != canonicalProjection {
+		t.Fatalf("wire predecessor projection hash = %q, want %q: %v", projectionSelfHash, canonicalProjection, err)
 	}
 	selfHash, ok := reference["envelope_reference_hash"].(string)
 	if !ok {
@@ -776,7 +813,7 @@ func assertClosedWireEnvelopeReference(t *testing.T, frame []byte, durableEnvelo
 		if !deliveryOK || !channelOK || !nonceOK || delivery["predecessor_envelope_hash"] != durableEnvelopeHash {
 			t.Fatalf("delivery lost envelope-reference predecessor binding: %v", request)
 		}
-		expectedChannel, err := deriveMessageChannelBinding(channelHash, "delivery", nonceHash, selfHash)
+		expectedChannel, err := deriveMessageChannelBinding(channelHash, "delivery", nonceHash, projectionSelfHash)
 		if err != nil || delivery["channel_binding_hash"] != expectedChannel {
 			t.Fatalf("delivery channel did not transitively bind envelope reference: %v, %v", delivery, err)
 		}

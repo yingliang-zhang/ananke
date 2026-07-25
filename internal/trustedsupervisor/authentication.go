@@ -112,6 +112,19 @@ func (verifier *ed25519Verifier) verifyAuthorizationAt(ctx context.Context, enve
 		(verifier.expectedPredecessor != (store.ExternalSupervisorPredecessorReleaseIdentity{}) && predecessorReleaseIdentityFromEnvelope(envelope) != verifier.expectedPredecessor) {
 		return authenticationError("authorization input")
 	}
+	attestation, approval := chain.ReleaseAttestation, chain.ReleaseApproval
+	if envelope.SupervisorArtifactSHA256 != attestation.ArtifactSHA256 || envelope.BuildIdentityHash != attestation.BuildIdentityHash ||
+		envelope.RouteMappingHash != attestation.RouteMappingHash || envelope.ReleaseAttestationHash == attestation.AttestationHash ||
+		envelope.ReleaseApprovalHash == approval.ApprovalHash {
+		return authenticationError("authorization predecessor binding")
+	}
+	return verifier.verifyAuthorizationChainAt(ctx, chain, verificationTime)
+}
+
+func (verifier *ed25519Verifier) verifyAuthorizationChainAt(ctx context.Context, chain store.ExternalSupervisorAuthorizationChain, verificationTime time.Time) error {
+	if verifier == nil || ctx == nil || ctx.Err() != nil || chain != verifier.bundle.Authorization {
+		return authenticationError("authorization chain input")
+	}
 	verificationTime = verificationTime.UTC()
 	if verificationTime.IsZero() {
 		return authenticationError("authorization time")
@@ -126,11 +139,9 @@ func (verifier *ed25519Verifier) verifyAuthorizationAt(ctx context.Context, enve
 	if sealed, err := store.SealExternalSupervisorMoARoleGrant(grant); err != nil || sealed != grant {
 		return authenticationError("MoA grant self hash")
 	}
-	if envelope.SupervisorArtifactSHA256 != attestation.ArtifactSHA256 || envelope.BuildIdentityHash != attestation.BuildIdentityHash ||
-		envelope.RouteMappingHash != attestation.RouteMappingHash || envelope.ReleaseAttestationHash == attestation.AttestationHash ||
-		envelope.ReleaseApprovalHash == approval.ApprovalHash || approval.AttestationHash != attestation.AttestationHash ||
-		approval.RouteMappingHash != envelope.RouteMappingHash || grant.ReleaseAttestationHash != attestation.AttestationHash ||
-		grant.ReleaseApprovalHash != approval.ApprovalHash || grant.RouteMappingHash != envelope.RouteMappingHash || grant.GranteeRole != "remote_supervisor_runner" {
+	if approval.AttestationHash != attestation.AttestationHash || approval.RouteMappingHash != attestation.RouteMappingHash ||
+		grant.ReleaseAttestationHash != attestation.AttestationHash || grant.ReleaseApprovalHash != approval.ApprovalHash ||
+		grant.RouteMappingHash != attestation.RouteMappingHash || grant.GranteeRole != "remote_supervisor_runner" {
 		return authenticationError("authorization transitive binding")
 	}
 	if !recordValidAt(attestation.IssuedAt, attestation.NotAfter, verificationTime) ||

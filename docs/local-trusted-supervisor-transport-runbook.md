@@ -2,23 +2,24 @@
 
 ## Scope and current state
 
-`ananke-trusted-supervisor-transport` is the minimum local Unix-domain-socket composition root for the existing P3f external-supervisor handoff runtime. It can submit an already sealed handoff, reconcile an already durable receipt, or transport an already admitted cancellation.
+`ananke-trusted-supervisor-transport` is the one-shot local Unix-domain-socket client for the existing P3f external-supervisor handoff runtime. It can submit an already sealed handoff, reconcile an already durable receipt, or transport an already admitted cancellation. `ananke-trusted-supervisor` is the production signed Unix server for that protocol.
 
-It does **not** implement or start a trusted-supervisor server, OMP, a project audit, a child process, source/artifact/evidence access, a repair, or a Run. Every lifecycle response remains exactly:
+The server authenticates the predecessor projection, repository policy, authorization chain, local client UID, replay state, and request bindings before signing protocol receipts, callbacks, or cancellation acknowledgements. Reconciliation remains an explicit `audit_not_run` / `waiting_for_human` callback; the lifecycle projection remains exactly:
 
 ```json
 {"events":[],"result":null,"schema_version":"ananke.omp-production-output.v1","state":"waiting_for_human","verification_state":"not_run"}
 ```
 
-The P3f/P4 canonical fixtures and identities are unchanged. In particular, the runtime still requires the complete current private fence and the frozen P3f envelope policy before any delivery, cancellation, or reconciliation call reaches the transport.
+Neither binary implements OMP, an executor, a project audit, a child process, source/artifact/evidence access, repair execution, or Run creation. The P3f/P4 canonical fixtures and identities are unchanged. The runtime still requires the complete current private fence and frozen P3f envelope policy before any delivery, cancellation, or reconciliation reaches the transport.
 
 ## Build
 
 ```sh
+go build -o ./bin/ananke-trusted-supervisor ./cmd/ananke-trusted-supervisor
 go build -o ./bin/ananke-trusted-supervisor-transport ./cmd/ananke-trusted-supervisor-transport
 ```
 
-The binary is a one-shot client. **No production trusted-supervisor server exists in this repository.** The command is not end-to-end deployable until an independently implemented, installed, and trusted local supervisor is listening.
+The server and one-shot client are production composition roots. Deployment requires operator-owned trust, private-key, repository-policy, journal, store, and socket paths; the repository does not supply deployment credentials or private signing material.
 
 ## Socket requirements
 
@@ -49,9 +50,38 @@ The client always performs the mandatory verification. It validates bundle and r
 
 Delivery additionally requires the artifact, build, route, attestation, approval, and MoA bindings to match the sealed envelope and signed authorization chain exactly. Durable receipts, callbacks, and cancellation acknowledgements are reverified against their own authoritative timestamps and the current bundle lifecycle before persistence. The response must retain the exact peer signing identity, selected release root, request hash, nonce, and Unix channel-binding hash.
 
+The production server requires:
+
+- `--socket`: absolute operator-owned Unix socket path;
+- `--repository-policy`: owner-only canonical repository identity policy;
+- `--trust-bundle`: owner-only canonical public trust bundle;
+- `--private-key-bundle`: owner-only canonical private signing-key bundle path; private key bytes never enter argv;
+- `--journal`: absolute durable server SQLite journal path;
+- `--expected-client-uid`: expected local client Unix user ID.
+
+The server checks owner-only files, pinned directory/file identity, socket mode and ownership, Darwin peer credentials, canonical bounded frames, authorization and predecessor bindings, and durable replay/conflict state. `--timeout` and `--max-frame-bytes` are optional and default to `2s` and `65536`.
+
 ## Invocation
 
-The binary reads one bounded JSON object from standard input. Unknown or trailing fields are rejected.
+### Server
+
+```sh
+ananke-trusted-supervisor \
+  --socket /private/operator/trusted-supervisor.sock \
+  --repository-policy /private/operator/trusted-supervisor-repositories.json \
+  --trust-bundle /private/operator/trusted-supervisor-trust-bundle.json \
+  --private-key-bundle /private/operator/trusted-supervisor-private-key.json \
+  --journal /private/operator/trusted-supervisor-journal.sqlite \
+  --expected-client-uid 501 \
+  --timeout 2s \
+  --max-frame-bytes 65536
+```
+
+The server owns the socket, journal, pinned directory handles, and in-memory signing key until shutdown. Shutdown stops admission, closes accepted connections, waits for workers, removes only its own socket inode, then closes and zeroizes resources. A replacement socket is never removed.
+
+### Client
+
+The transport binary reads one bounded JSON object from standard input. Unknown or trailing fields are rejected.
 
 Submit an envelope that was already sealed and admitted under the full current fence:
 
@@ -104,14 +134,14 @@ Exact replays are idempotent. A conflicting receipt, callback, or cancellation a
 ## Operational gate
 
 ```sh
-go test ./internal/trustedsupervisor ./internal/lifecycle ./cmd/ananke-trusted-supervisor-transport \
-  -run '^(TestUnixClient|TestP3FExternalSupervisor|TestP3FUnixTransportInjection|TestTrustedSupervisorTransportBinary)' \
+go test ./internal/trustedsupervisor ./internal/lifecycle ./cmd/ananke-trusted-supervisor ./cmd/ananke-trusted-supervisor-transport \
+  -run '^(TestProductionServer|TestUnixClient|TestP3FExternalSupervisor|TestP3FUnixTransportInjection|TestTrustedSupervisorTransportBinary)' \
   -count=1 -timeout=120s
-go vet ./internal/trustedsupervisor ./internal/lifecycle ./cmd/ananke-trusted-supervisor-transport
+go vet ./internal/trustedsupervisor ./internal/lifecycle ./cmd/ananke-trusted-supervisor ./cmd/ananke-trusted-supervisor-transport
 node contracts/p3f/verify.mjs
 node contracts/p3f/verify.mjs --self-test
 node contracts/p4/verify.mjs
 node contracts/p4/verify.mjs --self-test
 ```
 
-The Unix E2E test re-executes the Go test binary as a separate **TEST-ONLY** signed server process. Private keys, request handling, and response signing exist only in `internal/trustedsupervisor/process_e2e_test.go`, which `go list` proves is excluded from production builds. It is not a production server or an installation template; no production trusted-supervisor server exists in this repository.
+The process E2E coverage builds and launches the production `cmd/ananke-trusted-supervisor` command for submit, crash/restart, reconcile, shutdown, socket cleanup, journal secrecy, and binary-secrecy checks. Separate test-only signed peers remain adversarial client fixtures; they are not installation templates. Production still stops at the signed identity protocol boundary: there is no OMP, executor, audit runner, source/artifact/evidence reader, repair path, or Run creator.
