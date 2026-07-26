@@ -46,33 +46,43 @@ type ServerConfig struct {
 	PrivateKeyBundlePath               string
 	JournalPath                        string
 	RepositoryPolicyPath               string
+	ExecutionPolicyPath                string
 	ExpectedPredecessorReleaseIdentity store.ExternalSupervisorPredecessorReleaseIdentity
 	ExpectedClientUserID               uint32
+	RuntimeUserID                      uint32
+	RuntimeGroupID                     uint32
 	MaxFrameBytes                      uint32
 	ConnectionTimeout                  time.Duration
 	Now                                func() time.Time
+	testBrokerDependencies             auditBrokerDependencies
 }
 
-// Server owns one production local Unix listener and a separate durable replay
-// journal. It has no execution, source, artifact, evidence, OMP, repair, or Run
-// capability.
+// Server owns the signed local protocol boundary and a policy-selected,
+// read-only audit executor. It has no repair or Run capability.
 type Server struct {
 	config           ServerConfig
 	listener         *net.UnixListener
 	journal          *serverJournal
 	material         *serverSigningMaterial
 	repositoryPolicy *repositoryPolicy
+	executionPolicy  *executionPolicy
+	auditExecutor    *auditExecutor
 	socketDir        *pinnedOperatorDirectory
 	socketDevice     uint64
 	socketInode      uint64
 	semaphore        chan struct{}
 	lifecycleMu      sync.Mutex
 	lifecycleState   serverLifecycleState
-	lifecycleDone    chan struct{}
 	connections      map[net.Conn]struct{}
 	workers          sync.WaitGroup
 	lifecycleHooks   serverLifecycleHooks
+	closeAttempt     *serverCloseAttempt
 	closeErr         error
+}
+
+type serverCloseAttempt struct {
+	done chan struct{}
+	err  error
 }
 
 type pinnedOperatorDirectory struct {
@@ -84,6 +94,14 @@ type pinnedOperatorDirectory struct {
 }
 
 func NewServer(config ServerConfig) (*Server, error) {
+	return newServer(config, productionAtomicRuntimeAuthorityVerifier())
+}
+
+func newServer(config ServerConfig, runtimeVerifier atomicRuntimeAuthorityVerifier) (*Server, error) {
+	return newServerWithNamespaceAuthority(config, runtimeVerifier, productionAuditNamespaceAuthorityOptions(uint32(os.Getuid()), config.RuntimeUserID, config.RuntimeGroupID))
+}
+
+func newServerWithNamespaceAuthority(config ServerConfig, runtimeVerifier atomicRuntimeAuthorityVerifier, namespaceOptions auditNamespaceAuthorityOptions) (*Server, error) {
 	if config.SocketPath == "" || !filepath.IsAbs(config.SocketPath) || strings.IndexByte(config.SocketPath, 0) >= 0 || len(config.SocketPath) > maxUnixSocketPathBytes {
 		return nil, fmt.Errorf("%w: absolute bounded Unix socket path required", ErrProtocol)
 	}
@@ -145,6 +163,30 @@ func NewServer(config ServerConfig) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	executionPolicy, err := loadExecutionPolicyWithNamespaceAuthority(config.ExecutionPolicyPath, ownerUID, namespaceOptions)
+	if err != nil {
+		return nil, err
+	}
+	closeExecutionPolicy := true
+	defer func() {
+		if closeExecutionPolicy {
+			_ = executionPolicy.Close()
+		}
+	}()
+	if err := admitAtomicOMPRuntimeAuthority(executionPolicy, runtimeVerifier); err != nil {
+		return nil, err
+	}
+	executionPolicy.testBrokerDependencies = config.testBrokerDependencies
+	executionPolicy.setProtectedPaths(
+		config.TrustBundlePath,
+		config.PrivateKeyBundlePath,
+		config.RepositoryPolicyPath,
+		config.ExecutionPolicyPath,
+		config.JournalPath,
+		config.JournalPath+"-wal",
+		config.JournalPath+"-shm",
+		config.SocketPath,
+	)
 	journal, err := openServerJournal(config.JournalPath)
 	if err != nil {
 		return nil, err
@@ -153,6 +195,19 @@ func NewServer(config ServerConfig) (*Server, error) {
 	defer func() {
 		if closeJournal {
 			_ = journal.Close()
+		}
+	}()
+	if err := journal.bindAuditAuthority(executionPolicy, material); err != nil {
+		return nil, err
+	}
+	auditExecutor, err := newUnrecoveredAuditExecutor(journal, executionPolicy)
+	if err != nil {
+		return nil, err
+	}
+	closeAuditExecutor := true
+	defer func() {
+		if closeAuditExecutor {
+			auditExecutor.Close()
 		}
 	}()
 	if err := socketDirectory.Validate(); err != nil {
@@ -185,14 +240,20 @@ func NewServer(config ServerConfig) (*Server, error) {
 		return nil, authenticationError("published Unix socket owner")
 	}
 	server := &Server{
-		config: config, listener: listener, journal: journal, material: material, repositoryPolicy: policy, socketDir: socketDirectory,
-		socketDevice: uint64(status.Dev), socketInode: status.Ino, semaphore: make(chan struct{}, maxServerConnections),
-		connections: make(map[net.Conn]struct{}), lifecycleDone: make(chan struct{}),
+		config: config, listener: listener, journal: journal, material: material, repositoryPolicy: policy, executionPolicy: executionPolicy,
+		auditExecutor: auditExecutor, socketDir: socketDirectory, socketDevice: uint64(status.Dev), socketInode: status.Ino,
+		semaphore: make(chan struct{}, maxServerConnections), connections: make(map[net.Conn]struct{}),
+	}
+	auditExecutor.completeCancellation = server.completeDurableAuditCancellation
+	if err := auditExecutor.recover(); err != nil {
+		return nil, err
 	}
 	closeSocketDirectory = false
 	closeMaterial = false
 	closeJournal = false
+	closeAuditExecutor = false
 	closeListener = false
+	closeExecutionPolicy = false
 	return server, nil
 }
 
@@ -236,13 +297,22 @@ func (server *Server) Close() error {
 		return nil
 	}
 	server.lifecycleMu.Lock()
-	if server.lifecycleState != serverLifecycleOpen {
-		done := server.lifecycleDone
+	if server.lifecycleState == serverLifecycleClosed {
+		closeErr := server.closeErr
 		server.lifecycleMu.Unlock()
-		<-done
-		return server.closeErr
+		return closeErr
 	}
-	server.lifecycleState = serverLifecycleClosing
+	if server.closeAttempt != nil {
+		attempt := server.closeAttempt
+		server.lifecycleMu.Unlock()
+		<-attempt.done
+		return attempt.err
+	}
+	if server.lifecycleState == serverLifecycleOpen {
+		server.lifecycleState = serverLifecycleClosing
+	}
+	attempt := &serverCloseAttempt{done: make(chan struct{})}
+	server.closeAttempt = attempt
 	connections := make([]net.Conn, 0, len(server.connections))
 	for connection := range server.connections {
 		connections = append(connections, connection)
@@ -259,6 +329,16 @@ func (server *Server) Close() error {
 		server.lifecycleHooks.beforeWait()
 	}
 	server.workers.Wait()
+	if server.auditExecutor != nil {
+		if err := server.auditExecutor.Close(); err != nil {
+			attempt.err = err
+			server.lifecycleMu.Lock()
+			server.closeAttempt = nil
+			close(attempt.done)
+			server.lifecycleMu.Unlock()
+			return err
+		}
+	}
 	if server.lifecycleHooks.beforeReleaseResources != nil {
 		server.lifecycleHooks.beforeReleaseResources()
 	}
@@ -280,11 +360,18 @@ func (server *Server) Close() error {
 			closeErr = err
 		}
 	}
+	if server.executionPolicy != nil {
+		if err := server.executionPolicy.Close(); closeErr == nil {
+			closeErr = err
+		}
+	}
 
 	server.lifecycleMu.Lock()
 	server.closeErr = closeErr
 	server.lifecycleState = serverLifecycleClosed
-	close(server.lifecycleDone)
+	attempt.err = closeErr
+	server.closeAttempt = nil
+	close(attempt.done)
 	server.lifecycleMu.Unlock()
 	return closeErr
 }
@@ -321,6 +408,64 @@ func (server *Server) serveConnection(parent context.Context, connection *net.Un
 	if err != nil {
 		return err
 	}
+	envelope, err := server.reconstructEnvelope(*request.EnvelopeReference)
+	if err != nil {
+		return err
+	}
+	entry, err := server.executionPolicy.Resolve(envelope)
+	if err != nil {
+		return err
+	}
+	var terminal *auditExecutionEvent
+	var auditIntent *auditExecutionIntent
+	if request.Operation == operationReconcile {
+		loadedIntent, events, err := server.journal.loadAuditExecution(ctx, envelope.EnvelopeHash)
+		if err != nil {
+			return err
+		}
+		if len(events) == 0 || events[len(events)-1].State == auditStatePrepared || events[len(events)-1].State == auditStateRunning ||
+			events[len(events)-1].State == auditStateTimedOut || events[len(events)-1].State == auditStateFinalizing {
+			pending := wireResponse{
+				SchemaVersion: responseSchemaVersion, Operation: request.Operation, RequestHash: request.RequestHash,
+				PeerSignerSPKISHA256: server.material.signerSPKI, Status: "pending",
+			}
+			encoded, err := marshalCanonical(pending)
+			if err != nil {
+				return ErrProtocol
+			}
+			return writeFrame(connection, encoded, server.config.MaxFrameBytes)
+		}
+		terminalEvent := events[len(events)-1]
+		terminal = &terminalEvent
+		auditIntent = &loadedIntent
+		if terminalEvent.State == auditStateCompleted {
+			if err := validateAuditCallbackEvidence(server.executionPolicy.namespaceAuthority, loadedIntent, terminalEvent, entry); err != nil {
+				return err
+			}
+		}
+	}
+	if request.Operation == operationCancel {
+		record, cancelErr := server.auditExecutor.Cancel(envelope.EnvelopeHash, func(expected auditProcessIdentity) (auditCancellationRecord, error) {
+			intent, buildErr := server.buildAuditCancellationIntent(requestBytes, operationKey, request, envelope, expected)
+			if buildErr != nil {
+				return auditCancellationRecord{}, buildErr
+			}
+			return server.journal.requestAuditCancellation(ctx, intent)
+		})
+		if cancelErr != nil {
+			failure, buildErr := server.buildCancellationFailureResponse(request, cancellationFailureClass(cancelErr))
+			if buildErr != nil {
+				return buildErr
+			}
+			encoded, encodeErr := marshalCanonical(failure)
+			if encodeErr != nil {
+				return ErrProtocol
+			}
+			return writeFrame(connection, encoded, server.config.MaxFrameBytes)
+		}
+		defer zeroBytes(record.ResponseBytes)
+		return writeFrame(connection, record.ResponseBytes, server.config.MaxFrameBytes)
+	}
 	additionalNonceHash := ""
 	if request.Delivery != nil {
 		additionalNonceHash = request.Delivery.NonceHash
@@ -333,13 +478,18 @@ func (server *Server) serveConnection(parent context.Context, connection *net.Un
 			return err
 		}
 	}
-	responseBytes, _, err := server.journal.transact(ctx, serverJournalRequest{
+	journalRequest := serverJournalRequest{
 		RequestHash: request.RequestHash, Operation: request.Operation, OperationKey: operationKey,
 		RequestNonceHash: request.RequestNonceHash, ResponseNonceHash: request.ResponseNonceHash,
-		AdditionalNonceHash: additionalNonceHash,
-		RequestBytes:        requestBytes,
-	}, func() ([]byte, error) {
-		response, err := server.buildResponse(ctx, request)
+		AdditionalNonceHash: additionalNonceHash, RequestBytes: requestBytes,
+	}
+	if request.Operation == operationDeliver {
+		journalRequest.BuildAuditIntent = func(responseBytes []byte) (auditExecutionIntent, error) {
+			return buildAuditExecutionIntent(envelope, entry, responseBytes, server.config.Now())
+		}
+	}
+	responseBytes, _, err := server.journal.transact(ctx, journalRequest, func() ([]byte, error) {
+		response, err := server.buildResponse(ctx, request, auditIntent, terminal, entry)
 		if err != nil {
 			return nil, err
 		}
@@ -350,7 +500,21 @@ func (server *Server) serveConnection(parent context.Context, connection *net.Un
 		return encoded, nil
 	})
 	if err != nil {
+		if request.Operation == operationReconcile || request.Operation == operationCancel {
+			rejected := wireResponse{
+				SchemaVersion: responseSchemaVersion, Operation: request.Operation, RequestHash: request.RequestHash,
+				PeerSignerSPKISHA256: server.material.signerSPKI, Status: "rejected",
+			}
+			encoded, encodeErr := marshalCanonical(rejected)
+			if encodeErr != nil {
+				return ErrProtocol
+			}
+			return writeFrame(connection, encoded, server.config.MaxFrameBytes)
+		}
 		return err
+	}
+	if request.Operation == operationDeliver {
+		server.auditExecutor.Notify(envelope.EnvelopeHash)
 	}
 	return writeFrame(connection, responseBytes, server.config.MaxFrameBytes)
 }

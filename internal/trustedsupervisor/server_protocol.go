@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -104,6 +105,12 @@ func (server *Server) reconstructEnvelope(reference wireEnvelopeReference) (stor
 	expectedProjection, err := sealWirePredecessorProjection(sealed)
 	if err != nil || expectedProjection != projection {
 		return store.ExternalSupervisorEnvelope{}, authenticationError("predecessor projection reconstruction")
+	}
+	if server.executionPolicy == nil {
+		return store.ExternalSupervisorEnvelope{}, authenticationError("execution policy unavailable")
+	}
+	if _, err := server.executionPolicy.Resolve(sealed); err != nil {
+		return store.ExternalSupervisorEnvelope{}, err
 	}
 	return sealed, nil
 }
@@ -252,7 +259,151 @@ func (server *Server) verifyKnownReceipt(ctx context.Context, envelope store.Ext
 	return nil
 }
 
-func (server *Server) buildResponse(ctx context.Context, request wireRequest) (wireResponse, error) {
+func sealWireCancellationFailure(failure wireCancellationFailure) (wireCancellationFailure, error) {
+	failure.FailureHash = ""
+	if failure.SchemaVersion != wireCancellationFailureSchemaVersion || !protocolIdentifierPattern.MatchString(failure.FailureClass) ||
+		failure.AttemptNumber < 1 || !validServerJournalTimestamp(failure.IssuedAt) || !protocolIdentifierPattern.MatchString(failure.TrustRootID) {
+		return wireCancellationFailure{}, ErrProtocol
+	}
+	for _, hash := range []string{failure.CancellationHash, failure.EnvelopeHash, failure.ReceiptHash, failure.ChannelBindingHash, failure.NonceHash, failure.SignerKeySPKISHA256} {
+		if !protocolHashPattern.MatchString(hash) {
+			return wireCancellationFailure{}, ErrProtocol
+		}
+	}
+	hash, err := canonicalHash(failure)
+	if err != nil {
+		return wireCancellationFailure{}, err
+	}
+	failure.FailureHash = hash
+	return failure, nil
+}
+
+func (server *Server) buildCancellationFailureResponse(request wireRequest, failureClass string) (wireResponse, error) {
+	if server == nil || request.Operation != operationCancel || request.Receipt == nil || request.Cancellation == nil {
+		return wireResponse{}, ErrProtocol
+	}
+	allowed := map[string]bool{
+		"cancellation_conflict": true, "cancellation_deadline": true, "cancellation_internal_failure": true,
+		"term_signal_failed": true, "kill_signal_failed": true, "group_exit_unconfirmed": true,
+		"process_wait_unconfirmed": true, "process_wait_failed": true, "process_inspection_failed": true,
+		"group_inspection_failed": true, "process_identity_mismatch": true, "process_identity_unavailable": true,
+		"artifact_cleanup_failed": true,
+	}
+	if !allowed[failureClass] {
+		failureClass = "cancellation_internal_failure"
+	}
+	now := server.config.Now()
+	root, err := server.signerAt(now)
+	if err != nil {
+		return wireResponse{}, err
+	}
+	channel, err := deriveMessageChannelBinding(request.ChannelBindingHash, "cancellation_failure", request.ResponseNonceHash, request.Cancellation.CancellationIdentityHash)
+	if err != nil {
+		return wireResponse{}, err
+	}
+	failure, err := sealWireCancellationFailure(wireCancellationFailure{
+		SchemaVersion: wireCancellationFailureSchemaVersion, FailureClass: failureClass,
+		CancellationHash: request.Cancellation.CancellationIdentityHash,
+		EnvelopeHash:     request.EnvelopeReference.DurableEnvelopeHash, ReceiptHash: request.Receipt.Receipt.ReceiptHash,
+		AttemptNumber: request.Cancellation.AttemptNumber, ChannelBindingHash: channel, NonceHash: request.ResponseNonceHash,
+		IssuedAt: now.Format(time.RFC3339Nano), SignerKeySPKISHA256: server.material.signerSPKI, TrustRootID: root.RootID,
+	})
+	if err != nil {
+		return wireResponse{}, err
+	}
+	authentication, err := server.signMessage("cancellation", failure.FailureHash, failure.NonceHash, failure.ChannelBindingHash, request.RequestHash, failure.IssuedAt)
+	if err != nil {
+		return wireResponse{}, err
+	}
+	return wireResponse{
+		SchemaVersion: responseSchemaVersion, Operation: operationCancel, RequestHash: request.RequestHash,
+		PeerSignerSPKISHA256: server.material.signerSPKI, Status: "failed",
+		CancellationFailure: &failure, CancellationFailureAuthentication: &authentication,
+	}, nil
+}
+
+func (server *Server) buildAuditCancellationIntent(
+	requestBytes []byte,
+	operationKey string,
+	request wireRequest,
+	envelope store.ExternalSupervisorEnvelope,
+	expected auditProcessIdentity,
+) (auditCancellationIntent, error) {
+	if server == nil || request.Operation != operationCancel || request.Receipt == nil || request.Cancellation == nil ||
+		operationKey != operationCancel+":"+request.Receipt.Receipt.ReceiptHash {
+		return auditCancellationIntent{}, ErrProtocol
+	}
+	exclusivityNonceHash, err := canonicalHash(map[string]any{
+		"schema_version":        "ananke.local-trusted-supervisor-receipt-operation-exclusivity.v1",
+		"receipt_identity_hash": request.Receipt.Receipt.ReceiptHash,
+	})
+	if err != nil {
+		return auditCancellationIntent{}, err
+	}
+	intent := auditCancellationIntent{
+		SchemaVersion: auditCancellationIntentSchemaVersion,
+		IntentID:      "audit_cancellation_" + hashIDFragment(request.Cancellation.CancellationIdentityHash),
+		RequestHash:   request.RequestHash, RequestBytes: append([]byte(nil), requestBytes...), OperationKey: operationKey,
+		RequestNonceHash: request.RequestNonceHash, ResponseNonceHash: request.ResponseNonceHash,
+		ExclusivityNonceHash: exclusivityNonceHash,
+		EnvelopeHash:         envelope.EnvelopeHash, HandoffID: envelope.HandoffID, ReceiptHash: request.Receipt.Receipt.ReceiptHash,
+		CancellationHash: request.Cancellation.CancellationIdentityHash, Attempt: request.Cancellation.AttemptNumber,
+		ExpectedPID: expected.PID, ExpectedPGID: expected.PGID, ExpectedStartIdentity: expected.ProcessStartIdentity,
+		State: auditCancellationStateRequested, RequestedAt: server.config.Now().Format(time.RFC3339Nano),
+	}
+	return sealAuditCancellationIntent(intent)
+}
+
+func (server *Server) completeDurableAuditCancellation(
+	record auditCancellationRecord,
+	event auditExecutionEvent,
+	outcome string,
+	failureClass string,
+) error {
+	if server == nil {
+		return ErrProtocol
+	}
+	var request wireRequest
+	if decodeCanonical(record.Intent.RequestBytes, &request) != nil || request.RequestHash != record.Intent.RequestHash ||
+		request.Operation != operationCancel || request.Cancellation == nil ||
+		request.Cancellation.CancellationIdentityHash != record.Intent.CancellationHash {
+		return authenticationError("durable cancellation request binding")
+	}
+	completed, err := server.journal.completeAuditCancellation(context.Background(), record.Intent, event, outcome, func() ([]byte, error) {
+		var response wireResponse
+		var buildErr error
+		if outcome == auditCancellationOutcomeCompleted {
+			response, buildErr = server.buildResponse(context.Background(), request, nil, nil, executionPolicyEntry{})
+		} else {
+			response, buildErr = server.buildCancellationFailureResponse(request, failureClass)
+		}
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		return marshalCanonical(response)
+	})
+	if err != nil {
+		return err
+	}
+	zeroBytes(completed.ResponseBytes)
+	return nil
+}
+
+func cancellationFailureClass(err error) string {
+	var termination *auditTerminationError
+	if errors.As(err, &termination) && protocolIdentifierPattern.MatchString(termination.FailureClass) {
+		return termination.FailureClass
+	}
+	if errors.Is(err, ErrReplay) || errors.Is(err, ErrAuthentication) {
+		return "cancellation_conflict"
+	}
+	if errors.Is(err, ErrDeadline) {
+		return "cancellation_deadline"
+	}
+	return "cancellation_internal_failure"
+}
+
+func (server *Server) buildResponse(ctx context.Context, request wireRequest, auditIntent *auditExecutionIntent, auditTerminal *auditExecutionEvent, entry executionPolicyEntry) (wireResponse, error) {
 	if ctx.Err() != nil {
 		return wireResponse{}, ErrDeadline
 	}
@@ -296,6 +447,17 @@ func (server *Server) buildResponse(ctx context.Context, request wireRequest) (w
 		response.Receipt = &receipt
 		response.ReceiptAuthentication = &receiptAuthentication
 	case operationReconcile:
+		if auditTerminal == nil {
+			return wireResponse{}, ErrProtocol
+		}
+		if auditIntent == nil {
+			return wireResponse{}, ErrProtocol
+		}
+		if auditTerminal.State == auditStateCompleted {
+			if err := validateAuditCallbackEvidence(server.executionPolicy.namespaceAuthority, *auditIntent, *auditTerminal, entry); err != nil {
+				return wireResponse{}, err
+			}
+		}
 		receipt := *request.Receipt
 		root, err := server.signerAt(now)
 		if err != nil {
@@ -305,12 +467,21 @@ func (server *Server) buildResponse(ctx context.Context, request wireRequest) (w
 		if err != nil {
 			return wireResponse{}, err
 		}
-		evidenceHash, err := canonicalHash(map[string]any{
-			"audit_state": "audit_not_run", "schema_version": store.ExternalSupervisorAuditNotRunResultSchemaVersion,
-			"state": store.ExternalSupervisorWaitingForHumanState, "verification_state": "not_run",
-		})
-		if err != nil {
-			return wireResponse{}, err
+		evidenceHash := auditTerminal.EvidenceHash
+		resultSchemaVersion := store.ExternalSupervisorAuditNotRunResultSchemaVersion
+		terminalState := store.ExternalSupervisorWaitingForHumanState
+		if auditTerminal.State == auditStateCompleted && protocolHashPattern.MatchString(auditTerminal.EvidenceHash) {
+			resultSchemaVersion = "ananke.independent-supervisor-result.v1"
+			terminalState = auditStateCompleted
+		} else {
+			evidenceHash, err = canonicalHash(map[string]any{
+				"audit_state": auditTerminal.State, "failure_class": auditTerminal.FailureClass,
+				"schema_version": store.ExternalSupervisorAuditNotRunResultSchemaVersion,
+				"state":          store.ExternalSupervisorWaitingForHumanState, "verification_state": "not_run",
+			})
+			if err != nil {
+				return wireResponse{}, err
+			}
 		}
 		callback, err := store.SealExternalSupervisorProtocolCallback(store.ExternalSupervisorProtocolCallback{
 			SchemaVersion: store.ExternalSupervisorProtocolCallbackSchemaVersion,
@@ -319,8 +490,7 @@ func (server *Server) buildResponse(ctx context.Context, request wireRequest) (w
 			ReceiptHash: receipt.Receipt.ReceiptHash, RouteMappingHash: receipt.Receipt.RouteMappingHash,
 			AttemptNumber: receipt.Receipt.AttemptNumber, CallbackChannelBindingHash: callbackChannel,
 			IssuedAt: now.Format(time.RFC3339Nano), NonceHash: request.ResponseNonceHash, EvidenceHash: evidenceHash,
-			ResultSchemaVersion: store.ExternalSupervisorAuditNotRunResultSchemaVersion,
-			TerminalState:       store.ExternalSupervisorWaitingForHumanState,
+			ResultSchemaVersion: resultSchemaVersion, TerminalState: terminalState,
 			SignerKeySPKISHA256: server.material.signerSPKI, TrustRootID: root.RootID,
 		})
 		if err != nil {

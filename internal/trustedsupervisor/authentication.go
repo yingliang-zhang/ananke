@@ -108,7 +108,13 @@ func validateTrustRootKey(root store.ExternalSupervisorTrustRootKey) (ed25519.Pu
 }
 
 func (verifier *ed25519Verifier) verifyAuthorizationAt(ctx context.Context, envelope store.ExternalSupervisorEnvelope, chain store.ExternalSupervisorAuthorizationChain, verificationTime time.Time) error {
-	if verifier == nil || ctx == nil || ctx.Err() != nil || store.ValidateExternalSupervisorEnvelope(envelope) != nil || chain != verifier.bundle.Authorization ||
+	if verifier == nil || ctx == nil {
+		return authenticationError("authorization input")
+	}
+	if err := verificationDeadlineError(ctx); err != nil {
+		return err
+	}
+	if store.ValidateExternalSupervisorEnvelope(envelope) != nil || chain != verifier.bundle.Authorization ||
 		(verifier.expectedPredecessor != (store.ExternalSupervisorPredecessorReleaseIdentity{}) && predecessorReleaseIdentityFromEnvelope(envelope) != verifier.expectedPredecessor) {
 		return authenticationError("authorization input")
 	}
@@ -122,7 +128,13 @@ func (verifier *ed25519Verifier) verifyAuthorizationAt(ctx context.Context, enve
 }
 
 func (verifier *ed25519Verifier) verifyAuthorizationChainAt(ctx context.Context, chain store.ExternalSupervisorAuthorizationChain, verificationTime time.Time) error {
-	if verifier == nil || ctx == nil || ctx.Err() != nil || chain != verifier.bundle.Authorization {
+	if verifier == nil || ctx == nil {
+		return authenticationError("authorization chain input")
+	}
+	if err := verificationDeadlineError(ctx); err != nil {
+		return err
+	}
+	if chain != verifier.bundle.Authorization {
 		return authenticationError("authorization chain input")
 	}
 	verificationTime = verificationTime.UTC()
@@ -168,8 +180,8 @@ func (verifier *ed25519Verifier) verifyAuthorizationChainAt(ctx context.Context,
 		{verifier.bundle.MoARoots, grant.GrantorRootID, verifier.bundle.MoAGrantor, "moa_grantor", grant, chain.MoARoleGrantSignature, grant.GrantorKeySPKISHA256},
 	}
 	for _, check := range checks {
-		if ctx.Err() != nil {
-			return authenticationError("authorization deadline")
+		if err := verificationDeadlineError(ctx); err != nil {
+			return err
 		}
 		root, rootKey, err := verifier.rootAt(check.lifecycle, verificationTime)
 		if err != nil || root.RootID != check.rootID {
@@ -183,7 +195,7 @@ func (verifier *ed25519Verifier) verifyAuthorizationChainAt(ctx context.Context,
 			return authenticationError("authorization signature")
 		}
 	}
-	return nil
+	return verificationDeadlineError(ctx)
 }
 
 func (verifier *ed25519Verifier) rootAt(lifecycle store.ExternalSupervisorTrustRootLifecycle, at time.Time) (store.ExternalSupervisorTrustRootKey, ed25519.PublicKey, error) {

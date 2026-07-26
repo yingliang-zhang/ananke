@@ -2153,10 +2153,10 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 #### Production boundary
 
 - `internal/trustedsupervisor` implements production client and server sides of one-request/one-response Unix connections with four-byte big-endian frames, RFC 8785 canonical JSON, a hard 64 KiB maximum, deadlines capped at 10 seconds, bounded connections, durable nonce/replay/authentication state, exact replay and conflict detection, and fail-closed error classes.
-- Client configuration keeps the socket/trust paths and expected server UID/PID out of the wire protocol. Server configuration keeps the socket, repository-policy, public trust-bundle, private-key-bundle, and journal paths plus expected client UID out of the protocol. Socket/endpoint fields, credentials, raw source, artifact/evidence bytes, commands, argv, and environment are absent from framed requests and responses.
+- Client configuration keeps the socket/trust paths and expected server UID/PID out of the wire protocol. Server configuration keeps the socket, repository-policy, required execution-policy, public trust-bundle, private-key-bundle, and journal paths plus expected client UID out of the protocol. Socket/endpoint fields, credentials, raw source, artifact/evidence bytes, commands, argv, and environment are absent from framed requests and responses.
 - Mandatory authentication is real Ed25519 verification, not a pin-only hook: canonical public trust-bundle self-hash; active/successor release, approval, and MoA roots; cross-signed rotations; successor-signed revocations; root validity/revocation selection; root-signed leaf certificates; detached authorization signatures; peer-possession signatures; complete predecessor projection reconstruction; repository-policy resolution; and exact request/channel/message bindings. Optional client `AuthenticationHooks` run after and cannot replace mandatory verification.
 - `cmd/ananke-trusted-supervisor-transport` is the one-shot production client requiring `--store`, `--socket`, `--trust-bundle`, `--peer-uid`, and `--peer-pid`. It injects the same client as transport and authenticator. The store rechecks the complete current private fence before delivery/reconciliation/cancellation; public output remains exactly `waiting_for_human` / `not_run` with empty events and no result.
-- `cmd/ananke-trusted-supervisor` is the production signed Unix server. It requires `--socket`, `--repository-policy`, `--trust-bundle`, `--private-key-bundle`, `--journal`, and `--expected-client-uid`; its timeout and frame-limit flags are optional. Reconciliation signs only the explicit `audit_not_run` / `waiting_for_human` callback. There is still no OMP, executor, project-audit execution, production child, source/artifact/evidence access, repair execution, or Run creation.
+- `cmd/ananke-trusted-supervisor` is the production signed Unix server. It now requires `--socket`, `--repository-policy`, `--execution-policy`, `--trust-bundle`, `--private-key-bundle`, `--journal`, and `--expected-client-uid`; its timeout and frame-limit flags are optional. The original transport-only `audit_not_run` limitation recorded by this 2026-07-25 slice was superseded by the 2026-07-26 P5 executor foundation below: the current server has policy-pinned read-only audit subprocess, immutable source snapshot, typed evidence, stable resume, and durable cancellation capabilities, but still no source writes, repair execution, or Run creation.
 
 #### Verification
 
@@ -2167,4 +2167,106 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 
 #### Terminal verdict
 
-- **PASS:** the deployable local client/server transport is a bounded, canonical, credential-and-pin-bound signed identity protocol. It advances only sealed identity delivery toward a future read-only audit; callbacks remain `audit_not_run` / `waiting_for_human`, and no OMP, executor, audit, or repair authority exists.
+- **PASS — historical transport slice, superseded for current capability:** the deployable local client/server transport established the bounded, canonical, credential-and-pin-bound signed identity protocol. The 2026-07-26 row below records the superseding executor capability and its current non-acceptance.
+
+### 2026-07-26 — P5 READ-ONLY OMP audit-executor foundation
+
+#### Strict TDD
+
+- Base: accepted production signed-server commit `1bbc880576173913d62f13200ea54b25d46f4393`; no commit or push was created by this run.
+- RED/GREEN policy slice: focused tests first failed on missing canonical execution-policy types and loader. The implementation added the required server `--execution-policy` flag and an owner-only mode-`0600`, RFC-8785-canonical policy keyed by exact envelope `LaunchSpecHash`. Its closed entries bind schema/launch/task/repository identities; repository and Git executable identities; exact commit, commit-object, tree, and archive hashes; prompt template; route-aware wrapper and provider/model/tier; deadlines and attempt cap; supervisor-owned allowed-test IDs, command hashes, executable/root identities, argv, and timeouts; runtime/executable roots; credential environment names; five isolated roots; and the entry policy hash. Server delivery, reconcile, cancel, subprocess, and test effects recheck the relevant policy, repository, wrapper, executable, and root identities.
+- RED/GREEN snapshot slice: focused tests first failed on missing materialization and strict archive validation. The implementation verifies the exact commit object and tree, captures deterministic `git archive --format=tar --mtime=1970-01-01T00:00:00Z <tree>` bytes through the pinned Git executable and closed environment/argv, verifies the policy SHA-256, rejects traversal/duplicates/links/special files/PAX/padding/framing ambiguity, and publishes mode-read-only private snapshot files and directories. A post-capture repository mutation cannot alter the extracted snapshot.
+- RED/GREEN sandbox slice: focused tests first failed on missing invocation preparation and subprocess runner. The Darwin implementation launches only the policy-pinned `omp_with_timeout.sh` beneath `/usr/bin/sandbox-exec`, with exact positional deadline/prompt/output plus provider/model/tier/session arguments, explicit `OMP_SESSION_ROOT`, fixed minimal environment names, bounded captures/deadline grace, and an owned process group. Real sandbox tests prove snapshot/original-repository chmod/write/rename/symlink-target mutation fails while isolated prompt/output/session/temporary writes succeed. Unsupported production platforms fail closed.
+- RED/GREEN durability/evidence slice: journal v3 migrates accepted v1/v2 layouts and adds immutable canonical audit intent/event plus cancellation-intent/outcome records. Delivery atomically stores receipt plus intent. Running reconciliation stays canonically nonterminal. The model output must decode as the closed canonical typed report, including bounded verdict/summary and deterministically ordered severity/code/path/line/message findings. Completion evidence binds source archive, commit/tree, policy, route, wrapper, output hash/size, session UUID, and typed supervisor-owned test results; malformed, unbounded, leaking, unauthorized, or tampered evidence fails closed.
+- Supervisor-owned tests do not trust model-emitted command markers. The server-side runner uses only each policy-pinned executable and closed argv, a separate least-authority Darwin sandbox and fixed environment, bounded process groups/timeouts/captures, and typed exit/sandbox/stdout/stderr hash-and-size evidence. A failed or unpinned command rejects completion.
+- Timeout recovery accepts one exact bounded `[OMP_TIMEOUT]` suffix, persists its UUID, retains the same isolated session root and trusted prompt state, and uses only `--resume <uuid>`; a verified synthesis hint adds only the fixed synthesis instruction. `--continue`, fresh-session retry, path/UUID drift, malformed hints, and substring-only recovery claims are rejected. Attempt-cap exhaustion becomes `waiting_for_human`.
+- Cancellation is durable before effect: the canonical `requested` intent commits before launch admission or signaling, exact replay is byte-identical, and completion atomically commits the terminal audit event, acknowledgement, and cancellation outcome. Pre-start requests prevent launch; running requests bind PID/PGID/start identity and use bounded TERM/KILL plus wait/reap; outstanding requests resume after restart. Wrong/reused identity, signal failure, unkillable process groups, cleanup failure, and unavailable exit authority fail closed without inferred cancellation success.
+
+#### Current gates
+
+- Foundation package gate: `go test ./internal/trustedsupervisor ./cmd/ananke-trusted-supervisor -count=1 -timeout=180s`.
+- Repeated current matrix: `go test ./internal/trustedsupervisor -run '^(TestExecutionPolicy|TestMaterializeAuditSnapshot|TestCanonicalGitArchive|TestDarwinAudit|TestAudit|TestSupervisorOwnedAudit|TestProductionServer|TestServerJournal)' -count=5 -timeout=240s`.
+- Race matrix: the same focused expression under `go test -race` with `-count=1 -timeout=300s`.
+- Repository gates: `go test ./... -count=1 -timeout=300s`, `go test -race ./... -count=1 -timeout=360s`, and `go vet ./...`.
+- Contract gates: normal verification and `--self-test` for `contracts/p3d/verify.mjs`, `contracts/p3f/verify.mjs`, and `contracts/p4/verify.mjs`; their historical contract descriptions and frozen P3f fixture/denial identities are unchanged.
+- Earlier fake-wrapper foundation runs passed the then-current package, repeated, race, full, vet, P3d, and P4 gates. The supervisor-owned-test, stable-resume, journal-security, and durable-cancellation hardening changed the candidate afterward; the complete current gate set and a new independent hard re-review are required before acceptance.
+
+#### Decision
+
+- **ITERATE — fake-wrapper foundation plus provider-free installed-OMP transport proof:** production code now has the operator-policy-selected READ-ONLY audit executor, real Darwin subprocess/sandbox boundary, immutable Git snapshot, closed typed model/evidence path, supervisor-owned pinned tests, stable exact-session resume, and durable cancellation. The installed OMP v17.1.3 preflight used an isolated model registry, pinned native addon, fake credential, and exact loopback gateway; it invoked no real model or provider API. The sandboxed wrapper cannot mutate repository or snapshot source. After confirmed process exit, the trusted supervisor scrubs and removes its owned snapshot and invocation roots. The executor cannot execute repair or create a Run. The foundation is not accepted until an independent hard re-review explicitly accepts the current source; no commit or push is authorized by this row.
+
+### P5 installed-OMP provider-free compatibility closure — 2026-07-26
+
+#### Verified evidence
+
+- Installed transport preflight: `ANANKE_PINNED_OMP_FIXTURE=/opt/homebrew/Cellar/omp/17.1.3/bin/omp ANANKE_PINNED_OMP_NATIVE_FIXTURE=/Users/yingliangzhang/.omp/natives/17.1.3/pi_natives.darwin-arm64.node go test ./internal/trustedsupervisor -run '^TestAuditInstalledOMPProviderFreeTransportPreflight$' -count=10 -timeout 300s` — **PASS** in 40.736s. Each run required exactly one loopback `POST /v1/responses`; the harness supplied only a fixed fake credential and invoked no real model or provider API.
+- Repository normal gate: `go test ./... -count=1 -timeout 600s` — **PASS** across all packages; `internal/trustedsupervisor` completed in 52.188s.
+- Repository race gate: `go test -race ./... -count=1 -timeout 600s` — **PASS** across all packages; `internal/trustedsupervisor` completed in 172.003s.
+- Static and contract gates: `go vet ./...`, P3d/P3f/P4 verifier normal runs, verifier self-tests, and `git diff --check` — **PASS**.
+
+#### Decision
+
+- **READY FOR INDEPENDENT HARD RE-REVIEW, NOT YET ACCEPTED:** real OMP executable/native-addon compatibility is proven without provider access; the real model/provider canary remains prohibited until the current source receives an independent hard-review ACCEPT.
+
+### P5 sixth hard review and two-High repair — 2026-07-26
+
+#### Review evidence
+
+- Exact-session hard re-review report: `artifacts/omp/p5/sixth-review-report.md`, SHA-256 `c8fdac4034438040c6f7fa26f36b28723df946ccbcd4316eee12f449f14852a8`; verdict **CHANGES REQUESTED**.
+- HIGH 1 reproduced existing-destination replacement, caller `GOFLAGS=-overlay` publication, and mutable pathname/tool-assisted verifier replacement in the release artifact path.
+- HIGH 2 identified that Unix mode bits alone do not exclude Darwin extended ACL authority and that snapshot staging/publication still reopened absolute work paths.
+
+#### RED/GREEN repairs
+
+- Release publication now pins repository, Go-tool, output-directory, staging, candidate, and published identities. The build uses a closed environment and retained output FD; verification parses build metadata and native symbols from the same bytes/descriptor without `go tool nm`; Darwin publication uses descriptor-relative `renameatx_np(RENAME_EXCL)` and proves the published inode/hash. Tests cover existing sentinels, every caller `GOFLAGS`, overlay/toolexec/tags, hostile `PATH`, symlink/rebound output directories, pathname replacement, arbitrary build tags/markers, and sixteen-way no-replace races.
+- Production namespace admission now probes every physical Darwin ancestor/root with `acl_get_fd_np(ACL_TYPE_EXTENDED)` and rejects every extended ACL. Non-Darwin or Darwin-without-CGO production inspection fails closed. Native tests cover named user, group, `everyone`, and inherited add/delete/write authority plus live/restart rename-without-decoy.
+- Snapshot staging root/source creation, archive extraction, sealing, publication, synchronization, and identity capture now operate through retained work-root/staging/source descriptors. Every mutation-stage work-root path swap test proves writes remain on the original descriptor object and never reach the replacement path.
+
+#### Verification
+
+- ACL/snapshot/identity focused matrix: normal `-count=10` **PASS** (`63.989s`); race `-count=3` **PASS** (`69.502s`).
+- Release package and CLI: normal `-count=10` **PASS** (`136.664s`, `44.292s`); race `-count=3` **PASS** (`45.670s`, `14.937s`).
+- CGO-disabled production fail-closed matrix: **PASS** (`10.742s`).
+- Combined repository normal gate: **PASS**; `internal/trustedsupervisor` `67.920s`, `internal/releaseartifact` `18.022s`.
+- Combined repository race gate: **PASS**; `internal/trustedsupervisor` `230.304s`, `internal/releaseartifact` `24.343s`.
+- `go vet ./...`, P3d/P3f/P4 normal and self-test verifiers, and `git diff --check`: **PASS**.
+
+#### Decision
+
+- **READY FOR SEVENTH INDEPENDENT HARD REVIEW, NOT YET ACCEPTED:** both sixth-review High findings have executable RED/GREEN coverage and combined gates, but the candidate remains uncommitted and no real provider canary is authorized until an independent reviewer returns explicit `ACCEPT`.
+
+### P5 seventh hard review and release-object repair — 2026-07-26
+
+#### Review evidence
+
+- Fresh-context hard review report: `artifacts/omp/p5/seventh-review-report.md`, SHA-256 `6867e3181e335ae0e864bb6946ba778b2744899b23cb518e0dd3fba1dce7171d`; verdict **CHANGES REQUESTED**.
+- The reviewer explicitly **ACCEPTED** Darwin ACL admission, descriptor-relative snapshot materialization, signed evidence v5 finalization/restart/callback behavior, and non-success terminal-state handling.
+- Release HIGH 1 showed that retained compiler/repository descriptors did not govern the actual pathname-based child launch, so an A→B→A pathname substitution could execute different inputs between checks.
+- Release HIGH 2 showed `Mkdirat` followed by `Openat` could attribute a replacement staging directory to the invocation and later delete that foreign replacement.
+
+#### RED/GREEN repairs
+
+- Darwin release builds now establish a kqueue `EVFILT_VNODE` guard before launch over the retained compiler object and parent plus retained repository object and parent. Write, delete, extend, meaningful attribute, link, rename, and revoke events are sticky failures checked after child exit and again before publication. Non-Darwin release builds fail closed.
+- Deterministic tests prove a substituted compiler actually executed a valid build and a substituted repository built an expected-package inert program; both original pathnames were restored before post-build checks, and both builds were rejected with no published output.
+- The separate staging-directory lifecycle was removed. One random hidden candidate is atomically created and opened under the pinned output-directory FD with `Openat(O_CREAT|O_EXCL|O_NOFOLLOW)`. Build, verification, fsync, and no-replace publication retain that FD/inode. Cleanup refuses to remove a different object at the hidden name; the foreign-replacement regression proves it survives.
+
+#### Verification
+
+- Exact compiler/repository ABA and candidate-replacement matrix: normal `-count=10` **PASS** (`12.044s`); race `-count=3` **PASS** (`4.567s`).
+- Release package and CLI current gate: **PASS** (`11.152s`, `3.459s`); focused vet and `git diff --check`: **PASS**.
+
+#### Decision
+
+- **READY FOR EIGHTH INDEPENDENT HARD REVIEW, NOT YET ACCEPTED:** the workspace lifecycle is accepted and both seventh-review release findings now have executable tests. The release slice and P5 candidate remain uncommitted; no real provider canary is authorized before explicit review `ACCEPT`.
+
+### P5 eighth hard review acceptance — 2026-07-26
+
+#### Review evidence
+
+- Fresh-context read-only hard review: `artifacts/omp/p5/eighth-review-report.md`, SHA-256 `2dacd5f65838e57a7c4c476c1921162f235d68a0589750e1a8411177cfd435cb`.
+- Verdict: **ACCEPT** — no blocking correctness findings in the release artifact scope. The reviewer independently traced the Darwin launch mutation guard, compiler/repository ABA regressions, atomically created direct candidate ownership, replacement-preserving cleanup, existing-destination preservation, closed build environment, one-descriptor verification, output-directory binding, `RENAME_EXCL`, and final inode/hash proof.
+- Reviewer verification: exact regressions normal `-count=10` **PASS** (`11.380s`), race `-count=3` **PASS** (`4.901s`); release package normal/race **PASS** (`11.236s`/`12.644s`); CLI normal/race **PASS** (`3.314s`/`3.879s`); scoped vet **PASS**.
+
+#### Decision
+
+- **ACCEPT — P5 read-only audit executor and release foundation:** the independent workspace review accepted ACL admission, descriptor-relative snapshot lifecycle, signed evidence/finalization/recovery/callback behavior, and non-success terminal handling; the independent release review now accepts the final compiler/repository launch guard and direct-candidate publication lifecycle. The accepted code remains read-only: it cannot modify source, execute repair, or create a Run. A real provider canary may proceed only as the separately bounded next experiment under the accepted policy and sandbox path.

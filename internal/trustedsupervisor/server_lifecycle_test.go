@@ -17,7 +17,7 @@ import (
 func TestProductionServerLifecycleGateClosesAcceptCompletedAfterClose(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	material := newServerTestMaterial(t, now)
-	server, err := NewServer(serverConfigForTest(material, now))
+	server, err := newServerForTest(serverConfigForTest(material, now))
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestProductionServerLifecycleGateClosesAcceptCompletedAfterClose(t *testing
 func TestProductionServerLifecycleGateWaitsForAdmittedWorkerBeforeResourceRelease(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	material := newServerTestMaterial(t, now)
-	server, err := NewServer(serverConfigForTest(material, now))
+	server, err := newServerForTest(serverConfigForTest(material, now))
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestProductionServerLifecycleGateWaitsForAdmittedWorkerBeforeResourceReleas
 func TestProductionServerLifecycleGateConcurrentCloseIsIdempotentAndSocketReusable(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	material := newServerTestMaterial(t, now)
-	server, err := NewServer(serverConfigForTest(material, now))
+	server, err := newServerForTest(serverConfigForTest(material, now))
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestProductionServerLifecycleGateConcurrentCloseIsIdempotentAndSocketReusab
 		t.Fatalf("later idempotent Close: %v", err)
 	}
 
-	replacement, err := NewServer(serverConfigForTest(material, now))
+	replacement, err := newServerForTest(serverConfigForTest(material, now))
 	if err != nil {
 		t.Fatalf("socket was not reusable after clean Close: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestProductionServerLifecycleGateConcurrentCloseIsIdempotentAndSocketReusab
 func TestProductionServerLifecycleGateRefusesSocketReplacementDuringClose(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	material := newServerTestMaterial(t, now)
-	server, err := NewServer(serverConfigForTest(material, now))
+	server, err := newServerForTest(serverConfigForTest(material, now))
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -254,6 +254,57 @@ func TestProductionServerLifecycleGateRefusesSocketReplacementDuringClose(t *tes
 	if err := server.Close(); !errors.Is(err, ErrAuthentication) {
 		t.Fatalf("idempotent replacement Close error = %v, want %v", err, ErrAuthentication)
 	}
+}
+
+func TestProductionServerCloseKeepsResourcesUntilStuckExecutorJoins(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	fixture := newExecutingServerTestMaterial(t, now, "#!/bin/sh\nset -eu\n/bin/sleep 30\n")
+	running := startInProcessProductionServer(t, fixture.material, now)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	running.server.auditExecutor.terminationBounds = testAuditTerminationBounds()
+	running.server.auditExecutor.hooks.beforeStart = func(string) {
+		close(entered)
+		<-release
+	}
+	privateKeyAlias := running.server.material.privateKey
+	client := newServerTestClient(t, fixture.material, int32(os.Getpid()), now)
+	if _, err := client.Deliver(context.Background(), fixture.material.fixture.envelope); err != nil {
+		t.Fatal(err)
+	}
+	waitForLifecycleSignal(t, entered, "stuck audit worker")
+	started := time.Now()
+	if err := running.server.Close(); !errors.Is(err, ErrDeadline) {
+		t.Fatalf("stuck-worker Close error = %v, want %v", err, ErrDeadline)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("stuck-worker Close was unbounded: %v", elapsed)
+	}
+	if bytes.Count(privateKeyAlias, []byte{0}) == len(privateKeyAlias) {
+		t.Fatal("private key was zeroed under a stuck executor")
+	}
+	if err := running.server.journal.db.Ping(); err != nil {
+		t.Fatalf("journal closed under a stuck executor: %v", err)
+	}
+	if running.server.executionPolicy == nil || running.server.repositoryPolicy == nil {
+		t.Fatal("policies released under a stuck executor")
+	}
+	releaseOnce.Do(func() { close(release) })
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := running.server.Close(); err == nil {
+			break
+		} else if !errors.Is(err, ErrDeadline) {
+			t.Fatalf("retry Close after worker join: %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Close did not complete after stuck executor joined")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	assertZeroedLifecycleAlias(t, privateKeyAlias, "private key after joined retry Close")
 }
 
 func newLifecycleUnixConnectionPair(t *testing.T, directory string) (*net.UnixConn, *net.UnixConn) {

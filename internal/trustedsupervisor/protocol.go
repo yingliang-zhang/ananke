@@ -15,7 +15,7 @@ import (
 
 const (
 	requestSchemaVersion                   = "ananke.local-trusted-supervisor-request.v4"
-	responseSchemaVersion                  = "ananke.local-trusted-supervisor-response.v2"
+	responseSchemaVersion                  = "ananke.local-trusted-supervisor-response.v3"
 	wireEnvelopeReferenceSchemaVersion     = "ananke.local-trusted-supervisor-envelope-reference.v2"
 	wirePredecessorProjectionSchemaVersion = "ananke.local-trusted-supervisor-predecessor-projection.v1"
 
@@ -218,17 +218,36 @@ type wireRequest struct {
 	RequestHash        string                                        `json:"request_hash,omitempty"`
 }
 
+const wireCancellationFailureSchemaVersion = "ananke.local-trusted-supervisor-cancellation-failure.v1"
+
+type wireCancellationFailure struct {
+	SchemaVersion       string `json:"schema_version"`
+	FailureHash         string `json:"failure_hash"`
+	FailureClass        string `json:"failure_class"`
+	CancellationHash    string `json:"cancellation_hash"`
+	EnvelopeHash        string `json:"envelope_hash"`
+	ReceiptHash         string `json:"receipt_hash"`
+	AttemptNumber       int    `json:"attempt_number"`
+	ChannelBindingHash  string `json:"channel_binding_hash"`
+	NonceHash           string `json:"nonce_hash"`
+	IssuedAt            string `json:"issued_at"`
+	SignerKeySPKISHA256 string `json:"signer_key_spki_sha256"`
+	TrustRootID         string `json:"trust_root_id"`
+}
+
 type wireResponse struct {
-	SchemaVersion               string                                               `json:"schema_version"`
-	Operation                   string                                               `json:"operation"`
-	RequestHash                 string                                               `json:"request_hash"`
-	PeerSignerSPKISHA256        string                                               `json:"peer_signer_spki_sha256"`
-	Status                      string                                               `json:"status"`
-	DeliveryAuthentication      *store.ExternalSupervisorMessageAuthentication       `json:"delivery_authentication,omitempty"`
-	Receipt                     *store.ExternalSupervisorProtocolReceipt             `json:"receipt,omitempty"`
-	ReceiptAuthentication       *store.ExternalSupervisorMessageAuthentication       `json:"receipt_authentication,omitempty"`
-	Callback                    *store.ExternalSupervisorProtocolCallback            `json:"callback,omitempty"`
-	CallbackAuthentication      *store.ExternalSupervisorMessageAuthentication       `json:"callback_authentication,omitempty"`
-	CancellationAcknowledgement *store.ExternalSupervisorCancellationAcknowledgement `json:"cancellation_acknowledgement,omitempty"`
-	CancellationAuthentication  *store.ExternalSupervisorMessageAuthentication       `json:"cancellation_authentication,omitempty"`
+	SchemaVersion                     string                                               `json:"schema_version"`
+	Operation                         string                                               `json:"operation"`
+	RequestHash                       string                                               `json:"request_hash"`
+	PeerSignerSPKISHA256              string                                               `json:"peer_signer_spki_sha256"`
+	Status                            string                                               `json:"status"`
+	DeliveryAuthentication            *store.ExternalSupervisorMessageAuthentication       `json:"delivery_authentication,omitempty"`
+	Receipt                           *store.ExternalSupervisorProtocolReceipt             `json:"receipt,omitempty"`
+	ReceiptAuthentication             *store.ExternalSupervisorMessageAuthentication       `json:"receipt_authentication,omitempty"`
+	Callback                          *store.ExternalSupervisorProtocolCallback            `json:"callback,omitempty"`
+	CallbackAuthentication            *store.ExternalSupervisorMessageAuthentication       `json:"callback_authentication,omitempty"`
+	CancellationAcknowledgement       *store.ExternalSupervisorCancellationAcknowledgement `json:"cancellation_acknowledgement,omitempty"`
+	CancellationAuthentication        *store.ExternalSupervisorMessageAuthentication       `json:"cancellation_authentication,omitempty"`
+	CancellationFailure               *wireCancellationFailure                             `json:"cancellation_failure,omitempty"`
+	CancellationFailureAuthentication *store.ExternalSupervisorMessageAuthentication       `json:"cancellation_failure_authentication,omitempty"`
 }

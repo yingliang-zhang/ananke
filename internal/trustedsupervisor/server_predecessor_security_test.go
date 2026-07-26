@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -237,6 +238,10 @@ func TestProductionServerMakesReconcileAndCancelReceiptExclusive(t *testing.T) {
 		t.Run(firstOperation+"_first", func(t *testing.T) {
 			now := time.Now().UTC().Truncate(time.Second)
 			material := newServerTestMaterial(t, now)
+			if firstOperation == operationCancel {
+				executing := newExecutingServerTestMaterial(t, now, "#!/bin/sh\nset -eu\n/bin/sleep 30\n")
+				material = executing.material
+			}
 			running := startInProcessProductionServer(t, material, now)
 			defer running.stop(t)
 			client := newServerTestClient(t, material, int32(os.Getpid()), now)
@@ -246,18 +251,21 @@ func TestProductionServerMakesReconcileAndCancelReceiptExclusive(t *testing.T) {
 			}
 			cancellation := validCancellationForTest(t, material.fixture.envelope, receipt)
 			if firstOperation == operationReconcile {
+				waitForAuditState(t, running.server.journal, material.fixture.envelope.EnvelopeHash, auditStateWaitingForHuman)
 				if callback, err := client.Reconcile(context.Background(), material.fixture.envelope, receipt); err != nil || callback == nil {
-					t.Fatalf("first reconcile = %+v, %v", callback, err)
+					t.Fatalf("terminal reconcile = %+v, %v", callback, err)
 				}
-				if _, err := client.Cancel(context.Background(), material.fixture.envelope, receipt, cancellation); err == nil {
-					t.Fatal("cancel after reconcile did not conflict")
+				if _, err := client.Cancel(context.Background(), material.fixture.envelope, receipt, cancellation); err == nil || strings.Contains(err.Error(), "incomplete frame") {
+					t.Fatalf("cancel after reconcile error = %v; want canonical conflict", err)
 				}
 			} else {
+				waitForAuditState(t, running.server.journal, material.fixture.envelope.EnvelopeHash, auditStateRunning)
 				if _, err := client.Cancel(context.Background(), material.fixture.envelope, receipt, cancellation); err != nil {
 					t.Fatalf("first cancel: %v", err)
 				}
-				if _, err := client.Reconcile(context.Background(), material.fixture.envelope, receipt); err == nil {
-					t.Fatal("reconcile after cancel did not conflict")
+				waitForAuditState(t, running.server.journal, material.fixture.envelope.EnvelopeHash, auditStateCancelled)
+				if _, err := client.Reconcile(context.Background(), material.fixture.envelope, receipt); err == nil || strings.Contains(err.Error(), "incomplete frame") {
+					t.Fatalf("reconcile after cancel error = %v; want canonical conflict", err)
 				}
 			}
 			assertServerJournalRows(t, material.journalPath, 2)
@@ -267,7 +275,8 @@ func TestProductionServerMakesReconcileAndCancelReceiptExclusive(t *testing.T) {
 
 func TestProductionServerConflictsDifferentlySealedHandoffIDsForOneReceipt(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	material := newServerTestMaterial(t, now)
+	executing := newExecutingServerTestMaterial(t, now, "#!/bin/sh\nset -eu\n/bin/sleep 30\n")
+	material := executing.material
 	running := startInProcessProductionServer(t, material, now)
 	defer running.stop(t)
 	client := newServerTestClient(t, material, int32(os.Getpid()), now)
@@ -275,6 +284,7 @@ func TestProductionServerConflictsDifferentlySealedHandoffIDsForOneReceipt(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
+	waitForAuditState(t, running.server.journal, material.fixture.envelope.EnvelopeHash, auditStateRunning)
 	cancellation := validCancellationForTest(t, material.fixture.envelope, receipt)
 	if _, err := client.Cancel(context.Background(), material.fixture.envelope, receipt, cancellation); err != nil {
 		t.Fatalf("seed cancellation: %v", err)

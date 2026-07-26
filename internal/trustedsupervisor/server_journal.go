@@ -19,7 +19,40 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const serverJournalMigrationID = "ananke.local-trusted-supervisor.server-journal.v1"
+const (
+	serverJournalSchemaVersion = 4
+	serverJournalMigrationIDV1 = "ananke.local-trusted-supervisor.server-journal.v1"
+	serverJournalMigrationIDV2 = "ananke.local-trusted-supervisor.server-journal.v2"
+	serverJournalMigrationIDV3 = "ananke.local-trusted-supervisor.server-journal.v3"
+	serverJournalMigrationID   = "ananke.local-trusted-supervisor.server-journal.v4"
+)
+
+var ErrLegacyAuditHistoryMigration = errors.New("populated legacy V2 audit history cannot be migrated")
+
+type LegacyAuditHistoryMigrationError struct {
+	IntentHistoryPresent bool
+	EventHistoryPresent  bool
+}
+
+func (failure *LegacyAuditHistoryMigrationError) Error() string {
+	populated := "legacy audit history"
+	if failure != nil {
+		switch {
+		case failure.IntentHistoryPresent && failure.EventHistoryPresent:
+			populated = "trusted_supervisor_audit_intents and trusted_supervisor_audit_events"
+		case failure.IntentHistoryPresent:
+			populated = "trusted_supervisor_audit_intents"
+		case failure.EventHistoryPresent:
+			populated = "trusted_supervisor_audit_events"
+		}
+	}
+	return ErrAuthentication.Error() + ": populated legacy V2 audit history in " + populated +
+		"; archive/export the legacy database and start a fresh journal; no in-place signing migration is supported"
+}
+
+func (failure *LegacyAuditHistoryMigrationError) Is(target error) bool {
+	return target == ErrAuthentication || target == ErrLegacyAuditHistoryMigration
+}
 
 type serverJournalRequest struct {
 	RequestHash         string
@@ -29,17 +62,19 @@ type serverJournalRequest struct {
 	ResponseNonceHash   string
 	AdditionalNonceHash string
 	RequestBytes        []byte
+	BuildAuditIntent    func([]byte) (auditExecutionIntent, error)
 }
 
 type serverJournal struct {
-	db       *sql.DB
-	path     string
-	anchor   *os.File
-	device   uint64
-	inode    uint64
-	ownerUID uint32
-	mu       sync.Mutex
-	closed   bool
+	db             *sql.DB
+	path           string
+	anchor         *os.File
+	device         uint64
+	inode          uint64
+	ownerUID       uint32
+	mu             sync.Mutex
+	closed         bool
+	auditAuthority *auditJournalAuthority
 }
 
 func openServerJournal(path string) (*serverJournal, error) {
@@ -133,7 +168,7 @@ func (journal *serverJournal) transact(ctx context.Context, request serverJourna
 			_ = tx.Rollback()
 		}
 	}()
-	if err := validateServerJournalContent(ctx, tx); err != nil {
+	if err := validateServerJournalContent(ctx, tx, journal.auditAuthority); err != nil {
 		return nil, false, err
 	}
 
@@ -195,6 +230,15 @@ func (journal *serverJournal) transact(ctx context.Context, request serverJourna
 		zeroBytes(responseBytes)
 		return nil, false, ErrLimit
 	}
+	var auditIntent *auditExecutionIntent
+	if request.BuildAuditIntent != nil {
+		intent, err := request.BuildAuditIntent(responseBytes)
+		if err != nil {
+			zeroBytes(responseBytes)
+			return nil, false, err
+		}
+		auditIntent = &intent
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO trusted_supervisor_requests
 		(request_hash, operation, operation_key, request_nonce_hash, response_nonce_hash, additional_nonce_hash,
 		 request_bytes, request_bytes_hash, response_bytes, response_bytes_hash, created_at)
@@ -218,6 +262,12 @@ func (journal *serverJournal) transact(ctx context.Context, request serverJourna
 				return nil, false, ErrReplay
 			}
 			return nil, false, fmt.Errorf("insert server nonce: %w", err)
+		}
+	}
+	if auditIntent != nil {
+		if err := insertAuditIntentTx(ctx, tx, *auditIntent); err != nil {
+			zeroBytes(responseBytes)
+			return nil, false, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -254,7 +304,7 @@ func (journal *serverJournal) loadOperation(ctx context.Context, operationKey st
 			_ = tx.Rollback()
 		}
 	}()
-	if err := validateServerJournalContent(ctx, tx); err != nil {
+	if err := validateServerJournalContent(ctx, tx, journal.auditAuthority); err != nil {
 		return nil, nil, err
 	}
 	var requestBytes, responseBytes []byte
@@ -288,6 +338,7 @@ func validServerJournalRequest(request serverJournalRequest) bool {
 		protocolHashPattern.MatchString(request.RequestNonceHash) && protocolHashPattern.MatchString(request.ResponseNonceHash) &&
 		additionalNonceValid && distinctNonces &&
 		(request.Operation == operationDeliver || request.Operation == operationReconcile || request.Operation == operationCancel) &&
+		(request.BuildAuditIntent == nil || request.Operation == operationDeliver) &&
 		strings.HasPrefix(request.OperationKey, request.Operation+":sha256:") && len(request.RequestBytes) > 0 && len(request.RequestBytes) <= int(maxFrameBytes)
 }
 
@@ -310,10 +361,24 @@ func (journal *serverJournal) migrateAndValidate(ctx context.Context) error {
 				return fmt.Errorf("migrate server journal: %w", err)
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO trusted_supervisor_schema (version, migration_id, applied_at)
-			VALUES (1, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`, serverJournalMigrationID); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO trusted_supervisor_schema (version, migration_id, applied_at) VALUES
+			(1, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+			(2, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+			(3, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+			(4, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`, serverJournalMigrationIDV1, serverJournalMigrationIDV2, serverJournalMigrationIDV3, serverJournalMigrationID); err != nil {
 			_ = tx.Rollback()
-			return fmt.Errorf("record server journal migration: %w", err)
+			return fmt.Errorf("record server journal migrations: %w", err)
+		}
+		if err := validateServerJournalSchema(ctx, tx); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if maximumVersion, err := validateServerJournalMigrationHistory(ctx, tx); err != nil || maximumVersion != serverJournalSchemaVersion {
+			_ = tx.Rollback()
+			if err != nil {
+				return err
+			}
+			return authenticationError("server journal migration history")
 		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit server journal migration: %w", err)
@@ -321,14 +386,26 @@ func (journal *serverJournal) migrateAndValidate(ctx context.Context) error {
 		if err := fsyncDirectory(filepath.Dir(journal.path)); err != nil {
 			return err
 		}
+	} else {
+		maximumVersion, err := validateServerJournalMigrationHistory(ctx, journal.db)
+		if err != nil {
+			return err
+		}
+		if err := validateServerJournalSchemaVersion(ctx, journal.db, maximumVersion); err != nil {
+			return err
+		}
+		for maximumVersion < serverJournalSchemaVersion {
+			if err := journal.migrateServerJournalVersion(ctx, maximumVersion, maximumVersion+1); err != nil {
+				return err
+			}
+			maximumVersion++
+		}
 	}
-	var versionCount, version int
-	var migrationID, appliedAt string
-	if err := journal.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(version), 0), COALESCE(MAX(migration_id), ''), COALESCE(MAX(applied_at), '')
-		FROM trusted_supervisor_schema`).Scan(&versionCount, &version, &migrationID, &appliedAt); err != nil {
-		return fmt.Errorf("validate server journal migration: %w", err)
+	maximumVersion, err := validateServerJournalMigrationHistory(ctx, journal.db)
+	if err != nil {
+		return err
 	}
-	if versionCount != 1 || version != 1 || migrationID != serverJournalMigrationID || !validServerJournalTimestamp(appliedAt) {
+	if maximumVersion != serverJournalSchemaVersion {
 		return authenticationError("server journal migration history")
 	}
 	if err := validateServerJournalSchema(ctx, journal.db); err != nil {
@@ -353,7 +430,196 @@ func (journal *serverJournal) migrateAndValidate(ctx context.Context) error {
 	if err := rows.Close(); err != nil {
 		return fmt.Errorf("close server journal foreign key check: %w", err)
 	}
-	return validateServerJournalContent(ctx, journal.db)
+	return validateServerJournalStorageContent(ctx, journal.db)
+}
+
+func (journal *serverJournal) migrateServerJournalVersion(ctx context.Context, sourceVersion, targetVersion int) error {
+	sourceObjects := serverJournalSchemaObjectsForVersion(sourceVersion)
+	targetObjects := serverJournalSchemaObjectsForVersion(targetVersion)
+	if targetVersion != sourceVersion+1 || len(sourceObjects) == 0 || len(targetObjects) == 0 {
+		return authenticationError("server journal migration version")
+	}
+	if sourceVersion == 3 && targetVersion == 4 {
+		return journal.migrateServerJournalV4(ctx)
+	}
+	tx, err := journal.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := validateServerJournalSchemaVersion(ctx, tx, sourceVersion); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if sourceVersion == 2 && targetVersion == 3 {
+		if err := rejectPopulatedLegacyV2AuditHistory(ctx, tx); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE trusted_supervisor_schema RENAME TO trusted_supervisor_schema_previous`); err != nil {
+		_ = tx.Rollback()
+		return authenticationError(fmt.Sprintf("stage server journal v%d migration", targetVersion))
+	}
+	if _, err := tx.ExecContext(ctx, targetObjects[0].SQL); err != nil {
+		_ = tx.Rollback()
+		return authenticationError(fmt.Sprintf("create server journal v%d schema history", targetVersion))
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO trusted_supervisor_schema SELECT version, migration_id, applied_at FROM trusted_supervisor_schema_previous`); err != nil {
+		_ = tx.Rollback()
+		return authenticationError("copy server journal migration history")
+	}
+	sourceInventory := make(map[serverJournalSchemaObjectKey]struct{}, len(sourceObjects))
+	for _, object := range sourceObjects {
+		sourceInventory[serverJournalSchemaObjectKey{ObjectType: object.ObjectType, Name: object.Name}] = struct{}{}
+	}
+	for _, object := range targetObjects {
+		key := serverJournalSchemaObjectKey{ObjectType: object.ObjectType, Name: object.Name}
+		if !object.Create || key == (serverJournalSchemaObjectKey{ObjectType: "table", Name: "trusted_supervisor_schema"}) {
+			continue
+		}
+		if _, exists := sourceInventory[key]; exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, object.SQL); err != nil {
+			_ = tx.Rollback()
+			return authenticationError(fmt.Sprintf("create server journal v%d schema object %s", targetVersion, object.Name))
+		}
+	}
+	migrationID, valid := serverJournalMigrationIDForVersion(targetVersion)
+	if !valid {
+		_ = tx.Rollback()
+		return authenticationError("server journal migration version")
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO trusted_supervisor_schema (version, migration_id, applied_at) VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`, targetVersion, migrationID); err != nil {
+		_ = tx.Rollback()
+		return authenticationError(fmt.Sprintf("record server journal v%d migration", targetVersion))
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE trusted_supervisor_schema_previous`); err != nil {
+		_ = tx.Rollback()
+		return authenticationError(fmt.Sprintf("finish server journal v%d schema history", targetVersion))
+	}
+	if err := validateServerJournalSchemaVersion(ctx, tx, targetVersion); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if maximumVersion, err := validateServerJournalMigrationHistory(ctx, tx); err != nil || maximumVersion != targetVersion {
+		_ = tx.Rollback()
+		if err != nil {
+			return err
+		}
+		return authenticationError("server journal migration history")
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit server journal v%d migration: %w", targetVersion, err)
+	}
+	return fsyncDirectory(filepath.Dir(journal.path))
+}
+
+func rejectPopulatedLegacyV2AuditHistory(ctx context.Context, tx *sql.Tx) error {
+	var intentHistoryPresent, eventHistoryPresent int
+	if err := tx.QueryRowContext(ctx, `SELECT
+		EXISTS(SELECT 1 FROM trusted_supervisor_audit_intents LIMIT 1),
+		EXISTS(SELECT 1 FROM trusted_supervisor_audit_events LIMIT 1)`).Scan(&intentHistoryPresent, &eventHistoryPresent); err != nil {
+		return authenticationError("inspect legacy V2 audit history before migration")
+	}
+	if intentHistoryPresent == 0 && eventHistoryPresent == 0 {
+		return nil
+	}
+	return &LegacyAuditHistoryMigrationError{
+		IntentHistoryPresent: intentHistoryPresent != 0,
+		EventHistoryPresent:  eventHistoryPresent != 0,
+	}
+}
+
+func (journal *serverJournal) migrateServerJournalV4(ctx context.Context) error {
+	tx, err := journal.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	rollback := true
+	defer func() {
+		if rollback {
+			_ = tx.Rollback()
+		}
+	}()
+	if err := validateServerJournalSchemaVersion(ctx, tx, 3); err != nil {
+		return err
+	}
+	statements := []string{
+		`ALTER TABLE trusted_supervisor_schema RENAME TO trusted_supervisor_schema_previous`,
+		serverJournalSchemaSQLV4,
+		`INSERT INTO trusted_supervisor_schema SELECT version, migration_id, applied_at FROM trusted_supervisor_schema_previous`,
+		`DROP TRIGGER trusted_supervisor_audit_events_no_update`,
+		`DROP TRIGGER trusted_supervisor_audit_events_no_delete`,
+		`ALTER TABLE trusted_supervisor_audit_events RENAME TO trusted_supervisor_audit_events_previous`,
+		serverJournalAuditEventsSQLV4,
+		`INSERT INTO trusted_supervisor_audit_events (event_id, intent_hash, sequence, state, event_bytes, event_bytes_hash, created_at)
+			SELECT event_id, intent_hash, sequence, state, event_bytes, event_bytes_hash, created_at FROM trusted_supervisor_audit_events_previous`,
+		`DROP TABLE trusted_supervisor_audit_events_previous`,
+		`CREATE TRIGGER trusted_supervisor_audit_events_no_update BEFORE UPDATE ON trusted_supervisor_audit_events BEGIN SELECT RAISE(ABORT, 'immutable trusted supervisor audit event'); END`,
+		`CREATE TRIGGER trusted_supervisor_audit_events_no_delete BEFORE DELETE ON trusted_supervisor_audit_events BEGIN SELECT RAISE(ABORT, 'immutable trusted supervisor audit event'); END`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return authenticationError("rebuild server journal v4 finalizing events")
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO trusted_supervisor_schema (version, migration_id, applied_at) VALUES (4, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`, serverJournalMigrationID); err != nil {
+		return authenticationError("record server journal v4 migration")
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE trusted_supervisor_schema_previous`); err != nil {
+		return authenticationError("finish server journal v4 schema history")
+	}
+	if err := validateServerJournalSchemaVersion(ctx, tx, 4); err != nil {
+		return err
+	}
+	if maximumVersion, err := validateServerJournalMigrationHistory(ctx, tx); err != nil || maximumVersion != 4 {
+		if err != nil {
+			return err
+		}
+		return authenticationError("server journal v4 migration history")
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit server journal v4 migration: %w", err)
+	}
+	rollback = false
+	return fsyncDirectory(filepath.Dir(journal.path))
+}
+
+func validateServerJournalMigrationHistory(ctx context.Context, queryer serverJournalQueryer) (int, error) {
+	var versionCount, maximumVersion int
+	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(version), 0) FROM trusted_supervisor_schema`).Scan(&versionCount, &maximumVersion); err != nil {
+		return 0, authenticationError("read server journal migration history")
+	}
+	if maximumVersion < 1 || maximumVersion > serverJournalSchemaVersion || versionCount != maximumVersion {
+		return 0, authenticationError("server journal migration history")
+	}
+	for version := 1; version <= maximumVersion; version++ {
+		expectedID, valid := serverJournalMigrationIDForVersion(version)
+		var migrationID, appliedAt string
+		if !valid {
+			return 0, authenticationError("server journal migration history")
+		}
+		if err := queryer.QueryRowContext(ctx, `SELECT migration_id, applied_at FROM trusted_supervisor_schema WHERE version = ?`, version).Scan(&migrationID, &appliedAt); err != nil || migrationID != expectedID || !validServerJournalTimestamp(appliedAt) {
+			return 0, authenticationError("server journal migration history")
+		}
+	}
+	return maximumVersion, nil
+}
+
+func serverJournalMigrationIDForVersion(version int) (string, bool) {
+	switch version {
+	case 1:
+		return serverJournalMigrationIDV1, true
+	case 2:
+		return serverJournalMigrationIDV2, true
+	case 3:
+		return serverJournalMigrationIDV3, true
+	case 4:
+		return serverJournalMigrationID, true
+	default:
+		return "", false
+	}
 }
 
 func (journal *serverJournal) validateIdentity() error {

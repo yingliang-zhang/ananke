@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ type serverTestMaterial struct {
 	fixture              signedAuthorizationFixture
 	journalPath          string
 	repositoryPolicyPath string
+	executionPolicyPath  string
 	keyBundlePath        string
 	privateText          string
 	directory            string
@@ -364,9 +366,10 @@ func TestProductionServerExactWireReplayAfterRestartIsByteIdentical(t *testing.T
 func TestProductionServerSeparateProcessClientSubmitCrashRestartReconcileCancel(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	material := newServerTestMaterial(t, now)
-	binary := buildProductionServerCommand(t)
+	productionBinary := buildProductionServerCommand(t)
+	testOnlyBinary := buildCompileTimeTestServerCommand(t)
 
-	first := startProductionServerProcess(t, binary, material)
+	first := startProductionServerProcess(t, testOnlyBinary, material)
 	client := newServerTestClient(t, material, int32(first.command.Process.Pid), now)
 	receipt, err := client.Deliver(context.Background(), material.fixture.envelope)
 	if err != nil {
@@ -375,12 +378,23 @@ func TestProductionServerSeparateProcessClientSubmitCrashRestartReconcileCancel(
 	}
 	first.killAndWait(t)
 
-	second := startProductionServerProcess(t, binary, material)
+	second := startProductionServerProcess(t, testOnlyBinary, material)
 	client = newServerTestClient(t, material, int32(second.command.Process.Pid), now)
-	callback, err := client.Reconcile(context.Background(), material.fixture.envelope, receipt)
-	if err != nil || callback == nil {
-		second.killAndWait(t)
-		t.Fatalf("restart Reconcile = %+v, %v\n%s", callback, err, second.output.String())
+	var callback *store.ExternalSupervisorAuthenticatedCallback
+	reconcileDeadline := time.Now().Add(10 * time.Second)
+	for callback == nil {
+		callback, err = client.Reconcile(context.Background(), material.fixture.envelope, receipt)
+		if err != nil {
+			second.killAndWait(t)
+			t.Fatalf("restart Reconcile = %+v, %v\n%s", callback, err, second.output.String())
+		}
+		if callback == nil {
+			if time.Now().After(reconcileDeadline) {
+				second.killAndWait(t)
+				t.Fatal("restart audit remained nonterminal")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
 	}
 	if callback.Callback.ResultSchemaVersion != store.ExternalSupervisorAuditNotRunResultSchemaVersion ||
 		callback.Callback.TerminalState != store.ExternalSupervisorWaitingForHumanState {
@@ -396,9 +410,9 @@ func TestProductionServerSeparateProcessClientSubmitCrashRestartReconcileCancel(
 		second.killAndWait(t)
 		t.Fatal(err)
 	}
-	if _, err := client.Cancel(context.Background(), material.fixture.envelope, receipt, cancellation); err == nil {
+	if _, err := client.Cancel(context.Background(), material.fixture.envelope, receipt, cancellation); err == nil || strings.Contains(err.Error(), "incomplete frame") {
 		second.killAndWait(t)
-		t.Fatal("restart cancel after reconciled receipt did not conflict")
+		t.Fatalf("restart cancel conflict error = %v; want canonical conflict", err)
 	}
 	second.terminateAndWait(t)
 	waitForServerSocketAbsence(t, material.socketPath)
@@ -415,7 +429,11 @@ func TestProductionServerSeparateProcessClientSubmitCrashRestartReconcileCancel(
 		}
 	}
 	assertPrivateKeyAbsent(t, []string{material.journalPath, material.journalPath + "-wal", material.journalPath + "-shm"}, material.privateText)
-	binaryBytes, err := os.ReadFile(binary)
+	productionBinaryBytes, err := os.ReadFile(productionBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testOnlyBinaryBytes, err := os.ReadFile(testOnlyBinary)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,8 +441,14 @@ func TestProductionServerSeparateProcessClientSubmitCrashRestartReconcileCancel(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(binaryBytes, privateRaw) || bytes.Contains(binaryBytes, []byte("ananke-test-ed25519:")) || bytes.Contains(binaryBytes, []byte("processSignedUnixServer")) {
-		t.Fatal("production server binary contains a test key or fake-server marker")
+	const testOnlyRuntimeAuthorityMarker = "ananke-compile-time-test-only-runtime-authority-v1"
+	if bytes.Contains(productionBinaryBytes, []byte(testOnlyRuntimeAuthorityMarker)) || !bytes.Contains(testOnlyBinaryBytes, []byte(testOnlyRuntimeAuthorityMarker)) {
+		t.Fatal("compile-time test runtime authority marker was not confined to the tagged test binary")
+	}
+	if bytes.Contains(productionBinaryBytes, privateRaw) || bytes.Contains(productionBinaryBytes, []byte("ananke-test-ed25519:")) ||
+		bytes.Contains(productionBinaryBytes, []byte("processSignedUnixServer")) || bytes.Contains(productionBinaryBytes, []byte("credential-must-not-leak")) ||
+		bytes.Contains(productionBinaryBytes, []byte("bounded read-only audit report")) {
+		t.Fatal("production server binary contains a test key, fake server, or fake wrapper marker")
 	}
 	if first.output.Len() != 0 || second.output.Len() != 0 {
 		t.Fatalf("production server emitted unexpected output; first=%q second=%q", first.output.String(), second.output.String())
@@ -437,7 +461,7 @@ func TestProductionServerRejectsUnsafeSocketDirectoryAndJournalReplacement(t *te
 	if err := os.Chmod(material.directory, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewServer(serverConfigForTest(material, now)); !errors.Is(err, ErrAuthentication) {
+	if _, err := newServerForTest(serverConfigForTest(material, now)); !errors.Is(err, ErrAuthentication) {
 		t.Fatalf("wide socket directory error = %v, want %v", err, ErrAuthentication)
 	}
 	if err := os.Chmod(material.directory, 0o700); err != nil {
@@ -450,7 +474,7 @@ func TestProductionServerRejectsUnsafeSocketDirectoryAndJournalReplacement(t *te
 	if err := os.Symlink(target, material.journalPath); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewServer(serverConfigForTest(material, now)); !errors.Is(err, ErrAuthentication) {
+	if _, err := newServerForTest(serverConfigForTest(material, now)); !errors.Is(err, ErrAuthentication) {
 		t.Fatalf("journal symlink error = %v, want %v", err, ErrAuthentication)
 	}
 }
@@ -463,7 +487,7 @@ type runningTestServer struct {
 
 func startInProcessProductionServer(t *testing.T, material serverTestMaterial, now time.Time) *runningTestServer {
 	t.Helper()
-	server, err := NewServer(serverConfigForTest(material, now))
+	server, err := newServerForTest(serverConfigForTest(material, now))
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -483,7 +507,7 @@ func (running *runningTestServer) stop(t *testing.T) {
 		if err != nil {
 			t.Fatalf("server shutdown: %v", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(integrationTestExchangeBudget):
 		t.Fatal("server did not stop")
 	}
 }
@@ -502,10 +526,12 @@ func newServerTestClient(t *testing.T, material serverTestMaterial, processID in
 func serverConfigForTest(material serverTestMaterial, now time.Time) ServerConfig {
 	return ServerConfig{
 		SocketPath: material.socketPath, TrustBundlePath: material.bundlePath, PrivateKeyBundlePath: material.keyBundlePath,
-		RepositoryPolicyPath: material.repositoryPolicyPath, JournalPath: material.journalPath,
+		RepositoryPolicyPath: material.repositoryPolicyPath, ExecutionPolicyPath: material.executionPolicyPath,
+		JournalPath:                        material.journalPath,
 		ExpectedPredecessorReleaseIdentity: predecessorReleaseIdentityFromEnvelope(material.fixture.envelope),
 		ExpectedClientUserID:               uint32(os.Getuid()), MaxFrameBytes: maxFrameBytes,
-		ConnectionTimeout: 2 * time.Second, Now: func() time.Time { return now },
+		ConnectionTimeout: integrationTestExchangeBudget, Now: func() time.Time { return now },
+		testBrokerDependencies: fakeAuditBrokerDependencies(),
 	}
 }
 
@@ -536,10 +562,12 @@ func newServerTestMaterial(t *testing.T, now time.Time) serverTestMaterial {
 		privateText)
 	repositoryPolicyPath := writeServerRepositoryPolicy(t, directory, "repository-policy.json",
 		fixture.envelope.RepositoryIdentity, "code.example/operator/second-repository")
+	executionPolicyPath := writeServerExecutionPolicyForTest(t, directory, fixture.envelope)
 	return serverTestMaterial{
 		bundlePath: bundlePath, fixture: fixture, journalPath: filepath.Join(directory, "server-journal.sqlite"),
 		keyBundlePath: keyBundlePath, privateText: privateText, directory: directory,
-		repositoryPolicyPath: repositoryPolicyPath, socketPath: filepath.Join(directory, "supervisor.sock"),
+		repositoryPolicyPath: repositoryPolicyPath, executionPolicyPath: executionPolicyPath,
+		socketPath: filepath.Join(directory, "supervisor.sock"),
 	}
 }
 
@@ -675,6 +703,21 @@ func buildProductionServerCommand(t *testing.T) string {
 	return binary
 }
 
+func buildCompileTimeTestServerCommand(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(t.TempDir(), "ananke-trusted-supervisor-test-only")
+	command := exec.Command("go", "build", "-tags", "ananke_test_runtime_authority", "-o", binary, "./cmd/ananke-trusted-supervisor")
+	command.Dir = root
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build compile-time test server: %v\n%s", err, output)
+	}
+	return binary
+}
+
 func startProductionServerProcess(t *testing.T, binary string, material serverTestMaterial) *productionServerProcess {
 	t.Helper()
 	_ = os.Remove(material.socketPath)
@@ -685,7 +728,10 @@ func startProductionServerProcess(t *testing.T, binary string, material serverTe
 		"--private-key-bundle", material.keyBundlePath,
 		"--journal", material.journalPath,
 		"--repository-policy", material.repositoryPolicyPath,
+		"--execution-policy", material.executionPolicyPath,
 		"--expected-client-uid", strconv.Itoa(os.Getuid()),
+		"--runtime-uid", strconv.Itoa(os.Getuid()+1),
+		"--runtime-gid", strconv.Itoa(os.Getgid()+1),
 		"--timeout", "2s",
 		"--max-frame-bytes", strconv.Itoa(int(maxFrameBytes)),
 	)
@@ -695,6 +741,68 @@ func startProductionServerProcess(t *testing.T, binary string, material serverTe
 	}
 	waitForServerSocket(t, material.socketPath)
 	return process
+}
+
+const fakeBrokerServerProcessEnvironment = "ANANKE_TEST_FAKE_BROKER_SERVER_PROCESS"
+
+func startFakeBrokerServerProcess(t *testing.T, material serverTestMaterial, now time.Time) *productionServerProcess {
+	t.Helper()
+	_ = os.Remove(material.socketPath)
+	predecessor := predecessorReleaseIdentityFromEnvelope(material.fixture.envelope)
+	process := &productionServerProcess{}
+	process.command = exec.Command(os.Args[0], "-test.run=^TestFakeBrokerServerProcess$")
+	process.command.Env = append(os.Environ(),
+		fakeBrokerServerProcessEnvironment+"=1",
+		"ANANKE_TEST_SOCKET="+material.socketPath,
+		"ANANKE_TEST_TRUST_BUNDLE="+material.bundlePath,
+		"ANANKE_TEST_PRIVATE_KEY_BUNDLE="+material.keyBundlePath,
+		"ANANKE_TEST_JOURNAL="+material.journalPath,
+		"ANANKE_TEST_REPOSITORY_POLICY="+material.repositoryPolicyPath,
+		"ANANKE_TEST_EXECUTION_POLICY="+material.executionPolicyPath,
+		"ANANKE_TEST_SUPERVISOR_ARTIFACT="+predecessor.SupervisorArtifactSHA256,
+		"ANANKE_TEST_BUILD_IDENTITY="+predecessor.BuildIdentityHash,
+		"ANANKE_TEST_RELEASE_ATTESTATION="+predecessor.ReleaseAttestationHash,
+		"ANANKE_TEST_RELEASE_APPROVAL="+predecessor.ReleaseApprovalHash,
+		"ANANKE_TEST_NOW="+now.Format(time.RFC3339Nano),
+	)
+	process.command.Stdout, process.command.Stderr = &process.output, &process.output
+	if err := process.command.Start(); err != nil {
+		t.Fatalf("start fake-broker server process: %v", err)
+	}
+	waitForServerSocket(t, material.socketPath)
+	return process
+}
+
+func TestFakeBrokerServerProcess(t *testing.T) {
+	if os.Getenv(fakeBrokerServerProcessEnvironment) != "1" {
+		return
+	}
+	now, err := time.Parse(time.RFC3339Nano, os.Getenv("ANANKE_TEST_NOW"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := newServerForTest(ServerConfig{
+		SocketPath: os.Getenv("ANANKE_TEST_SOCKET"), TrustBundlePath: os.Getenv("ANANKE_TEST_TRUST_BUNDLE"),
+		PrivateKeyBundlePath: os.Getenv("ANANKE_TEST_PRIVATE_KEY_BUNDLE"), JournalPath: os.Getenv("ANANKE_TEST_JOURNAL"),
+		RepositoryPolicyPath: os.Getenv("ANANKE_TEST_REPOSITORY_POLICY"), ExecutionPolicyPath: os.Getenv("ANANKE_TEST_EXECUTION_POLICY"),
+		ExpectedPredecessorReleaseIdentity: store.ExternalSupervisorPredecessorReleaseIdentity{
+			SupervisorArtifactSHA256: os.Getenv("ANANKE_TEST_SUPERVISOR_ARTIFACT"), BuildIdentityHash: os.Getenv("ANANKE_TEST_BUILD_IDENTITY"),
+			ReleaseAttestationHash: os.Getenv("ANANKE_TEST_RELEASE_ATTESTATION"), ReleaseApprovalHash: os.Getenv("ANANKE_TEST_RELEASE_APPROVAL"),
+		},
+		ExpectedClientUserID: uint32(os.Getuid()), MaxFrameBytes: maxFrameBytes, ConnectionTimeout: 2 * time.Second,
+		Now: func() time.Time { return now }, testBrokerDependencies: fakeAuditBrokerDependencies(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
+	defer stop()
+	if err := server.Serve(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (process *productionServerProcess) killAndWait(t *testing.T) {

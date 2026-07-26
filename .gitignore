@@ -3,6 +3,7 @@ bin/
 build/
 dist/
 /.ananke/
+/ananke-trusted-supervisor
 /gui/node_modules/
 /gui/dist/
 /gui/src-tauri/target/

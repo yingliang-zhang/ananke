@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -45,6 +46,33 @@ const (
 type processServerReady struct {
 	ProcessID  int    `json:"process_id"`
 	SocketPath string `json:"socket_path"`
+}
+
+func TestProcessServerReadinessPublicationIsAtomic(t *testing.T) {
+	directory := t.TempDir()
+	want := processServerReady{ProcessID: 1234, SocketPath: filepath.Join(directory, processServerSocketName)}
+	encoded, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publishProcessServerReady(directory, encoded); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(filepath.Join(directory, processServerReadyName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got processServerReady
+	if err := json.Unmarshal(contents, &got); err != nil || got != want {
+		t.Fatalf("atomic readiness = %+v, %v; want %+v", got, err, want)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != processServerReadyName {
+		t.Fatalf("atomic readiness retained staging files: %v", entries)
+	}
 }
 
 type processSignedSupervisor struct {
@@ -271,6 +299,40 @@ type processSignedUnixServer struct {
 	tracePath string
 }
 
+func publishProcessServerReady(directory string, ready []byte) error {
+	stagingPath := filepath.Join(directory, "."+processServerReadyName+".tmp")
+	readyPath := filepath.Join(directory, processServerReadyName)
+	file, err := os.OpenFile(stagingPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	cleanup := true
+	defer func() {
+		_ = file.Close()
+		if cleanup {
+			_ = os.Remove(stagingPath)
+		}
+	}()
+	written, writeErr := file.Write(ready)
+	if writeErr != nil {
+		return writeErr
+	}
+	if written != len(ready) {
+		return io.ErrShortWrite
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(stagingPath, readyPath); err != nil {
+		return err
+	}
+	cleanup = false
+	return fsyncDirectory(directory)
+}
+
 func (server *processSignedUnixServer) run(directory string, connections int) error {
 	socketPath := filepath.Join(directory, processServerSocketName)
 	listener, err := net.Listen("unix", socketPath)
@@ -292,7 +354,7 @@ func (server *processSignedUnixServer) run(directory string, connections int) er
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(directory, processServerReadyName), ready, 0o600); err != nil {
+	if err := publishProcessServerReady(directory, ready); err != nil {
 		return err
 	}
 	for range connections {

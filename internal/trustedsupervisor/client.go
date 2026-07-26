@@ -24,6 +24,27 @@ type Client struct {
 	verifier *ed25519Verifier
 }
 
+// CancellationFailureError is returned only after the peer's signed,
+// request-bound cancellation failure has been verified.
+type CancellationFailureError struct {
+	FailureClass string
+	cause        error
+}
+
+func (failure *CancellationFailureError) Error() string {
+	if failure == nil {
+		return "authenticated cancellation failure"
+	}
+	return "authenticated cancellation failure: " + failure.FailureClass
+}
+
+func (failure *CancellationFailureError) Unwrap() error {
+	if failure == nil {
+		return nil
+	}
+	return failure.cause
+}
+
 func NewClient(config Config) (*Client, error) {
 	verifier, err := newEd25519Verifier(config.TrustBundle, config.ExpectedPredecessorReleaseIdentity)
 	if err != nil {
@@ -250,7 +271,23 @@ func (client *Client) Cancel(ctx context.Context, envelope store.ExternalSupervi
 	if err != nil {
 		return store.ExternalSupervisorAuthenticatedCancellation{}, err
 	}
+	if response.Status == "failed" {
+		if err := client.verifyCancellationFailure(exchangeCtx, envelope, receipt, cancellation, boundRequest, response); err != nil {
+			return store.ExternalSupervisorAuthenticatedCancellation{}, err
+		}
+		cause := error(ErrProtocol)
+		switch response.CancellationFailure.FailureClass {
+		case "cancellation_conflict", "process_identity_mismatch", "process_identity_unavailable":
+			cause = ErrReplay
+		case "cancellation_deadline", "group_exit_unconfirmed", "process_wait_unconfirmed":
+			cause = ErrDeadline
+		}
+		return store.ExternalSupervisorAuthenticatedCancellation{}, &CancellationFailureError{
+			FailureClass: response.CancellationFailure.FailureClass, cause: cause,
+		}
+	}
 	if response.Status != "accepted" || response.CancellationAcknowledgement == nil || response.CancellationAuthentication == nil ||
+		response.CancellationFailure != nil || response.CancellationFailureAuthentication != nil ||
 		response.DeliveryAuthentication != nil || response.Receipt != nil || response.ReceiptAuthentication != nil ||
 		response.Callback != nil || response.CallbackAuthentication != nil {
 		return store.ExternalSupervisorAuthenticatedCancellation{}, fmt.Errorf("%w: cancellation response shape", ErrProtocol)
@@ -271,9 +308,62 @@ func (client *Client) Cancel(ctx context.Context, envelope store.ExternalSupervi
 	return authenticated, nil
 }
 
+func (client *Client) verifyCancellationFailure(
+	ctx context.Context,
+	envelope store.ExternalSupervisorEnvelope,
+	receipt store.ExternalSupervisorAuthenticatedReceipt,
+	cancellation store.ExternalSupervisorCancellation,
+	request wireRequest,
+	response wireResponse,
+) error {
+	if client == nil || ctx == nil {
+		return authenticationError("cancellation failure input")
+	}
+	if err := verificationDeadlineError(ctx); err != nil {
+		return err
+	}
+	if response.CancellationFailure == nil || response.CancellationFailureAuthentication == nil ||
+		response.CancellationAcknowledgement != nil || response.CancellationAuthentication != nil ||
+		response.DeliveryAuthentication != nil || response.Receipt != nil || response.ReceiptAuthentication != nil ||
+		response.Callback != nil || response.CallbackAuthentication != nil {
+		return authenticationError("cancellation failure response shape")
+	}
+	failure := *response.CancellationFailure
+	sealed, err := sealWireCancellationFailure(failure)
+	if err != nil || sealed != failure || failure.CancellationHash != cancellation.CancellationIdentityHash ||
+		failure.EnvelopeHash != envelope.EnvelopeHash || failure.ReceiptHash != receipt.Receipt.ReceiptHash ||
+		failure.AttemptNumber != envelope.AttemptNumber || failure.NonceHash != request.ResponseNonceHash ||
+		failure.SignerKeySPKISHA256 != client.config.TrustBundle.SupervisorPeer.Certificate.SubjectKeySPKISHA256 {
+		return authenticationError("cancellation failure transitive binding")
+	}
+	expectedChannel, err := deriveMessageChannelBinding(request.ChannelBindingHash, "cancellation_failure", request.ResponseNonceHash, cancellation.CancellationIdentityHash)
+	if err != nil || failure.ChannelBindingHash != expectedChannel || response.CancellationFailureAuthentication.RequestHash != request.RequestHash {
+		return authenticationError("cancellation failure channel binding")
+	}
+	issuedAt, timeErr := time.Parse(time.RFC3339Nano, failure.IssuedAt)
+	deadline, deadlineErr := time.Parse(time.RFC3339Nano, envelope.Deadline)
+	if timeErr != nil || deadlineErr != nil || !issuedAt.Before(deadline) {
+		return authenticationError("cancellation failure time")
+	}
+	if err := client.verifier.verifyAuthorizationAt(ctx, envelope, receipt.Authorization, issuedAt); err != nil {
+		return err
+	}
+	if err := client.verifyPeerMessage(ctx, "cancellation", failure.FailureHash, failure.NonceHash, failure.ChannelBindingHash, failure.IssuedAt, *response.CancellationFailureAuthentication); err != nil {
+		return err
+	}
+	root, _, err := client.verifier.rootAt(client.config.TrustBundle.ReleaseRoots, issuedAt)
+	if err != nil || failure.TrustRootID != root.RootID {
+		return authenticationError("cancellation failure release root")
+	}
+	return nil
+}
+
 func (client *Client) VerifyExternalSupervisorEnvelope(ctx context.Context, envelope store.ExternalSupervisorEnvelope) error {
-	if client == nil || ctx == nil || ctx.Err() != nil {
+	if client == nil || ctx == nil {
 		return ErrAuthentication
+	}
+	if err := verificationDeadlineError(ctx); err != nil {
+		return err
 	}
 	return client.verifier.verifyAuthorizationAt(ctx, envelope, client.config.TrustBundle.Authorization, client.config.Now().UTC())
 }
@@ -291,7 +381,13 @@ func (client *Client) VerifyExternalSupervisorCancellation(ctx context.Context, 
 }
 
 func (client *Client) verifyReceipt(ctx context.Context, envelope store.ExternalSupervisorEnvelope, authenticated store.ExternalSupervisorAuthenticatedReceipt, runHooks bool) error {
-	if client == nil || ctx == nil || ctx.Err() != nil || authenticated.SchemaVersion != store.ExternalSupervisorAuthenticatedReceiptSchemaVersion ||
+	if client == nil || ctx == nil {
+		return authenticationError("durable receipt input")
+	}
+	if err := verificationDeadlineError(ctx); err != nil {
+		return err
+	}
+	if authenticated.SchemaVersion != store.ExternalSupervisorAuthenticatedReceiptSchemaVersion ||
 		authenticated.Authorization != client.config.TrustBundle.Authorization || authenticated.Delivery.TrustBundleHash != client.config.TrustBundle.TrustBundleHash {
 		return authenticationError("durable receipt trust bundle")
 	}
@@ -338,10 +434,16 @@ func (client *Client) verifyReceipt(ctx context.Context, envelope store.External
 			return err
 		}
 	}
-	return nil
+	return verificationDeadlineError(ctx)
 }
 
 func (client *Client) verifyCallback(ctx context.Context, envelope store.ExternalSupervisorEnvelope, receipt store.ExternalSupervisorAuthenticatedReceipt, authenticated store.ExternalSupervisorAuthenticatedCallback, runHooks bool) error {
+	if client == nil || ctx == nil {
+		return authenticationError("callback input")
+	}
+	if err := verificationDeadlineError(ctx); err != nil {
+		return err
+	}
 	if err := client.verifyReceipt(ctx, envelope, receipt, false); err != nil {
 		return err
 	}
@@ -370,12 +472,20 @@ func (client *Client) verifyCallback(ctx context.Context, envelope store.Externa
 		return authenticationError("callback release root")
 	}
 	if runHooks {
-		return client.runHook(ctx, "callback", callback.CallbackHash, callbackAt)
+		if err := client.runHook(ctx, "callback", callback.CallbackHash, callbackAt); err != nil {
+			return err
+		}
 	}
-	return nil
+	return verificationDeadlineError(ctx)
 }
 
 func (client *Client) verifyCancellation(ctx context.Context, envelope store.ExternalSupervisorEnvelope, receipt store.ExternalSupervisorAuthenticatedReceipt, authenticated store.ExternalSupervisorAuthenticatedCancellation, runHooks bool) error {
+	if client == nil || ctx == nil {
+		return authenticationError("cancellation input")
+	}
+	if err := verificationDeadlineError(ctx); err != nil {
+		return err
+	}
 	if err := client.verifyReceipt(ctx, envelope, receipt, false); err != nil {
 		return err
 	}
@@ -407,14 +517,19 @@ func (client *Client) verifyCancellation(ctx context.Context, envelope store.Ext
 		return authenticationError("cancellation release root")
 	}
 	if runHooks {
-		return client.runHook(ctx, "cancellation", ack.AcknowledgementHash, issuedAt)
+		if err := client.runHook(ctx, "cancellation", ack.AcknowledgementHash, issuedAt); err != nil {
+			return err
+		}
 	}
-	return nil
+	return verificationDeadlineError(ctx)
 }
 
 func (client *Client) verifyPeerMessage(ctx context.Context, messageType, messageHash, nonceHash, channelHash, issuedAt string, evidence store.ExternalSupervisorMessageAuthentication) error {
-	if ctx.Err() != nil {
-		return fmt.Errorf("%w: %v", ErrDeadline, ctx.Err())
+	if client == nil || ctx == nil {
+		return authenticationError("message authentication input")
+	}
+	if err := verificationDeadlineError(ctx); err != nil {
+		return err
 	}
 	sealed, err := store.SealExternalSupervisorMessageAuthentication(evidence)
 	if err != nil || sealed != evidence || evidence.MessageType != messageType || evidence.MessageHash != messageHash ||
@@ -437,7 +552,7 @@ func (client *Client) verifyPeerMessage(ctx context.Context, messageType, messag
 	if err := verifyMessageAuthenticationSignature(peerKey, evidence); err != nil {
 		return authenticationError("peer possession signature")
 	}
-	return nil
+	return verificationDeadlineError(ctx)
 }
 
 func verifyMessageAuthenticationSignature(publicKey ed25519.PublicKey, evidence store.ExternalSupervisorMessageAuthentication) error {
@@ -469,6 +584,12 @@ func canonicalMessageAuthenticationPayload(evidence store.ExternalSupervisorMess
 }
 
 func (client *Client) runHook(ctx context.Context, messageType, messageHash string, issuedAt time.Time) error {
+	if client == nil || ctx == nil {
+		return authenticationError("authentication hook input")
+	}
+	if err := verificationDeadlineError(ctx); err != nil {
+		return fmt.Errorf("%w: authentication hook: %v", ErrDeadline, ctx.Err())
+	}
 	if client.config.Authentication == nil {
 		return nil
 	}
@@ -480,6 +601,13 @@ func (client *Client) runHook(ctx context.Context, messageType, messageHash stri
 	}
 	if ctx.Err() != nil {
 		return fmt.Errorf("%w: authentication hook: %v", ErrDeadline, ctx.Err())
+	}
+	return nil
+}
+
+func verificationDeadlineError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %v", ErrDeadline, err)
 	}
 	return nil
 }

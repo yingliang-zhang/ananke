@@ -22,6 +22,8 @@ import (
 	"github.com/yingliang-zhang/ananke/internal/store"
 )
 
+const integrationTestExchangeBudget = 8 * time.Second
+
 func TestUnixClientAuthenticatesDeliveryReceiptCallbackAndCancellation(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	fixture := newSignedAuthorizationFixture(t, now)
@@ -86,6 +88,59 @@ func TestUnixClientAuthenticatesDeliveryReceiptCallbackAndCancellation(t *testin
 		if !operations[operation] {
 			t.Fatalf("wire did not prove closed envelope reference for %s", operation)
 		}
+	}
+}
+
+func TestUnixClientExpiredVerificationAndHookBoundaryReturnDeadline(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	fixture := newSignedAuthorizationFixture(t, now)
+	server := startSignedUnixSupervisor(t, fixture, "ok", 3)
+	producer := newSignedTestClient(t, server.socketPath, server.pid, fixture.bundle, now, nil)
+	receipt, err := producer.Deliver(context.Background(), fixture.envelope)
+	if err != nil {
+		t.Fatalf("prepare receipt: %v", err)
+	}
+	callback, err := producer.Reconcile(context.Background(), fixture.envelope, receipt)
+	if err != nil || callback == nil {
+		t.Fatalf("prepare callback = %+v, %v", callback, err)
+	}
+	cancellation, err := store.SealExternalSupervisorCancellation(store.ExternalSupervisorCancellation{
+		SchemaVersion: store.ExternalSupervisorCancellationSchemaVersion,
+		HandoffID:     fixture.envelope.HandoffID, EnvelopeHash: fixture.envelope.EnvelopeHash,
+		ReceiptIdentityHash: receipt.Receipt.ReceiptHash, AttemptNumber: fixture.envelope.AttemptNumber,
+	})
+	if err != nil {
+		t.Fatalf("prepare cancellation: %v", err)
+	}
+	acknowledged, err := producer.Cancel(context.Background(), fixture.envelope, receipt, cancellation)
+	if err != nil {
+		t.Fatalf("prepare cancellation acknowledgement: %v", err)
+	}
+	server.wait(t)
+
+	verifier := newSignedTestClient(t, server.socketPath, server.pid, fixture.bundle, now, blockingAuthenticationHooks{})
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	for _, testCase := range []struct {
+		name   string
+		verify func() error
+	}{
+		{name: "envelope", verify: func() error { return verifier.VerifyExternalSupervisorEnvelope(expired, fixture.envelope) }},
+		{name: "receipt before first hook", verify: func() error { return verifier.verifyReceipt(expired, fixture.envelope, receipt, true) }},
+		{name: "callback before hook", verify: func() error { return verifier.verifyCallback(expired, fixture.envelope, receipt, *callback, true) }},
+		{name: "cancellation before hook", verify: func() error {
+			return verifier.verifyCancellation(expired, fixture.envelope, receipt, acknowledged, true)
+		}},
+		{name: "peer message", verify: func() error {
+			return verifier.verifyPeerMessage(expired, "delivery", receipt.Delivery.DeliveryHash, receipt.Delivery.NonceHash,
+				receipt.Delivery.ChannelBindingHash, receipt.Delivery.IssuedAt, receipt.DeliveryAuthentication)
+		}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if err := testCase.verify(); !errors.Is(err, ErrDeadline) || errors.Is(err, ErrAuthentication) {
+				t.Fatalf("expired verification error = %v, want only %v", err, ErrDeadline)
+			}
+		})
 	}
 }
 
@@ -410,7 +465,7 @@ func startSignedUnixSupervisor(t *testing.T, fixture signedAuthorizationFixture,
 
 func (server *signedUnixSupervisor) serve(connection net.Conn, fixture signedAuthorizationFixture, mode string) error {
 	defer connection.Close()
-	_ = connection.SetDeadline(time.Now().Add(2 * time.Second))
+	_ = connection.SetDeadline(time.Now().Add(integrationTestExchangeBudget))
 	if mode == "accept_only" {
 		return nil
 	}
@@ -597,7 +652,7 @@ func signedTestConfig(socketPath string, pid int32, bundle store.ExternalSupervi
 			ReleaseAttestationHash:   testHash("predecessor-release-attestation"),
 			ReleaseApprovalHash:      testHash("predecessor-release-approval"),
 		},
-		MaxFrameBytes: maxFrameBytes, SocketPath: socketPath, Timeout: time.Second,
+		MaxFrameBytes: maxFrameBytes, SocketPath: socketPath, Timeout: integrationTestExchangeBudget,
 		Now: func() time.Time { return now }, Authentication: hooks,
 	}
 }
@@ -619,7 +674,7 @@ func (server *signedUnixSupervisor) wait(t *testing.T) {
 		if server.err != nil {
 			t.Fatalf("signed Unix supervisor: %v", server.err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(integrationTestExchangeBudget):
 		t.Fatal("signed Unix supervisor did not exit")
 	}
 }
