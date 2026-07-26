@@ -31,8 +31,30 @@ const (
 )
 
 const readOnlyAuditPromptTemplate = `Perform a read-only audit of the supplied immutable source snapshot.
-Do not modify source, create repairs, invoke Run, or claim tests that are not present in wrapper logs.
-Return only the bounded audit report requested by the trusted supervisor.`
+Do not modify source. Do not create repairs. Do not invoke Run. Do not claim a test ran unless the wrapper logs record it.
+Do not expose credentials, secret material, raw runtime authority, or machine-specific paths.
+
+Output exactly one RFC 8785/JCS canonical JSON object and nothing else: no prose, Markdown, code fence, leading bytes, or trailing bytes.
+The object is closed: every field below is required and no other fields are allowed.
+Top-level fields must appear in canonical lexicographic order: findings, schema_version, summary, verdict.
+- findings must be a JSON array containing 0..256 finding objects.
+- schema_version must be exactly "ananke.local-trusted-supervisor-model-audit-report.v1".
+- summary must be a JSON string of 1..4096 UTF-8 bytes, trimmed and one-line, with no absolute path, CR, LF, or NUL.
+- verdict must be "approved" if and only if findings is empty, and "rejected" if and only if findings contains 1..256 items.
+
+Each finding object is closed. Its fields must appear in canonical lexicographic order: code, line, message, path, severity.
+- code must be a JSON string matching ^[A-Z][A-Z0-9_]{0,63}$: one ASCII uppercase letter followed by 0..63 ASCII uppercase letters, digits, or underscores.
+- line must be an integer from 1 through 100000000, inclusive.
+- message must be a JSON string of 1..4096 UTF-8 bytes, trimmed and one-line, with no absolute path, CR, LF, or NUL.
+- path must be a 1..512 UTF-8 byte repository-relative clean slash path: not absolute, not "." or "..", no parent traversal, backslash, CR, LF, or NUL.
+- severity must be exactly one of blocker, high, medium, low, or info.
+
+Findings must be strictly sorted by severity rank (blocker=0, high=1, medium=2, low=3, info=4), then code, path, line, message. Compare code, path, and message in ascending UTF-8 bytewise lexicographic order and line in ascending numeric order. Equal or duplicate findings are invalid.
+
+Approved example:
+{"findings":[],"schema_version":"ananke.local-trusted-supervisor-model-audit-report.v1","summary":"No findings.","verdict":"approved"}
+Rejected example:
+{"findings":[{"code":"READ_001","line":7,"message":"Unchecked read error.","path":"internal/a.go","severity":"high"}],"schema_version":"ananke.local-trusted-supervisor-model-audit-report.v1","summary":"One finding.","verdict":"rejected"}`
 
 const readOnlyAuditSynthesizePromptSuffix = "\nDo not call more tools; synthesize only from the existing session evidence."
 
@@ -47,6 +69,7 @@ var (
 		"GOOGLE_API_KEY",
 		"HERMES_API_KEY",
 		"OPENAI_API_KEY",
+		"SUDO_CODING_KEY",
 		"SUDO_API_KEY",
 	}
 	auditCredentialEnvironmentAllowlist = map[string]struct{}{
@@ -55,6 +78,7 @@ var (
 		"GOOGLE_API_KEY":    {},
 		"HERMES_API_KEY":    {},
 		"OPENAI_API_KEY":    {},
+		"SUDO_CODING_KEY":   {},
 		"SUDO_API_KEY":      {},
 	}
 	auditRuntimeReadRootAllowlist = map[string]struct{}{
@@ -65,7 +89,7 @@ var (
 		"/bin": {}, "/usr/bin": {},
 	}
 	auditProviderCredentialOptions = map[string][][]string{
-		"custom:sudo": {{"SUDO_API_KEY"}},
+		"custom:sudo": {{"SUDO_CODING_KEY"}, {"SUDO_API_KEY"}},
 	}
 	auditProviderEndpointAllowlist = map[string]executionPolicyEndpoint{
 		"custom:sudo": {Hostname: "coding.sudoai.cc", Port: 443},

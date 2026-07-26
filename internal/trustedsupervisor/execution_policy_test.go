@@ -43,6 +43,52 @@ func TestExecutionPolicyLoadsCanonicalPinnedLaunchEntry(t *testing.T) {
 	}
 }
 
+func TestReadOnlyAuditPromptTemplateStatesClosedCanonicalContractAndBindsHash(t *testing.T) {
+	for _, required := range []string{
+		"read-only audit",
+		"Do not modify source",
+		"Do not create repairs",
+		"Do not invoke Run",
+		"Do not claim a test ran unless the wrapper logs record it",
+		"exactly one RFC 8785/JCS canonical JSON object",
+		"no prose, Markdown, code fence, leading bytes, or trailing bytes",
+		"findings, schema_version, summary, verdict",
+		`schema_version must be exactly "ananke.local-trusted-supervisor-model-audit-report.v1"`,
+		`verdict must be "approved" if and only if findings is empty`,
+		`"rejected" if and only if findings contains 1..256 items`,
+		"code, line, message, path, severity",
+		`^[A-Z][A-Z0-9_]{0,63}$`,
+		"repository-relative clean slash path",
+		"line must be an integer from 1 through 100000000",
+		"blocker, high, medium, low, or info",
+		"1..4096 UTF-8 bytes",
+		"no absolute path, CR, LF, or NUL",
+		"severity rank (blocker=0, high=1, medium=2, low=3, info=4), then code, path, line, message",
+	} {
+		if !strings.Contains(readOnlyAuditPromptTemplate, required) {
+			t.Errorf("read-only audit prompt is missing %q", required)
+		}
+	}
+
+	const previousTemplate = `Perform a read-only audit of the supplied immutable source snapshot.
+Do not modify source, create repairs, invoke Run, or claim tests that are not present in wrapper logs.
+Return only the bounded audit report requested by the trusted supervisor.`
+	currentHash := hashJournalBytes([]byte(readOnlyAuditPromptTemplate))
+	if currentHash == hashJournalBytes([]byte(previousTemplate)) {
+		t.Fatal("expanded audit prompt retained the previous template hash")
+	}
+	if readOnlyAuditPromptTemplateHash() != currentHash || auditPromptSHA256(false) != currentHash {
+		t.Fatalf("current audit prompt hash was not consumed dynamically: template=%q audit=%q want=%q", readOnlyAuditPromptTemplateHash(), auditPromptSHA256(false), currentHash)
+	}
+	if got, want := auditPromptSHA256(true), hashJournalBytes([]byte(readOnlyAuditPromptTemplate+readOnlyAuditSynthesizePromptSuffix)); got != want {
+		t.Fatalf("synthesize prompt hash = %q, want %q", got, want)
+	}
+	material := newExecutionPolicyTestMaterial(t)
+	if material.entry.PromptTemplateHash != currentHash {
+		t.Fatalf("execution policy prompt hash = %q, want current template %q", material.entry.PromptTemplateHash, currentHash)
+	}
+}
+
 func TestRunbookMatchesExecutionPolicySchemaAndNamesInstalledPreflightSeparately(t *testing.T) {
 	contents, err := os.ReadFile(filepath.Join("..", "..", "docs", "local-trusted-supervisor-transport-runbook.md"))
 	if err != nil {
@@ -339,6 +385,47 @@ func TestExecutionPolicyBindsOnlyExactRouteProviderEndpoints(t *testing.T) {
 			t.Fatalf("mutated selected endpoint error = %v, want %v", err, ErrAuthentication)
 		}
 	})
+}
+
+func TestExecutionPolicyAcceptsOnlyExactCustomSudoCredentialDeclarations(t *testing.T) {
+	for _, testCase := range []struct {
+		name         string
+		provider     string
+		credentials  []string
+		wantAccepted bool
+	}{
+		{name: "preferred coding key", provider: "custom:sudo", credentials: []string{"SUDO_CODING_KEY"}, wantAccepted: true},
+		{name: "legacy API key", provider: "custom:sudo", credentials: []string{"SUDO_API_KEY"}, wantAccepted: true},
+		{name: "empty", provider: "custom:sudo"},
+		{name: "both alternatives", provider: "custom:sudo", credentials: []string{"SUDO_CODING_KEY", "SUDO_API_KEY"}},
+		{name: "mixed known names", provider: "custom:sudo", credentials: []string{"SUDO_CODING_KEY", "OPENAI_API_KEY"}},
+		{name: "duplicate coding key", provider: "custom:sudo", credentials: []string{"SUDO_CODING_KEY", "SUDO_CODING_KEY"}},
+		{name: "duplicate legacy API key", provider: "custom:sudo", credentials: []string{"SUDO_API_KEY", "SUDO_API_KEY"}},
+		{name: "unknown name", provider: "custom:sudo", credentials: []string{"SUDO_OTHER_KEY"}},
+		{name: "wrong provider coding key", provider: "anthropic", credentials: []string{"SUDO_CODING_KEY"}},
+		{name: "wrong provider legacy API key", provider: "anthropic", credentials: []string{"SUDO_API_KEY"}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			material := newExecutionPolicyTestMaterial(t)
+			material.entry.HermesProvider = testCase.provider
+			material.entry.CredentialEnvironmentNames = testCase.credentials
+			material.entry = mustSealExecutionPolicyEntryForTest(t, material.entry)
+			writeExecutionPolicyFileForTest(t, material.policyPath, []executionPolicyEntry{material.entry})
+			policy, err := loadExecutionPolicyForTest(material.policyPath, uint32(os.Getuid()))
+			if testCase.wantAccepted {
+				if err != nil {
+					t.Fatalf("exact credential declaration rejected: %v", err)
+				}
+				if err := policy.Close(); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrAuthentication) {
+				t.Fatalf("ambiguous credential declaration error = %v, want %v", err, ErrAuthentication)
+			}
+		})
+	}
 }
 
 func TestExecutionPolicyRejectsDuplicateUnknownNoncanonicalModeAndSymlink(t *testing.T) {

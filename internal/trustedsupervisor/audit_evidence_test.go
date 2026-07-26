@@ -11,6 +11,73 @@ import (
 	"time"
 )
 
+func TestReadOnlyAuditPromptEmbeddedExamplesDecodeWithoutRawAuthority(t *testing.T) {
+	const approvedMarker = "Approved example:\n"
+	const rejectedMarker = "Rejected example:\n"
+	extract := func(marker string) []byte {
+		t.Helper()
+		start := strings.Index(readOnlyAuditPromptTemplate, marker)
+		if start < 0 {
+			t.Fatalf("audit prompt is missing %q", marker)
+		}
+		start += len(marker)
+		end := strings.IndexByte(readOnlyAuditPromptTemplate[start:], '\n')
+		if end < 0 {
+			end = len(readOnlyAuditPromptTemplate) - start
+		}
+		return []byte(readOnlyAuditPromptTemplate[start : start+end])
+	}
+
+	for _, testCase := range []struct {
+		marker       string
+		wantVerdict  string
+		wantFindings int
+	}{
+		{marker: approvedMarker, wantVerdict: "approved", wantFindings: 0},
+		{marker: rejectedMarker, wantVerdict: "rejected", wantFindings: 1},
+	} {
+		report, err := decodeAuditModelReport(extract(testCase.marker), executionPolicyEntry{}, auditInvocation{})
+		if err != nil {
+			t.Fatalf("decode %s: %v", strings.TrimSpace(testCase.marker), err)
+		}
+		if report.Verdict != testCase.wantVerdict || len(report.Findings) != testCase.wantFindings {
+			t.Fatalf("decoded %s = %+v, want verdict %q with %d findings", strings.TrimSpace(testCase.marker), report, testCase.wantVerdict, testCase.wantFindings)
+		}
+	}
+
+	t.Setenv("SUDO_API_KEY", "prompt-contract-secret-sentinel")
+	entry := executionPolicyEntry{
+		Repository: executionPolicyDirectoryIdentity{Path: "/private/prompt-contract/repository"},
+		Wrapper:    executionPolicyFileIdentity{Path: "/private/prompt-contract/wrapper"},
+		PromptRoot: "/private/prompt-contract/prompt", OutputRoot: "/private/prompt-contract/output",
+		SessionRoot: "/private/prompt-contract/session", WorkRoot: "/private/prompt-contract/work",
+	}
+	invocation := auditInvocation{
+		PromptPath: "/private/prompt-contract/prompt/audit-prompt.txt", OutputPath: "/private/prompt-contract/output/audit-output.json",
+		SessionDir: "/private/prompt-contract/session/run", WorkDir: "/private/prompt-contract/work/source",
+	}
+	if containsAbsoluteAuditPath(readOnlyAuditPromptTemplate) || auditBytesLeakAuthority([]byte(readOnlyAuditPromptTemplate), entry, invocation) {
+		t.Fatal("fixed audit prompt contains raw machine authority or credential material")
+	}
+}
+
+func TestAuditEvidenceRejectsKnownCredentialValues(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		value string
+	}{
+		{name: "SUDO_CODING_KEY", value: "coding-credential-must-not-leak"},
+		{name: "SUDO_API_KEY", value: "legacy-credential-must-not-leak"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Setenv(testCase.name, testCase.value)
+			if !auditBytesLeakAuthority([]byte(testCase.value), executionPolicyEntry{}, auditInvocation{}) {
+				t.Fatalf("evidence containing %s was accepted", testCase.name)
+			}
+		})
+	}
+}
+
 func TestAuditEvidenceRejectsOutputTamperSecretOversizeAndMalformedSession(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("Darwin sandbox contract")

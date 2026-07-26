@@ -32,9 +32,6 @@ import (
 )
 
 func TestAuditModelsConfigIsExactClosedSudoRoute(t *testing.T) {
-	entry := executionPolicyEntry{
-		HermesProvider: "custom:sudo", HermesModel: "gpt-5.6-sol", CredentialEnvironmentNames: []string{"SUDO_API_KEY"},
-	}
 	want := "providers:\n" +
 		"  sudo:\n" +
 		"    baseUrl: http://127.0.0.1:43210/v1\n" +
@@ -53,20 +50,25 @@ func TestAuditModelsConfigIsExactClosedSudoRoute(t *testing.T) {
 		"      compat:\n" +
 		"        supportsReasoningEffort: true\n" +
 		"        supportsDeveloperRole: true\n"
-	contents, err := auditModelsConfigBytes(entry, "127.0.0.1:43210")
-	if err != nil || string(contents) != want {
-		t.Fatalf("models.yml = %q, %v; want %q", contents, err, want)
-	}
-	for _, authority := range []string{"localhost:43210", "127.0.0.1:0", "127.0.0.1:43210/extra", "[::1]:43210", "attacker.example:43210"} {
-		if _, err := auditModelsConfigBytes(entry, authority); !errors.Is(err, ErrAuthentication) {
-			t.Fatalf("models config authority %q error = %v, want %v", authority, err, ErrAuthentication)
+	for _, credentialName := range []string{"SUDO_CODING_KEY", "SUDO_API_KEY"} {
+		entry := executionPolicyEntry{
+			HermesProvider: "custom:sudo", HermesModel: "gpt-5.6-sol", CredentialEnvironmentNames: []string{credentialName},
+		}
+		contents, err := auditModelsConfigBytes(entry, "127.0.0.1:43210")
+		if err != nil || string(contents) != want {
+			t.Fatalf("%s models.yml = %q, %v; want %q", credentialName, contents, err, want)
+		}
+		for _, authority := range []string{"localhost:43210", "127.0.0.1:0", "127.0.0.1:43210/extra", "[::1]:43210", "attacker.example:43210"} {
+			if _, err := auditModelsConfigBytes(entry, authority); !errors.Is(err, ErrAuthentication) {
+				t.Fatalf("models config authority %q error = %v, want %v", authority, err, ErrAuthentication)
+			}
 		}
 	}
 	for _, mismatch := range []executionPolicyEntry{
-		{HermesProvider: "anthropic", HermesModel: "gpt-5.6-sol", CredentialEnvironmentNames: []string{"SUDO_API_KEY"}},
-		{HermesProvider: "custom:sudo", HermesModel: "claude-sonnet-4-5", CredentialEnvironmentNames: []string{"SUDO_API_KEY"}},
+		{HermesProvider: "anthropic", HermesModel: "gpt-5.6-sol", CredentialEnvironmentNames: []string{"SUDO_CODING_KEY"}},
+		{HermesProvider: "custom:sudo", HermesModel: "claude-sonnet-4-5", CredentialEnvironmentNames: []string{"SUDO_CODING_KEY"}},
 		{HermesProvider: "custom:sudo", HermesModel: "gpt-5.6-sol", CredentialEnvironmentNames: []string{"OPENAI_API_KEY"}},
-		{HermesProvider: "custom:sudo", HermesModel: "gpt-5.6-sol", CredentialEnvironmentNames: []string{"SUDO_API_KEY", "OPENAI_API_KEY"}},
+		{HermesProvider: "custom:sudo", HermesModel: "gpt-5.6-sol", CredentialEnvironmentNames: []string{"SUDO_CODING_KEY", "SUDO_API_KEY"}},
 	} {
 		if _, err := auditModelsConfigBytes(mismatch, "127.0.0.1:43210"); !errors.Is(err, ErrAuthentication) {
 			t.Fatalf("mismatched models route %+v error = %v, want %v", mismatch, err, ErrAuthentication)
