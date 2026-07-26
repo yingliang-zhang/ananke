@@ -2270,3 +2270,132 @@ The independent hard review at commit `b8e21ea` found 2 BLOCKER, 7 MAJOR, and 6 
 #### Decision
 
 - **ACCEPT — P5 read-only audit executor and release foundation:** the independent workspace review accepted ACL admission, descriptor-relative snapshot lifecycle, signed evidence/finalization/recovery/callback behavior, and non-success terminal handling; the independent release review now accepts the final compiler/repository launch guard and direct-candidate publication lifecycle. The accepted code remains read-only: it cannot modify source, execute repair, or create a Run. A real provider canary may proceed only as the separately bounded next experiment under the accepted policy and sandbox path.
+
+### P5 real-provider canary harness and credential-name evidence — 2026-07-26
+
+#### Verified evidence
+
+- The build-tagged `TestAuditRealProviderCanary` now compiles only under `ananke_real_provider_canary`; its default no-opt-in path **SKIPS/PASSES**, the explicit opt-in path fails closed before path lookup when the required credential is absent, and the Darwin test fixture pins the existing `/bin/test` executable rather than the nonexistent `/usr/bin/test` path.
+- The fixed read-only audit prompt now states the exact closed RFC 8785/JCS report schema, ordering, bounds, and approved/rejected invariants. Focused prompt tests `-count=10` **PASS** (`12.569s`), race `-count=3` **PASS** (`16.585s`), and the full trusted-supervisor package **PASS** (`49.001s`).
+- A route-aware wrapper smoke using the actual `SUDO_CODING_KEY` returned exactly `ANANKE_SUDO_CODING_KEY_SMOKE_OK` with exit `0`. The same smoke with the credential absent, or with only `SUDO_API_KEY`, returned `401 missing or invalid credentials`; therefore `SUDO_CODING_KEY` is the current valid custom:sudo credential name.
+- The full Ananke repository canary passed policy construction and entered the real snapshot/sandbox/wrapper/provider lifecycle, but failed closed after `570.46s` with `lifecycle_deadline_or_exit`. No approved/rejected model evidence was accepted and no success is inferred from this run.
+- Credential compatibility now treats exact single-name declarations `[SUDO_CODING_KEY]` (preferred) and `[SUDO_API_KEY]` (legacy) as alternatives, rejects ambiguity/mixing, and includes both in leak scanning. Focused credential/prompt/leak tests `-count=10` **PASS** (`1.960s`), race `-count=3` **PASS** (`2.771s`), full trusted-supervisor **PASS** (`68.162s`).
+
+#### Decision
+
+- **CANARY REMAINS OPEN:** provider authentication is proven with `SUDO_CODING_KEY`, but the complete Ananke read-only audit has not produced terminal typed evidence within its current deadline. Re-run only after the credential-name contract is independently reviewed and the canary budget/lifecycle diagnostics are bounded coherently.
+
+### P6a controlled repair foundation candidate — 2026-07-26
+
+#### Implemented boundary
+
+- Migration v15 adds insert-only P6 authorization, attempt, and event facts. A fresh `local_gui_operator` approval binds the exact persisted P4 fact/full fence, repository/base commit/tree, detached worktree destination, ordered writable paths, ordered supervisor-owned tests, route identity, and attempt `1..2` with cap `2` before any filesystem effect.
+- Migration v16 adds insert-only typed review evidence. `running -> waiting_for_review` persists evidence and event atomically; generic event append cannot manufacture `waiting_for_review` without the corresponding canonical evidence.
+- `internal/repairrunner` appends durable `running` before `git worktree add --detach`, invokes only an injected test-only adapter, rejects restart re-execution, independently cross-checks porcelain-v2/raw/numstat/patch views, rejects non-allowlisted/untracked/renamed/deleted/symlink/gitlink/mode/binary/oversized changes, and proves the original repository HEAD/tree/status/tracked-byte aggregate remains unchanged.
+- `FinalizeForReview` revalidates the candidate, worktree and original repository, executes only the exact pinned test declarations under a closed environment/process group with bounded output/deadline, rechecks the diff after every test, and persists hashes/counters only. It never commits, creates/updates a branch, pushes, merges, or deletes the retained review worktree.
+
+#### Verification evidence
+
+- Store P6 admission/event focused `-count=10` **PASS** (`7.364s`), race `-count=3` **PASS** (`47.724s`); event-head focused `-count=10` **PASS** (`2.515s`), race `-count=3` **PASS** (`14.223s`); review-evidence focused `-count=10` **PASS** (`11.143s`), race `-count=3` **PASS** (`79.942s`).
+- Repairrunner Phase 2 full `-count=10` **PASS** (`110.978s`), race `-count=3` **PASS** (`59.048s`). Phase 3B single package **PASS** (`32.296s`); happy/replay/no-raw-output `-count=10` **PASS** (`57.251s`), all `FinalizeForReview` race `-count=3` **PASS** (`123.997s`).
+- Full candidate gate: `go test ./... -count=1` **PASS**; race for store/repairrunner/trustedsupervisor **PASS** (`197.228s`/`87.510s`/`229.675s`); `go vet ./...` and `git diff --check` **PASS**.
+
+#### First independent hard review
+
+- Report: `artifacts/omp/p6a/first-hard-review-report.md`, SHA-256 `532ae3b0e923f4969c0dc1c3271d2e39b7e160b0594cb056c9cb91e9059a0749`.
+- Verdict: **CHANGES REQUESTED** — six release-blocking BLOCKERs, two HIGHs, and one MEDIUM.
+- Reproduced BLOCKERs: caller-authorized tests can push/update refs and still reach review; ignored untracked files are invisible; an in-process adapter can mutate after timeout and inject worktree `core.fsmonitor`; concurrent finalizers run the same tests twice; setsid descendants survive review; unsigned exported store APIs can fabricate `waiting_for_review` without effects.
+- Additional blocking findings: approval lifetime/age is unbounded and not rechecked; verified executable FD is not the executable launched; common `.git` identity is not retained. The reviewer supplied all probes through read-only Go overlays and confirmed current production commands do not yet import `internal/repairrunner`.
+
+#### Decision
+
+- **REJECTED / DO NOT COMMIT:** green tests did not establish the claimed authority boundary. The replacement architecture moves all edit/test effects into the authenticated trusted-supervisor process, removes production-reachable in-process adapters and caller-defined test commands, requires a durable one-shot effect claim, and requires Ed25519-signed review attestations verified against Ananke's pinned public trust bundle before `waiting_for_review`. The ten hard-review probes are mandatory RED vectors for the replacement.
+
+### P6 corrected-architecture design review — 2026-07-26
+
+- Same-session design review: `artifacts/omp/p6a/design-rereview-report.md`, SHA-256 `d04e494b3a6e095ff40b9ce79c8abcb65867780be24f4936f925ecbe086e916a`.
+- Verdict: **DESIGN CHANGES REQUESTED** — the process split is sound, but prose alone did not freeze a non-substitutable release trust anchor, distinct repair leaf role/domain, supervisor-owned FULL-sync phase claims, UID-wide terminal proof, closed offline Go profile, exact common-`.git` delta, canonical attestation, mandatory Ananke verification, or pre-release schema cutover.
+- Corrected architecture requires a dedicated `ananke-controlled-repair-supervisor`, separate `controlled_repair_review_attestor` key/socket/journal/policy/runtime UID, release-pinned public bundle hash + leaf SPKI outside SQLite, three at-most-once phase claims, exclusive runtime UID lease and UID-empty terminal proof, disposable no-network test source without `.git`, and signature re-verification on every accepted-state read.
+- The contradictory first plan was archived as `docs/plans/rejected/2026-07-26-p6a-controlled-repair-foundation-first-candidate.md`. The sole actionable replacement is `docs/plans/2026-07-26-p6a-controlled-repair-foundation.md`, which freezes nine contract slices before any replacement storage/runtime implementation.
+- **CURRENT GATE:** Slices 1–2 (trust bootstrap/rotation and authorization/dispatch) are being materialized only as pure canonical contract/fixture/verifier artifacts. No rejected runtime is accepted and no production repair effect is enabled.
+
+### P6 contract Slices 1–2 candidate — 2026-07-26
+
+- Pure artifacts: `internal/repaircontract/{contract.go,canonical.go,contract_test.go,testdata/p6-contract-v1.json}` and `docs/experiments/p6-controlled-repair-supervisor-contract.md`. No store, migration, process, socket, filesystem-open, signature, sandbox, or runtime code was added.
+- TDD RED was captured before implementation: the focused package failed with undefined `CanonicalBytes`, `ContractFixture`, `ImmutableDispatch`, and related contract symbols.
+- GREEN verification: package single **PASS** (`1.299s`); `-count=10` **PASS** (`3.912s`); race `-count=3` **PASS** (`12.620s`); package vet and `git diff --check` **PASS**.
+- Full-repository `go test ./... -count=1` reached all new/changed packages successfully, but an unrelated existing `internal/supervisor` cleanup race failed once: `TestSupervisorAdoptCommand` reported `TempDir RemoveAll cleanup: directory not empty`. The exact test then passed `-count=10` (`0.707s`) and the whole supervisor package passed (`9.071s`). The full suite is therefore **not recorded as green** for this run; the focused failure is classified as a non-reproducing pre-existing cleanup flake, not silently ignored.
+- **READY FOR SLICE REVIEW, NOT ACCEPTED:** independent review must challenge compiled release-pin substitution, self-consistent attacker roots, signature-role confusion, RFC 8785/JCS correctness, closed nested schemas, consistently-rehashed semantic probes, approval/dispatch boundary timestamps, full P4/fence nonprojection, attempt-2 predecessor binding, replay conflicts, and authority-payload absence.
+
+### P6 contract Slices 1–2 first hard review — 2026-07-26
+
+- Report: `artifacts/omp/p6a/contract-slices1-2-first-review.md`, SHA-256 `97ea666fac530f9083715cac6325d205c4275bd64d2a6de01cb867162713e57b`.
+- Verdict: **SLICE CHANGES REQUESTED** — four BLOCKERs: label-derived placeholder pins cannot identify real release artifacts; attempt 2 accepts an arbitrary predecessor hash and reuses attempt-1 GUI approval; replay classifier compares decoded structs rather than canonical bytes; verifier compares dynamic authority against one compiled sample instead of an external trusted `AuthorityContext`.
+- Evidence gaps: acceptance-vector inventory is decorative rather than execution-linked; exported generic `HashRecord` can return caller-controlled sensitive diagnostics. Reviewer overlays confirmed current RFC 8785 number/key-order behavior and boundary handling, but those probes must become permanent tests.
+- Real public Ed25519 release inputs were generated for repair root/leaf X.509 certificates and SPKI under `internal/repaircontract/testdata/release-v1/`. Public hashes: attestor cert `94a8c72b...55ea0`, attestor SPKI `79392ee3...8b493`, root cert `d4120da5...a63e7`, root SPKI `966d0062...b2147`. Private material was written only to an owner-only external provisioning directory (directory mode `0700`, key mode `0600`), was not read or printed, and is absent from the repository.
+- **REPAIR IN PROGRESS:** batch A1 replaces label hashes with embedded real public bundle/manifest/policy/profile artifacts and freezes a no-active-successor rotation protocol. Batch A2 will add external authority context, verified predecessor semantics, canonical-byte replay, executable vector registry, and private generic hashing helpers.
+
+#### A1 — real release trust artifacts
+
+- Root cause of the post-A1 fixture RED was a stale pre-A1 generated oracle containing removed synthetic descriptor pins, label-derived hashes, fake successor rotation fields, and obsolete vector IDs. Strict `DisallowUnknownFields` correctly rejected it; regenerating from the new canonical fixture resolved the mismatch without weakening decoding.
+- Embedded ten public artifacts with exact manifest binding: root/leaf certificate and SPKI DER, public trust bundle, supervisor policy/profile, contract-release declaration, closed no-successor rotation policy, and release manifest. X.509 verification covers root self-signature, leaf chain, exact DER/SPKI, Ed25519 usage, exclusive validity, and critical repair-role/signature-domain extensions.
+- Synthetic portable device/inode/owner/mode/size/socket/journal/runtime pins and fake rotation signatures were removed. Installation descriptor observations remain future runtime inputs, not compiled portable pins.
+- Final package identities include fixture `sha256:8349a260...a00a3`, release pins `sha256:bda296df...dde24`, public bundle `sha256:2e83c327...d4ad1`, and release manifest `sha256:6a53929c...b6877`.
+- Independent gates: single **PASS** (`1.869s`); `-count=10` **PASS** (`10.521s`); race `-count=3` **PASS** (`27.978s`); package vet and `git diff --check` **PASS**. Temporary ad-hoc X.509/pkix compile+format verification **PASS** (`0.401s`) and its `hermes-verify-*` script was removed.
+- **A2 IN PROGRESS:** external `AuthorityContext`, verified fresh attempt-2 predecessor, canonical-byte replay, executable vector registry/permanent RFC vectors, and typed sanitized hash APIs. Slice 3 remains blocked pending rereview.
+
+### P6 dedicated macOS repair runtime UID pool — 2026-07-26
+
+- Provisioned hidden non-login group `_ananke_repair` GID `62000` and closed users `_ananke_repair_1..4` with UIDs `62001..62004`, primary GID `62000`, shell `/usr/bin/false`, home `/var/empty`, hidden marker `1`, and locked password markers.
+- All four identities resolve through Directory Services, are members of the dedicated group, and are not members of `admin`. The pool is currently quiescent: no process is owned by UIDs `62001..62004`.
+- Idempotent local provisioning/check artifact: `artifacts/local/p6-runtime-uid-pool/provision.sh`. The initial post-create check exposed two Darwin `dscl -search` parsing bugs (multi-line property output and closing `)`); both were reproduced, fixed, and reverified.
+- Verification: script syntax **PASS**; `--check` **PASS**; exact UID/GID/shell/home/hidden/non-admin system assertions **PASS**; temporary `hermes-verify-*` idempotency script **PASS** and removed.
+- This satisfies only the operating-system identity prerequisite. It does not by itself prove exclusive lease, setuid launch, UID-wide process enumeration/kill, terminal proof, sandbox containment, or automatic reuse safety; those remain Slice 5 contract/runtime gates.
+
+#### A2 — external authority, verified predecessor, canonical replay
+
+- Added pure `AuthorityContext` + opaque `VerifiedAuthorization`, requiring exact external durable P4/fence/lineage/repository/base/path/profile/route/channel/peer/policy/GUI-event authority. Attempt 2 requires an intact verified attempt-1 capability, exact predecessor authorization hash, same repair authority, and distinct/later GUI approval ID, provenance hash, timestamp, approval hash, and canonical bytes.
+- Added strict canonical dispatch-only decoding and replay classification over stored/incoming canonical bytes. Exact replay is `bytes.Equal` after static semantic validation; newline/whitespace/duplicate/unknown keys, same asserted hash with altered bytes, and changed deadline/peer/profile/channel/policy/request/authorization/attempt are conflicts.
+- Added permanent RFC 8785 Appendix B number, UTF-16 key ordering, negative-zero/exponent threshold, valid surrogate-pair, and dispatch lifetime N−1/N/N+1 tests. Generic canonical/hash helpers are package-private and sanitize caller-controlled marshaler errors.
+- Independent gates on the initial A2 candidate: single **PASS** (`3.639s`); `-count=10` **PASS** (`17.254s`); race `-count=3` **PASS** (`32.903s`); package vet and `git diff --check` **PASS**.
+- **ORCHESTRATOR GAP / NOT READY FOR REVIEW:** `assertExecutedVectorOrder` was defined but unused, and the fixture-removal test did not create the required ID→real-probe executable acceptance-vector registry. Exact-session repair is adding the complete ordered registry and consistently-rehashed named probes before rereview.
+
+#### Slices 1–2 closure review round 1
+
+- Frozen candidate: 20 files, manifest `sha256:906f65401455e1647001c833dd5600a520debf89e2512781a31c0eec31d12dca`; pre/post review mismatches `0`. Report: `artifacts/omp/p6a/contract-slices1-2-closure-review-1.md`, SHA-256 `3f0eb8e3443ba4eeba4f470447acf32cc12a00b9d214387613c4db3f0c07fb96`.
+- Verdict: **SLICE CHANGES REQUESTED**. Original attempt-2, replay, dynamic-authority structure, 66-vector registry, generic-error, real active release artifact, and RFC 8785 findings are closed.
+- New BLOCKERs: retained `VerifiedAuthorization` bypasses effect-time approval-age revalidation; callers can skip `VerifyReleaseTrust`, allowing fresh authorization/dispatch after the embedded leaf expires.
+- New HIGHs: matching external authority + authorization can carry a foreign/empty/nonpositive `FullFence` and empty dynamic IDs; future independent rotation approval declares a caller-supplied signer SPKI but pins no independent approver trust anchor.
+- Repair split: B1 enforces effect-time authorization freshness, internal current release-trust verification, FullFence grammar/generation, and closed dynamic IDs. B2 embeds and manifest-binds a distinct real rotation-release-approver root/leaf chain.
+- B2 public inputs generated without reading or printing private material: approver certificate `sha256:a428af51...e41180`, approver SPKI `sha256:95b82df9...b1d1d`, approver-root certificate `sha256:a90cfe55...0f42f1`, approver-root SPKI `sha256:2e1d84ca...fa834c`. External key directory remains mode `0700`; private key mode `0600`.
+
+#### Closure repair B1
+
+- First B1 agent run stopped on a provider policy false positive after writing RED tests and the effect-time authorization freshness check. The fresh neutral contract-validation run completed the remaining implementation without changing scope.
+- `VerifyAuthorization` and freshness-enforcing dispatch validation now internally validate the compiled release pins/bundle/rotation at the supplied current time. A retained capability revalidates approval age, authorization expiry, dispatch expiry, and compiled certificate validity at effect; static replay remains clock-independent and grants no effect authority.
+- Both external authority and authorization records now require exact `FullFenceSchemaVersion`, bounded closed claim ID, valid claim token hash, positive fence generation, and bounded closed repository/route/profile/peer identifiers. Executable registry expanded from 66 to 79 named probes.
+- Independent gates: focused B1 groups + registry **PASS** (`1.047s`); package single **PASS** (`0.798s`); `-count=10` **PASS** (`5.574s`); race `-count=3` **PASS** (`19.057s`); vet and diff-check **PASS**.
+- **B2 IN PROGRESS:** embed and manifest-bind the distinct rotation-release-approver public chain, pin its role/domain/key ID/SPKI, and keep V1 `no_successor_authorized`.
+
+#### Closure repair B2
+
+- Embedded four explicit independent rotation-approver DER/SPKI inputs. The public release oracle now has 14 total artifacts; the manifest binds the other 13 exact content hashes. Public bundle, release pins, and rotation policy bind the approver root/leaf certificate/SPKI, fixed key ID, role, and signature domain.
+- Release verification checks Ed25519 root self-signature, leaf chain, exact DER/SPKI, CA/key usages, exclusive validity, issuer, critical role/domain extensions, and cryptographic distinction from repair and P5 identities. V1 remains `no_successor_authorized`; no signature or successor instance was fabricated.
+- Executable registry adds changed approver root/leaf/SPKI, wrong role/domain, expired/future cert, repair key reuse, and approval signer ID/SPKI mismatch probes.
+- Independent gates: focused B2 + registry **PASS** (`0.525s`); package single **PASS** (`0.838s`); `-count=10` **PASS** (`6.882s`); race `-count=3` **PASS** (`18.598s`); vet and diff-check **PASS**.
+- Round-2 frozen candidate: 24 files, manifest `sha256:e679f47efa6448f46b7cba9639f510f754643ed617423c2e240f720005d2d3d4`. Closure review is in progress; Slice 3 remains blocked pending verdict.
+
+#### Slices 1–2 closure review round 2
+
+- Report: `artifacts/omp/p6a/contract-slices1-2-closure-review-2.md`, SHA-256 `68bd349dacbd5035a84516ce60c454b5ff4dafe9df142838b215204e0a1645b9`. Frozen 24-file manifest pre/post mismatches `0`.
+- Verdict: **SLICE CHANGES REQUESTED — documentation-only P3**. All four round-1 implementation findings are materially closed. Independent overlays confirmed retained-capability/current-release bounds, malformed matched authority rejection, missing/duplicate/reordered manifest rejection, extension criticality/duplication, and independent SPKIs.
+- Remaining defect: the normative experiment document still described the pre-B2 10-artifact/9-manifest-entry/79-vector release and stale hashes, while compiled code has 14 artifacts, 13 manifest entries, 91 vectors, and the independent approver chain.
+- Mechanical doc synchronization is in progress. After exact count/hash/order/vector verification, regenerate the manifest and perform a short read-only closure check before Slice 3.
+
+#### Slices 1–2 closure review round 3 — ACCEPT
+
+- Final report: `artifacts/omp/p6a/contract-slices1-2-closure-review-3.md`, SHA-256 `69a49f45596ec83f84833a732f2986c7759a7f4be633b2077a6265ac16214500`.
+- Frozen 24-file candidate manifest: `sha256:4b9d25011c1451e5c3cecbbf16233e3ef68e351b15db5a8002063bff7f91a2af`; pre/post review mismatches `0`.
+- Verdict: **SLICE ACCEPT**. The experiment document exactly matches 14 public artifacts, 13 ordered manifest entries/hashes, both Ed25519 chains, fixed approver identity, current release hashes, V1 no-successor state, and all 91 executable vector IDs/order. No stale pre-B2 facts or new P3+ issue was found.
+- Reviewer focused tests **PASS** (`0.923s`), vet and diff-check **PASS**. Independent orchestrator document extraction also passed exact 91-vector, 14-embed, and 13-manifest-entry comparisons.
+- Acceptance is limited to P6 Contract Slices 1–2. Slice 3 may begin; storage, outbox/journal, transport, containment, sandboxing, Git/worktree authority, signed attestation, runtime effects, Slices 3–9, and full P6 remain unaccepted.
