@@ -549,8 +549,25 @@ func (authority *auditNamespaceAuthority) prepareRuntimeOwnedChild(lease *auditN
 	return lease.Chown(name, credential.Uid, credential.Gid)
 }
 
-func (authority *auditNamespaceAuthority) mkdirAndCaptureOwnedChild(parent auditOwnedRootIdentity, name, role string, cleanupRoot, runtimeOwned bool) (auditOwnedRootIdentity, error) {
-	byPath := map[string]auditOwnedRootIdentity{parent.Path: parent}
+func auditOwnedRootLineage(parent auditOwnedRootIdentity, ancestors ...auditOwnedRootIdentity) (map[string]auditOwnedRootIdentity, error) {
+	byPath := make(map[string]auditOwnedRootIdentity, len(ancestors)+1)
+	for _, identity := range append([]auditOwnedRootIdentity{parent}, ancestors...) {
+		if !validAuditOwnedRootIdentity(identity) {
+			return nil, authenticationError("audit owned root lineage identity")
+		}
+		if _, duplicate := byPath[identity.Path]; duplicate {
+			return nil, authenticationError("audit owned root lineage duplicate")
+		}
+		byPath[identity.Path] = identity
+	}
+	return byPath, nil
+}
+
+func (authority *auditNamespaceAuthority) mkdirAndCaptureOwnedChild(parent auditOwnedRootIdentity, name, role string, cleanupRoot, runtimeOwned bool, ancestors ...auditOwnedRootIdentity) (auditOwnedRootIdentity, error) {
+	byPath, err := auditOwnedRootLineage(parent, ancestors...)
+	if err != nil {
+		return auditOwnedRootIdentity{}, err
+	}
 	descriptor, present, err := authority.openAuthenticatedOwnedRoot(parent, byPath)
 	if err != nil || !present {
 		if err != nil {
@@ -577,8 +594,11 @@ func (authority *auditNamespaceAuthority) mkdirAndCaptureOwnedChild(parent audit
 	return captureAuditOwnedRootAt(descriptor, parent.Path, name, role, cleanupRoot, namespaceDirectoryIdentityFromOwned(parent))
 }
 
-func (authority *auditNamespaceAuthority) captureOwnedChild(parent auditOwnedRootIdentity, name, role string, cleanupRoot bool) (auditOwnedRootIdentity, error) {
-	byPath := map[string]auditOwnedRootIdentity{parent.Path: parent}
+func (authority *auditNamespaceAuthority) captureOwnedChild(parent auditOwnedRootIdentity, name, role string, cleanupRoot bool, ancestors ...auditOwnedRootIdentity) (auditOwnedRootIdentity, error) {
+	byPath, err := auditOwnedRootLineage(parent, ancestors...)
+	if err != nil {
+		return auditOwnedRootIdentity{}, err
+	}
 	descriptor, present, err := authority.openAuthenticatedOwnedRoot(parent, byPath)
 	if err != nil || !present {
 		if err != nil {
@@ -588,6 +608,50 @@ func (authority *auditNamespaceAuthority) captureOwnedChild(parent auditOwnedRoo
 	}
 	defer unix.Close(descriptor)
 	return captureAuditOwnedRootAt(descriptor, parent.Path, name, role, cleanupRoot, namespaceDirectoryIdentityFromOwned(parent))
+}
+
+func (authority *auditNamespaceAuthority) sealAndRecaptureOwnedDirectory(directory auditOwnedRootIdentity, mode uint32, ancestors ...auditOwnedRootIdentity) (auditOwnedRootIdentity, error) {
+	if mode != 0o500 {
+		return auditOwnedRootIdentity{}, authenticationError("sealed audit owned directory mode")
+	}
+	byPath, err := auditOwnedRootLineage(directory, ancestors...)
+	if err != nil {
+		return auditOwnedRootIdentity{}, err
+	}
+	descriptor, present, err := authority.openAuthenticatedOwnedRoot(directory, byPath)
+	if err != nil || !present {
+		if err != nil {
+			return auditOwnedRootIdentity{}, err
+		}
+		return auditOwnedRootIdentity{}, authenticationError("sealed audit owned directory absent")
+	}
+	defer unix.Close(descriptor)
+	var before unix.Stat_t
+	if err := unix.Fstat(descriptor, &before); err != nil || !auditOwnedRootStatMatches(before, directory) {
+		return auditOwnedRootIdentity{}, authenticationError("sealed audit owned directory descriptor")
+	}
+	if err := unix.Fchmod(descriptor, mode); err != nil || unix.Fsync(descriptor) != nil {
+		return auditOwnedRootIdentity{}, authenticationError("seal audit owned directory")
+	}
+	var after unix.Stat_t
+	if err := unix.Fstat(descriptor, &after); err != nil || uint64(after.Dev) != uint64(before.Dev) || after.Ino != before.Ino ||
+		after.Uid != before.Uid || after.Gid != before.Gid || after.Mode&unix.S_IFMT != unix.S_IFDIR || uint32(after.Mode)&0o777 != mode {
+		return auditOwnedRootIdentity{}, authenticationError("sealed audit owned directory changed")
+	}
+	parent, err := authority.openAuthenticatedParent(directory, byPath)
+	if err != nil {
+		return auditOwnedRootIdentity{}, err
+	}
+	defer unix.Close(parent)
+	parentIdentity, ok := byPath[directory.ParentPath]
+	if !ok {
+		return auditOwnedRootIdentity{}, authenticationError("sealed audit owned directory parent binding")
+	}
+	recaptured, err := captureAuditOwnedRootAt(parent, directory.ParentPath, filepath.Base(directory.Path), directory.Role, directory.CleanupRoot, namespaceDirectoryIdentityFromOwned(parentIdentity))
+	if err != nil || recaptured.Device != directory.Device || recaptured.Inode != directory.Inode || recaptured.OwnerUID != directory.OwnerUID || recaptured.OwnerGID != directory.OwnerGID || recaptured.Mode&0o777 != mode {
+		return auditOwnedRootIdentity{}, authenticationError("recapture sealed audit owned directory")
+	}
+	return recaptured, nil
 }
 
 func (authority *auditNamespaceAuthority) writeOwnedFile(parent auditOwnedRootIdentity, name string, contents []byte, mode uint32, ancestors ...auditOwnedRootIdentity) error {

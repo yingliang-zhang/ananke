@@ -85,7 +85,7 @@ func (executor *auditExecutor) finalizeRequestedCancellation(
 			PID: result.PID, PGID: result.PGID, ProcessStartIdentity: result.ProcessStartIdentity,
 		}, expected) {
 			failureClass = "process_identity_mismatch"
-		} else {
+		} else if !result.ProcessGroupGone {
 			termination := terminateOwnedAuditProcess(context.Background(), expected, nil, executor.processOperations, executor.terminationBounds)
 			if termination.Outcome != auditTerminationConfirmedExit {
 				failureClass = cancellationFailureClass(termination.Failure)

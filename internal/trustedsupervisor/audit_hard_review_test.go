@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 const validAuditModelReportJSONForTest = `{"findings":[{"code":"READ_001","line":7,"message":"unsafe read","path":"internal/a.go","severity":"high"}],"schema_version":"ananke.local-trusted-supervisor-model-audit-report.v1","summary":"One finding.","verdict":"rejected"}`
@@ -62,80 +63,69 @@ func TestAuditModelReportRequiresClosedCanonicalSchema(t *testing.T) {
 	}
 }
 
-func TestAuditTimeoutEvidenceRequiresRealWrapperOutputSuffix(t *testing.T) {
-	entry := executionPolicyEntry{InternalDeadlineSeconds: 5, WrapperGraceSeconds: 2}
-	root := t.TempDir()
-	workDir := filepath.Join(root, "source")
-	sessionDir := filepath.Join(root, "stable-session")
-	for _, directory := range []string{workDir, sessionDir} {
-		if err := os.Mkdir(directory, 0o700); err != nil {
-			t.Fatal(err)
+func TestAuditSupervisorTimeoutObservationBindsProcessSessionAndExactResume(t *testing.T) {
+	material := newGitArchivePolicyMaterial(t)
+	snapshot := materializeSnapshotForExecutorTest(t, material, "audit_run_typed_timeout_001")
+	const sessionUUID = "019f9a4a-a904-7000-b341-e07ecf0e3baf"
+	first, err := prepareAuditInvocation(material.policy, material.entry, snapshot, "audit_run_typed_timeout_001_attempt_1", "audit_run_typed_timeout_001", auditResume{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bindAuditInvocationTransport(material.entry, &first, "127.0.0.1:43210"); err != nil {
+		t.Fatal(err)
+	}
+	first.SandboxProfileHash = testHash("typed-timeout-sandbox-1")
+	before, err := snapshotAuditSessionPaths(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	physicalWorkDir, err := filepath.EvalSymlinks(first.WorkDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionPath := filepath.Join(first.SessionDir, "probe.jsonl")
+	sessionBytes := []byte(fmt.Sprintf("{\"type\":\"session\",\"id\":%q,\"cwd\":%q}\n{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":%q}}\n", sessionUUID, physicalWorkDir, readOnlyAuditPromptTemplate))
+	if err := os.WriteFile(sessionPath, sessionBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	result := auditInvocationResult{
+		PID: 4242, PGID: 4242, ProcessStartIdentity: "100:200", StartedAt: now.Add(-time.Second).Format(time.RFC3339Nano),
+		FinishedAt: now.Format(time.RFC3339Nano), ExitCode: 1, ProcessGroupGone: true,
+		StdoutSHA256: testHash("typed-timeout-stdout"), StderrSHA256: testHash("typed-timeout-stderr"),
+	}
+	observation, err := buildAuditTimeoutEvidence(material.entry, first, result, auditTimeoutSourceOMPInternalDeadline, before)
+	if err != nil || !validAuditTimeoutEvidence(observation) || observation.SessionUUID != sessionUUID || observation.SessionPath != sessionPath ||
+		observation.TimeoutSource != auditTimeoutSourceOMPInternalDeadline || observation.CommandDescriptorHash != first.CommandDescriptorHash {
+		t.Fatalf("internal timeout observation rejected: valid=%v error=%v", validAuditTimeoutEvidence(observation), err)
+	}
+	for _, mutate := range []func(*auditTimeoutEvidence){
+		func(value *auditTimeoutEvidence) { value.PID++ },
+		func(value *auditTimeoutEvidence) { value.SessionUUID = "019f9a4a-a904-7000-b341-e07ecf0e3b00" },
+		func(value *auditTimeoutEvidence) { value.CommandDescriptorHash = testHash("wrong-command") },
+		func(value *auditTimeoutEvidence) { value.TimeoutSource = "model_claim" },
+	} {
+		changed := observation
+		mutate(&changed)
+		if validAuditTimeoutEvidence(changed) {
+			t.Fatal("mutated supervisor timeout observation remained valid")
 		}
 	}
-	uuid := "019f9a4a-a904-7000-b341-e07ecf0e3baf"
-	sessionPath := filepath.Join(sessionDir, "probe.jsonl")
-	if err := os.WriteFile(sessionPath, []byte("session"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	physicalSessionPath, err := filepath.EvalSymlinks(sessionPath)
+
+	resume := auditResume{SessionUUID: sessionUUID, SynthesizeOnly: true}
+	second, err := prepareAuditInvocation(material.policy, material.entry, snapshot, "audit_run_typed_timeout_001_attempt_2", "audit_run_typed_timeout_001", resume)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sessionPath = physicalSessionPath
-	physicalWorkDir, err := filepath.EvalSymlinks(workDir)
-	if err != nil {
+	if err := bindAuditInvocationTransport(material.entry, &second, "127.0.0.1:43211"); err != nil {
 		t.Fatal(err)
 	}
-	invocation := auditInvocation{WorkDir: workDir, SessionDir: sessionDir, OutputPath: filepath.Join(root, "output")}
-	result := auditInvocationResult{ExitCode: 124, ProcessGroupGone: true}
-	record := exactAuditTimeoutRecordForTest(entry, invocation, uuid, sessionPath, "internal")
-	if err := os.WriteFile(invocation.OutputPath, []byte("Deadline exceeded\n"+record), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	evidence, err := parseAuditTimeoutEvidenceFile(entry, invocation, result)
-	if err != nil || evidence.SessionUUID != uuid || evidence.SessionPath != sessionPath || evidence.TimeoutSource != "internal" || !evidence.SynthesizeOnly {
-		t.Fatalf("exact first-attempt timeout evidence = %+v, %v", evidence, err)
-	}
-
-	resume := invocation
-	resume.Resume = auditResume{SessionUUID: uuid}
-	resumeRecord := exactAuditTimeoutRecordForTest(entry, resume, uuid, "provided by --resume", "external")
-	if err := os.WriteFile(resume.OutputPath, []byte("Deadline exceeded\n"+resumeRecord), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	evidence, err = parseAuditTimeoutEvidenceFile(entry, resume, result)
-	if err != nil || evidence.SessionUUID != uuid || evidence.SessionPath != "provided by --resume" || evidence.TimeoutSource != "external" || !evidence.SynthesizeOnly {
-		t.Fatalf("exact resume timeout evidence = %+v, %v", evidence, err)
-	}
-
-	for _, testCase := range []struct {
-		name   string
-		raw    string
-		result auditInvocationResult
-	}{
-		{name: "exit not 124", raw: record, result: auditInvocationResult{ExitCode: 1, ProcessGroupGone: true}},
-		{name: "group remains", raw: record, result: auditInvocationResult{ExitCode: 124}},
-		{name: "duplicate marker", raw: record + record, result: result},
-		{name: "marker spoof", raw: "[OMP_TIMEOUT]\n" + record, result: result},
-		{name: "trailing bytes", raw: record + "extra\n", result: result},
-		{name: "malformed uuid", raw: strings.Replace(record, uuid, "not-a-uuid", 1), result: result},
-		{name: "wrong cwd", raw: strings.Replace(record, "cwd="+physicalWorkDir, "cwd=/private/operator/other-source", 1), result: result},
-		{name: "wrong source", raw: strings.Replace(record, "timeout_source=internal", "timeout_source=model", 1), result: result},
-		{name: "wrong internal deadline", raw: strings.Replace(record, "internal_deadline_seconds=5", "internal_deadline_seconds=6", 1), result: result},
-		{name: "wrong hard deadline", raw: strings.Replace(record, "hard_deadline_seconds=7", "hard_deadline_seconds=8", 1), result: result},
-		{name: "wrong session path", raw: strings.Replace(record, sessionPath, filepath.Join(root, "other.jsonl"), 1), result: result},
-		{name: "unresolved candidate", raw: exactUnresolvedAuditTimeoutRecordForTest(entry, invocation, "0"), result: result},
-		{name: "multiple candidates", raw: exactUnresolvedAuditTimeoutRecordForTest(entry, invocation, "2"), result: result},
-		{name: "wrong recovery UUID", raw: strings.Replace(record, "--resume "+uuid, "--resume 019f9a4a-a904-7000-b341-e07ecf0e3b00", 1), result: result},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			if err := os.WriteFile(invocation.OutputPath, []byte(testCase.raw), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := parseAuditTimeoutEvidenceFile(entry, invocation, testCase.result); !errors.Is(err, ErrAuthentication) {
-				t.Fatalf("parse malformed timeout error = %v, want %v", err, ErrAuthentication)
-			}
-		})
+	second.SandboxProfileHash = testHash("typed-timeout-sandbox-2")
+	result.TimedOut, result.ExitCode = true, -1
+	resumeObservation, err := buildAuditTimeoutEvidence(material.entry, second, result, auditTimeoutSourceSupervisorHardDeadline, auditSessionPathSnapshot{})
+	if err != nil || !validAuditTimeoutEvidence(resumeObservation) || resumeObservation.ResumeSessionUUID != sessionUUID ||
+		resumeObservation.SessionUUID != sessionUUID || resumeObservation.SessionPath != "" || !resumeObservation.SynthesizeOnly {
+		t.Fatalf("resume timeout observation rejected: valid=%v error=%v", validAuditTimeoutEvidence(resumeObservation), err)
 	}
 }
 
@@ -155,8 +145,12 @@ func TestAuditResumeKeepsImmutableSessionRootAndTrustedPromptState(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.SessionDir != second.SessionDir || second.Arguments[len(second.Arguments)-1] != uuid {
-		t.Fatalf("resume changed exact session root or UUID: first=%q second=%q argv=%q", first.SessionDir, second.SessionDir, second.Arguments)
+	resumeBound := false
+	for index := 0; index+1 < len(second.Arguments); index++ {
+		resumeBound = resumeBound || second.Arguments[index] == "--resume" && second.Arguments[index+1] == uuid
+	}
+	if first.SessionDir != second.SessionDir || !resumeBound || slicesContainString(second.Arguments, "--continue") {
+		t.Fatal("resume changed exact session root or UUID binding")
 	}
 	if contents, err := os.ReadFile(second.SessionDir + "/retained"); err != nil || string(contents) != "session-state" {
 		t.Fatalf("resume did not retain stable session state: %q, %v", contents, err)
@@ -282,20 +276,16 @@ func TestSupervisorOwnedAuditTestFailureRejectsEvidence(t *testing.T) {
 	}
 }
 
-func TestAuditTimeoutFakeWrapperWritesExactOutputSuffix(t *testing.T) {
+func TestAuditInternalTimeoutBuildsTypedObservationFromNativeDirectOMP(t *testing.T) {
+
 	if runtime.GOOS != "darwin" {
 		t.Skip("Darwin sandbox contract")
 	}
 	material := newGitArchivePolicyMaterial(t)
-	setFakeAuditWrapperForTest(t, &material, `#!/bin/sh
-set -eu
-uuid=019f9a4a-a904-7000-b341-e07ecf0e3baf
-physical_session_root=$(cd "${11}" && pwd -P)
-session_path="${physical_session_root}/probe.jsonl"
-printf session > "$session_path"
-printf 'Deadline exceeded\n\n[OMP_TIMEOUT]\ntimeout_source=internal\ninternal_deadline_seconds=%s\nhard_deadline_seconds=%s\ncwd=%s\nsession_id=%s\nsession_path=%s\nrecovery_hint=resume exact session with --resume %s and instruct it to synthesize without more tool calls\n' "$1" "$((1 + OMP_WRAPPER_HARD_GRACE_SECONDS))" "$PWD" "$uuid" "$session_path" "$uuid" > "$3"
-exit 124
-`)
+	setNativeFakeAuditOMPForTest(t, &material, fakeAuditOMPFixture{
+		Scenario: "timeout_always", SessionUUID: "019f9a4a-a904-7000-b341-e07ecf0e3baf",
+	})
+
 	material.entry.InternalDeadlineSeconds = 1
 	material.entry.WrapperGraceSeconds = 2
 	material.entry = mustSealExecutionPolicyEntryForTest(t, material.entry)
@@ -313,27 +303,10 @@ exit 124
 	}
 	result, err := runAuditInvocation(context.Background(), material.policy, material.entry, invocation, auditInvocationHooks{})
 	if err != nil || result.ExitCode != 124 || result.TimeoutEvidence.SessionUUID != "019f9a4a-a904-7000-b341-e07ecf0e3baf" {
-		t.Fatalf("exact timeout wrapper result = %+v, %v", result, err)
+		t.Fatalf("typed direct OMP timeout result = %+v, %v", result, err)
+
 	}
 	if strings.Contains(result.Stdout, "[OMP_TIMEOUT]") || strings.Contains(result.Stderr, "[OMP_TIMEOUT]") {
 		t.Fatalf("timeout parser trusted captured stream: stdout=%q stderr=%q", result.Stdout, result.Stderr)
 	}
-}
-
-func exactAuditTimeoutRecordForTest(entry executionPolicyEntry, invocation auditInvocation, uuid, sessionPath, source string) string {
-	physicalWorkDir, err := filepath.EvalSymlinks(invocation.WorkDir)
-	if err != nil {
-		panic(err)
-	}
-	return fmt.Sprintf("[OMP_TIMEOUT]\ntimeout_source=%s\ninternal_deadline_seconds=%d\nhard_deadline_seconds=%d\ncwd=%s\nsession_id=%s\nsession_path=%s\nrecovery_hint=resume exact session with --resume %s and instruct it to synthesize without more tool calls\n",
-		source, entry.InternalDeadlineSeconds, entry.InternalDeadlineSeconds+entry.WrapperGraceSeconds, physicalWorkDir, uuid, sessionPath, uuid)
-}
-
-func exactUnresolvedAuditTimeoutRecordForTest(entry executionPolicyEntry, invocation auditInvocation, count string) string {
-	physicalWorkDir, err := filepath.EvalSymlinks(invocation.WorkDir)
-	if err != nil {
-		panic(err)
-	}
-	return fmt.Sprintf("[OMP_TIMEOUT]\ntimeout_source=internal\ninternal_deadline_seconds=%d\nhard_deadline_seconds=%d\ncwd=%s\nsession_id=unresolved\nsession_candidate_count=%s\nrecovery_hint=inspect matching JSONL sessions and resume an exact UUID; do not use --continue when runs shared a cwd\n",
-		entry.InternalDeadlineSeconds, entry.InternalDeadlineSeconds+entry.WrapperGraceSeconds, physicalWorkDir, count)
 }

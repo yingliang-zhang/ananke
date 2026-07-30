@@ -177,6 +177,7 @@ func newServerWithNamespaceAuthority(config ServerConfig, runtimeVerifier atomic
 		return nil, err
 	}
 	executionPolicy.testBrokerDependencies = config.testBrokerDependencies
+
 	executionPolicy.setProtectedPaths(
 		config.TrustBundlePath,
 		config.PrivateKeyBundlePath,

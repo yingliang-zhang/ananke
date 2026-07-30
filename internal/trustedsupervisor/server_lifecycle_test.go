@@ -258,7 +258,8 @@ func TestProductionServerLifecycleGateRefusesSocketReplacementDuringClose(t *tes
 
 func TestProductionServerCloseKeepsResourcesUntilStuckExecutorJoins(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	fixture := newExecutingServerTestMaterial(t, now, "#!/bin/sh\nset -eu\n/bin/sleep 30\n")
+	fixture := newExecutingServerTestMaterial(t, now, fakeAuditOMPFixture{Scenario: "hang"})
+
 	running := startInProcessProductionServer(t, fixture.material, now)
 	entered := make(chan struct{})
 	release := make(chan struct{})

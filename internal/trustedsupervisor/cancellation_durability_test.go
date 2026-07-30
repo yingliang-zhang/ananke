@@ -234,7 +234,10 @@ func TestAuditCancellationWrongOrReusedPIDFailsBeforeSignal(t *testing.T) {
 }
 
 func testAuditTerminationBounds() auditTerminationBounds {
-	return auditTerminationBounds{TermGrace: 5 * time.Millisecond, KillGrace: 5 * time.Millisecond, PollInterval: time.Millisecond}
+	return auditTerminationBounds{
+		TermGrace: 5 * time.Millisecond, KillGrace: 5 * time.Millisecond,
+		ResidualExitGrace: 5 * time.Millisecond, PollInterval: time.Millisecond,
+	}
 }
 
 type fakeAuditProcessOperations struct {
@@ -306,7 +309,8 @@ func (operations *fakeAuditProcessOperations) signalsSnapshot() []unix.Signal {
 
 func TestProductionCancellationRequestedAtDeterministicPreStartGateNeverLaunches(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	fixture := newExecutingServerTestMaterial(t, now, "#!/bin/sh\nset -eu\n/bin/sleep 30\n")
+	fixture := newExecutingServerTestMaterial(t, now, fakeAuditOMPFixture{Scenario: "hang"})
+
 	running := startInProcessProductionServer(t, fixture.material, now)
 	defer running.stop(t)
 
@@ -358,7 +362,8 @@ func TestProductionCancellationRequestedAtDeterministicPreStartGateNeverLaunches
 
 func TestProductionCancellationExactCompletedReplayIsByteIdenticalWithoutEffect(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	fixture := newExecutingServerTestMaterial(t, now, "#!/bin/sh\nset -eu\n/bin/sleep 30\n")
+	fixture := newExecutingServerTestMaterial(t, now, fakeAuditOMPFixture{Scenario: "hang"})
+
 	running := startInProcessProductionServer(t, fixture.material, now)
 	defer running.stop(t)
 	operations := &countingAuditProcessOperations{delegate: systemAuditProcessOperations{}}

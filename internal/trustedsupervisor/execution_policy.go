@@ -17,17 +17,17 @@ import (
 )
 
 const (
-	executionPolicySchemaVersion      = "ananke.local-trusted-supervisor-execution-policy.v5"
-	executionPolicyEntrySchemaVersion = "ananke.local-trusted-supervisor-execution-policy-entry.v5"
+	executionPolicySchemaVersion      = "ananke.local-trusted-supervisor-execution-policy.v7"
+	executionPolicyEntrySchemaVersion = "ananke.local-trusted-supervisor-execution-policy-entry.v7"
 	readOnlyAuditPromptTemplateID     = "ananke_read_only_audit_v1"
-	supportedOMPVersion               = "17.1.3"
+	supportedOMPVersion               = "17.1.8"
 	auditOMPNativeAddonFilename       = "pi_natives.darwin-arm64.node"
 	maxExecutionPolicyBytes           = 1024 * 1024
 	maxAuditOMPExecutableBytes        = 256 * 1024 * 1024
 	maxAuditOMPNativeAddonBytes       = 256 * 1024 * 1024
 	maxExecutionPolicyEntries         = 4096
 	maxExecutionPolicyTests           = 64
-	auditGitExecutable                = "/usr/bin/git"
+	auditGitExecutable                = "/Library/Developer/CommandLineTools/usr/bin/git"
 )
 
 const readOnlyAuditPromptTemplate = `Perform a read-only audit of the supplied immutable source snapshot.
@@ -89,14 +89,10 @@ var (
 		"/bin": {}, "/usr/bin": {},
 	}
 	auditProviderCredentialOptions = map[string][][]string{
-		"custom:sudo": {{"SUDO_CODING_KEY"}, {"SUDO_API_KEY"}},
+		"custom:sudo": {{"SUDO_CODING_KEY"}},
 	}
 	auditProviderEndpointAllowlist = map[string]executionPolicyEndpoint{
 		"custom:sudo": {Hostname: "coding.sudoai.cc", Port: 443},
-	}
-	auditWrapperSystemExecutables = []string{
-		"/bin/bash", "/bin/cat", "/bin/chmod", "/bin/date", "/bin/kill", "/bin/mkdir", "/bin/mv", "/bin/ps", "/bin/rm", "/bin/rmdir", "/bin/sleep",
-		"/usr/bin/awk", "/usr/bin/cksum", "/usr/bin/dirname", "/usr/bin/git", "/usr/bin/grep", "/usr/bin/mktemp", "/usr/bin/python3", "/usr/bin/tr", "/usr/bin/wc",
 	}
 )
 
@@ -178,7 +174,6 @@ type executionPolicyEntry struct {
 	OMPVersion                 string                             `json:"omp_version"`
 	OMPNativeAddon             executionPolicyFileIdentity        `json:"omp_native_addon"`
 	OMPRuntimeAuthority        executionPolicyOMPRuntimeAuthority `json:"omp_runtime_authority"`
-	WrapperExecutables         []executionPolicyFileIdentity      `json:"wrapper_executables"`
 	HermesProvider             string                             `json:"hermes_provider"`
 	HermesModel                string                             `json:"hermes_model"`
 	ProviderEndpoint           executionPolicyEndpoint            `json:"provider_endpoint"`
@@ -199,19 +194,20 @@ type executionPolicyEntry struct {
 }
 
 type executionPolicy struct {
-	path                           string
-	device                         string
-	inode                          string
-	ownerUID                       uint32
-	size                           int64
-	contentSHA256                  string
-	canonicalBytes                 []byte
-	entries                        map[string]executionPolicyEntry
-	rootPins                       map[string]executionPolicyDirectoryIdentity
-	physicalPins                   map[string]string
-	protectedPaths                 []string
-	protectedPathsInvalid          bool
-	testBrokerDependencies         auditBrokerDependencies
+	path                   string
+	device                 string
+	inode                  string
+	ownerUID               uint32
+	size                   int64
+	contentSHA256          string
+	canonicalBytes         []byte
+	entries                map[string]executionPolicyEntry
+	rootPins               map[string]executionPolicyDirectoryIdentity
+	physicalPins           map[string]string
+	protectedPaths         []string
+	protectedPathsInvalid  bool
+	testBrokerDependencies auditBrokerDependencies
+
 	atomicRuntimeAuthorityVerifier atomicRuntimeAuthorityVerifier
 	namespaceAuthority             *auditNamespaceAuthority
 }
@@ -329,9 +325,8 @@ func validateExecutionPolicyEntry(entry executionPolicyEntry, ownerUID uint32) e
 		return authenticationError("execution policy wrapper authority")
 	}
 	if filepath.Base(entry.OMPExecutable.Path) != "omp" || validatePinnedOMPExecutableRoot(entry.OMPExecutableRoot, entry.OMPExecutable) != nil ||
-		validateOMPExecutableIdentity(entry.OMPExecutable) != nil || validateOMPNativeAddonIdentity(entry.OMPVersion, entry.OMPNativeAddon, ownerUID) != nil ||
-		!validAuditWrapperExecutables(entry.WrapperExecutables) {
-		return authenticationError("execution policy OMP and wrapper executable authority")
+		validateOMPExecutableIdentity(entry.OMPExecutable) != nil || validateOMPNativeAddonIdentity(entry.OMPVersion, entry.OMPNativeAddon, ownerUID) != nil {
+		return authenticationError("execution policy OMP executable authority")
 	}
 	if err := validateExecutionPolicyAtomicRuntimeAuthority(entry); err != nil {
 		return err
@@ -466,9 +461,6 @@ func (policy *executionPolicy) validateEffectBoundary(entry executionPolicyEntry
 	}
 	if err := validateOMPNativeAddonIdentity(stored.OMPVersion, stored.OMPNativeAddon, policy.ownerUID); err != nil {
 		return err
-	}
-	if !validAuditWrapperExecutables(stored.WrapperExecutables) {
-		return authenticationError("execution policy wrapper executable replacement")
 	}
 	for _, test := range stored.AllowedTests {
 		if err := validatePinnedTestExecutableRoot(test.ExecutableRoot, test.Executable); err != nil {
@@ -673,33 +665,6 @@ func fileInformationMatchesIdentity(information os.FileInfo, identity executionP
 	return ok && statDecimal(uint64(status.Dev)) == identity.Device && statDecimal(status.Ino) == identity.Inode && status.Uid == identity.OwnerUID
 }
 
-func auditWrapperDependencyPaths() []string {
-	return append([]string(nil), auditWrapperSystemExecutables...)
-}
-
-func validAuditWrapperExecutables(identities []executionPolicyFileIdentity) bool {
-	if len(identities) < len(auditWrapperSystemExecutables) {
-		return false
-	}
-	seen := make(map[string]struct{}, len(identities))
-	for _, identity := range identities {
-		if _, duplicate := seen[identity.Path]; duplicate {
-			return false
-		}
-		if _, allowedRoot := auditExecutableRootAllowlist[filepath.Dir(identity.Path)]; !allowedRoot ||
-			identity.OwnerUID != 0 || validateFileIdentity(identity, true, 0) != nil {
-			return false
-		}
-		seen[identity.Path] = struct{}{}
-	}
-	for _, path := range auditWrapperSystemExecutables {
-		if _, found := seen[path]; !found {
-			return false
-		}
-	}
-	return true
-}
-
 func validateSandboxPolicyAuthority(entry executionPolicyEntry) error {
 	if len(entry.RuntimeReadRoots) == 0 || len(entry.ExecutableRoots) == 0 || !validRouteCredentialNames(entry.HermesProvider, entry.CredentialEnvironmentNames) {
 		return authenticationError("execution policy sandbox authority")
@@ -758,7 +723,7 @@ func validAuditProviderEndpoint(provider string, endpoint executionPolicyEndpoin
 }
 
 func validAuditModelDeclaration(entry executionPolicyEntry) bool {
-	return entry.HermesProvider == "custom:sudo" && entry.HermesModel == "gpt-5.6-sol" &&
+	return entry.HermesProvider == "custom:sudo" && entry.HermesModel == "gpt-5.6-sol" && entry.TaskTier == "normal" &&
 		validRouteCredentialNames(entry.HermesProvider, entry.CredentialEnvironmentNames)
 }
 
@@ -1036,7 +1001,6 @@ func cloneExecutionPolicyEntry(entry executionPolicyEntry) executionPolicyEntry 
 		entry.AllowedTests[index].Arguments = append([]string(nil), entry.AllowedTests[index].Arguments...)
 	}
 	entry.RuntimeReadRoots = append([]executionPolicyDirectoryIdentity(nil), entry.RuntimeReadRoots...)
-	entry.WrapperExecutables = append([]executionPolicyFileIdentity(nil), entry.WrapperExecutables...)
 	entry.OMPRuntimeAuthority = cloneExecutionPolicyOMPRuntimeAuthority(entry.OMPRuntimeAuthority)
 	entry.ExecutableRoots = append([]executionPolicyDirectoryIdentity(nil), entry.ExecutableRoots...)
 	entry.CredentialEnvironmentNames = append([]string(nil), entry.CredentialEnvironmentNames...)

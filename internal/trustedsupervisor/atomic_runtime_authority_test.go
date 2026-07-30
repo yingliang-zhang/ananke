@@ -1,7 +1,6 @@
 package trustedsupervisor
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -250,50 +249,7 @@ func TestAtomicRuntimeAuthorityRetainsCLOEXECDescriptorsUntilClose(t *testing.T)
 	}
 }
 
-func TestAtomicRuntimeBootstrapPreservesWrapperAndOMPProcessIdentity(t *testing.T) {
-	root := t.TempDir()
-	ompPath := filepath.Join(root, "omp")
-	pidPath := filepath.Join(root, "omp.pid")
-	pathMarker := filepath.Join(root, "path-shadow")
-	if err := os.WriteFile(ompPath, []byte("#!/bin/sh\nprintf '%s' \"$$\" > \"$1\"\nwhile :; do /bin/sleep 1; done\n"), 0o500); err != nil {
-		t.Fatal(err)
-	}
-	shadowRoot := filepath.Join(root, "shadow")
-	if err := os.Mkdir(shadowRoot, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(shadowRoot, "omp"), []byte("#!/bin/sh\nprintf shadow > \"$1\"\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	wrapper := []byte("set -eu\nomp \"$1\" &\nomp_pid=$!\nfor _ in 1 2 3 4 5; do [ -s \"$1\" ] && break; /bin/sleep 1; done\n[ \"$(/bin/cat \"$1\")\" = \"$omp_pid\" ]\n/bin/kill \"$omp_pid\"\nwait \"$omp_pid\" || true\n")
-	bootstrap, err := auditOMPBootstrap(ompPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stream := auditOMPWrapperStream(bootstrap, wrapper)
-	if !bytes.Equal(stream[len(bootstrap):], wrapper) {
-		t.Fatal("bootstrap construction changed frozen wrapper bytes")
-	}
-	command := exec.Command(auditBashExecutable, "-s", "--", pidPath)
-	command.Stdin = bytes.NewReader(stream)
-	command.Env = []string{"HOME=" + root, "LANG=C", "LC_ALL=C", "PATH=" + shadowRoot + ":/usr/bin:/bin", "TZ=UTC"}
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("bootstrap process identity: %v\n%s", err, output)
-	}
-	if _, err := os.Lstat(pathMarker); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("PATH shadow executed: %v", err)
-	}
-
-	readonlyWrapper := []byte("set -eu\nif unset -f omp 2>/dev/null; then exit 81; fi\nif eval 'omp(){ exit 82; }' 2>/dev/null; then exit 83; fi\n")
-	readonlyCommand := exec.Command(auditBashExecutable, "-s", "--")
-	readonlyCommand.Stdin = bytes.NewReader(auditOMPWrapperStream(bootstrap, readonlyWrapper))
-	readonlyCommand.Env = []string{"HOME=" + root, "LANG=C", "LC_ALL=C", "PATH=/usr/bin:/bin", "TZ=UTC"}
-	if output, err := readonlyCommand.CombinedOutput(); err != nil {
-		t.Fatalf("readonly OMP bootstrap: %v\n%s", err, output)
-	}
-}
-
-func TestAtomicRuntimeAuthorityHashBindsBootstrapFramingAndFDPolicy(t *testing.T) {
+func TestAtomicRuntimeAuthorityHashBindsDirectLauncherAndOutputPolicy(t *testing.T) {
 	fixture := newAtomicRuntimeAuthorityFixture(t)
 	authority := fixture.entry.OMPRuntimeAuthority
 	sealed, err := sealExecutionPolicyOMPRuntimeAuthority(authority, fixture.entry.OMPExecutable, fixture.entry.OMPNativeAddon)
@@ -303,9 +259,12 @@ func TestAtomicRuntimeAuthorityHashBindsBootstrapFramingAndFDPolicy(t *testing.T
 	for _, mutate := range []func(*executionPolicyOMPRuntimeAuthority){
 		func(value *executionPolicyOMPRuntimeAuthority) { value.ExecutableAncestors[0].Inode = "999" },
 		func(value *executionPolicyOMPRuntimeAuthority) { value.NativeAddonAncestors[0].Mode ^= 1 },
-		func(value *executionPolicyOMPRuntimeAuthority) { value.BootstrapSHA256 = testHash("other-bootstrap") },
+		func(value *executionPolicyOMPRuntimeAuthority) { value.LauncherMode = "wrapper" },
+		func(value *executionPolicyOMPRuntimeAuthority) { value.OMPArgvPolicy = "caller_args" },
+		func(value *executionPolicyOMPRuntimeAuthority) { value.OutputTransport = "child_file" },
+		func(value *executionPolicyOMPRuntimeAuthority) { value.TimeoutOwner = "child" },
 		func(value *executionPolicyOMPRuntimeAuthority) {
-			value.FramedWrapperStreamSHA256 = testHash("other-stream")
+			value.WrapperCompatibilityOracleSHA256 = testHash("other-wrapper")
 		},
 		func(value *executionPolicyOMPRuntimeAuthority) { value.ArtifactFDPolicy = "inherited" },
 	} {
@@ -315,11 +274,6 @@ func TestAtomicRuntimeAuthorityHashBindsBootstrapFramingAndFDPolicy(t *testing.T
 		if err == nil && sealed.AuthorityHash == authority.AuthorityHash {
 			t.Fatalf("runtime authority drift retained hash: %+v", drifted)
 		}
-	}
-	ambiguousLeft := auditFramedOMPWrapperStreamSHA256([]byte("a"), []byte("bc"))
-	ambiguousRight := auditFramedOMPWrapperStreamSHA256([]byte("ab"), []byte("c"))
-	if ambiguousLeft == ambiguousRight {
-		t.Fatal("length-framed bootstrap/wrapper hash is boundary ambiguous")
 	}
 }
 
@@ -386,24 +340,26 @@ func newAtomicRuntimeAuthorityFixture(t *testing.T) atomicRuntimeAuthorityFixtur
 		OMPVersion: supportedOMPVersion, OMPExecutable: fileIdentityForTest(t, executable),
 		OMPExecutableRoot: directoryIdentityForTest(t, filepath.Dir(executable)), OMPNativeAddon: fileIdentityForTest(t, native),
 	}
+	entry.Wrapper.SHA256 = hashJournalBytes(wrapper)
 	entry.OMPExecutable.OwnerUID = 0
 	entry.OMPExecutableRoot.OwnerUID = 0
 	entry.OMPNativeAddon.OwnerUID = 0
-	bootstrap, err := auditOMPBootstrap(executable)
-	if err != nil {
-		t.Fatal(err)
-	}
 	authority := executionPolicyOMPRuntimeAuthority{
-		SchemaVersion:             atomicOMPRuntimeAuthoritySchemaVersion,
-		AuthorityPolicyVersion:    atomicOMPRuntimeAuthorityPolicyVersion,
-		TrustedOwnerUID:           0,
-		ExecutableAncestors:       rootOwnedAncestorIdentitiesForTest(t, executable),
-		NativeAddonAncestors:      rootOwnedAncestorIdentitiesForTest(t, native),
-		NativeDataRoot:            dataRoot,
-		DeniedNativeFallbackRoots: []string{filepath.Join(root, "home", ".omp"), filepath.Join(filepath.Dir(executable), "natives")},
-		BootstrapSHA256:           hashJournalBytes(bootstrap),
-		FramedWrapperStreamSHA256: auditFramedOMPWrapperStreamSHA256(bootstrap, wrapper),
-		ArtifactFDPolicy:          atomicOMPRuntimeArtifactFDPolicyParentRetainedCLOEXEC,
+		SchemaVersion:                    atomicOMPRuntimeAuthoritySchemaVersion,
+		AuthorityPolicyVersion:           atomicOMPRuntimeAuthorityPolicyVersion,
+		TrustedOwnerUID:                  0,
+		ExecutableAncestors:              rootOwnedAncestorIdentitiesForTest(t, executable),
+		NativeAddonAncestors:             rootOwnedAncestorIdentitiesForTest(t, native),
+		NativeDataRoot:                   dataRoot,
+		DeniedNativeFallbackRoots:        []string{filepath.Join(root, "home", ".omp"), filepath.Join(filepath.Dir(executable), "natives")},
+		LauncherMode:                     atomicOMPLauncherModeDirectPinned,
+		OMPArgvPolicy:                    atomicOMPArgvPolicyExactSudoRoute,
+		SandboxTargetPolicy:              atomicOMPSandboxTargetPolicyExactPinned,
+		OutputTransport:                  atomicOMPOutputTransportSupervisorStdout,
+		TimeoutOwner:                     atomicOMPTimeoutOwnerSupervisor,
+		WrapperCompatibilityOracleSHA256: hashJournalBytes(wrapper),
+		ArtifactFDPolicy:                 atomicOMPRuntimeArtifactFDPolicyParentRetainedCLOEXEC,
+		ProcessGroupPolicy:               atomicOMPProcessGroupPolicySingleGroup,
 	}
 	authority, err = sealExecutionPolicyOMPRuntimeAuthority(authority, entry.OMPExecutable, entry.OMPNativeAddon)
 	if err != nil {
@@ -418,12 +374,9 @@ func newAtomicRuntimeAuthorityFixture(t *testing.T) atomicRuntimeAuthorityFixtur
 
 func (fixture *atomicRuntimeAuthorityFixture) rebind(t *testing.T) {
 	t.Helper()
-	bootstrap, err := auditOMPBootstrap(fixture.entry.OMPExecutable.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixture.entry.OMPRuntimeAuthority.BootstrapSHA256 = hashJournalBytes(bootstrap)
-	fixture.entry.OMPRuntimeAuthority.FramedWrapperStreamSHA256 = auditFramedOMPWrapperStreamSHA256(bootstrap, fixture.wrapper)
+	var err error
+	fixture.entry.Wrapper.SHA256 = hashJournalBytes(fixture.wrapper)
+	fixture.entry.OMPRuntimeAuthority.WrapperCompatibilityOracleSHA256 = hashJournalBytes(fixture.wrapper)
 	fixture.entry.OMPRuntimeAuthority, err = sealExecutionPolicyOMPRuntimeAuthority(
 		fixture.entry.OMPRuntimeAuthority, fixture.entry.OMPExecutable, fixture.entry.OMPNativeAddon,
 	)

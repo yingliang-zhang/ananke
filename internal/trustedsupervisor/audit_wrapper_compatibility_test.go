@@ -31,6 +31,20 @@ import (
 	"time"
 )
 
+func makeAuditTestDirectoriesRemovable(root string) {
+	_ = filepath.Walk(root, func(path string, information os.FileInfo, err error) error {
+		if err == nil && information.IsDir() {
+			_ = os.Chmod(path, 0o700)
+		}
+		return nil
+	})
+}
+
+func restoreAuditSealedHomeModeForTest(t *testing.T, homeDir string) {
+	t.Helper()
+	t.Cleanup(func() { makeAuditTestDirectoriesRemovable(homeDir) })
+}
+
 func TestAuditModelsConfigIsExactClosedSudoRoute(t *testing.T) {
 	want := "providers:\n" +
 		"  sudo:\n" +
@@ -50,24 +64,24 @@ func TestAuditModelsConfigIsExactClosedSudoRoute(t *testing.T) {
 		"      compat:\n" +
 		"        supportsReasoningEffort: true\n" +
 		"        supportsDeveloperRole: true\n"
-	for _, credentialName := range []string{"SUDO_CODING_KEY", "SUDO_API_KEY"} {
-		entry := executionPolicyEntry{
-			HermesProvider: "custom:sudo", HermesModel: "gpt-5.6-sol", CredentialEnvironmentNames: []string{credentialName},
-		}
-		contents, err := auditModelsConfigBytes(entry, "127.0.0.1:43210")
-		if err != nil || string(contents) != want {
-			t.Fatalf("%s models.yml = %q, %v; want %q", credentialName, contents, err, want)
-		}
-		for _, authority := range []string{"localhost:43210", "127.0.0.1:0", "127.0.0.1:43210/extra", "[::1]:43210", "attacker.example:43210"} {
-			if _, err := auditModelsConfigBytes(entry, authority); !errors.Is(err, ErrAuthentication) {
-				t.Fatalf("models config authority %q error = %v, want %v", authority, err, ErrAuthentication)
-			}
+	entry := executionPolicyEntry{
+		HermesProvider: "custom:sudo", HermesModel: "gpt-5.6-sol", TaskTier: "normal",
+		CredentialEnvironmentNames: []string{"SUDO_CODING_KEY"},
+	}
+	contents, err := auditModelsConfigBytes(entry, "127.0.0.1:43210")
+	if err != nil || string(contents) != want {
+		t.Fatalf("direct Sudo models.yml mismatch: %v", err)
+	}
+	for _, authority := range []string{"localhost:43210", "127.0.0.1:0", "127.0.0.1:43210/extra", "[::1]:43210", "attacker.example:43210"} {
+		if _, err := auditModelsConfigBytes(entry, authority); !errors.Is(err, ErrAuthentication) {
+			t.Fatalf("models config authority %q error = %v, want %v", authority, err, ErrAuthentication)
 		}
 	}
 	for _, mismatch := range []executionPolicyEntry{
 		{HermesProvider: "anthropic", HermesModel: "gpt-5.6-sol", CredentialEnvironmentNames: []string{"SUDO_CODING_KEY"}},
 		{HermesProvider: "custom:sudo", HermesModel: "claude-sonnet-4-5", CredentialEnvironmentNames: []string{"SUDO_CODING_KEY"}},
 		{HermesProvider: "custom:sudo", HermesModel: "gpt-5.6-sol", CredentialEnvironmentNames: []string{"OPENAI_API_KEY"}},
+		{HermesProvider: "custom:sudo", HermesModel: "gpt-5.6-sol", TaskTier: "normal", CredentialEnvironmentNames: []string{"SUDO_API_KEY"}},
 		{HermesProvider: "custom:sudo", HermesModel: "gpt-5.6-sol", CredentialEnvironmentNames: []string{"SUDO_CODING_KEY", "SUDO_API_KEY"}},
 	} {
 		if _, err := auditModelsConfigBytes(mismatch, "127.0.0.1:43210"); !errors.Is(err, ErrAuthentication) {
@@ -86,20 +100,33 @@ func TestAuditInvocationMaterializesPrivateStateAndBoundModels(t *testing.T) {
 	if err := bindAuditInvocationTransport(material.entry, &invocation, "127.0.0.1:43210"); err != nil {
 		t.Fatal(err)
 	}
+	restoreAuditSealedHomeModeForTest(t, invocation.HomeDir)
 	wantNativeAddonPath := filepath.Join(material.entry.OMPRuntimeAuthority.NativeDataRoot, "omp", "natives", supportedOMPVersion, auditOMPNativeAddonFilename)
-	if invocation.WrapperStateDir != filepath.Join(invocation.TemporaryDir, "wrapper-state") ||
-		invocation.AgentDir != filepath.Join(invocation.TemporaryDir, "omp-agent") ||
+	if invocation.AgentDir != filepath.Join(invocation.TemporaryDir, "omp-agent") ||
 		invocation.ModelsPath != filepath.Join(invocation.AgentDir, "models.yml") ||
 		invocation.HomeDir != filepath.Join(invocation.TemporaryDir, "home") ||
-		invocation.NativeAddonPath != material.entry.OMPNativeAddon.Path ||
-		invocation.NativeAddonPath != wantNativeAddonPath {
-		t.Fatalf("private invocation paths = state %q agent %q models %q home %q pinned addon %q", invocation.WrapperStateDir, invocation.AgentDir, invocation.ModelsPath, invocation.HomeDir, invocation.NativeAddonPath)
+		invocation.HomeStateDir != filepath.Join(invocation.HomeDir, ".omp") ||
+		invocation.HomeRunDir != filepath.Join(invocation.HomeStateDir, "run") ||
+		invocation.NativeAddonPath != material.entry.OMPNativeAddon.Path || invocation.NativeAddonPath != wantNativeAddonPath {
+		t.Fatalf("private direct OMP paths = agent %q models %q home %q state %q run %q pinned addon %q", invocation.AgentDir, invocation.ModelsPath, invocation.HomeDir, invocation.HomeStateDir, invocation.HomeRunDir, invocation.NativeAddonPath)
 	}
-	for _, directory := range []string{invocation.WrapperStateDir, invocation.AgentDir, invocation.HomeDir} {
-		information, err := os.Lstat(directory)
-		if err != nil || !information.IsDir() || information.Mode().Perm() != 0o700 || information.Mode()&os.ModeSymlink != 0 {
-			t.Fatalf("private directory %q = %v, %v", directory, information, err)
+	for _, directory := range []struct {
+		path string
+		mode os.FileMode
+	}{
+		{path: invocation.AgentDir, mode: 0o700},
+		{path: invocation.HomeDir, mode: 0o700},
+		{path: invocation.HomeStateDir, mode: 0o500},
+		{path: invocation.HomeRunDir, mode: 0o700},
+	} {
+		information, err := os.Lstat(directory.path)
+		if err != nil || !information.IsDir() || information.Mode().Perm() != directory.mode || information.Mode()&os.ModeSymlink != 0 {
+			t.Fatalf("private directory %q = %v, %v; want mode %04o", directory.path, information, err, directory.mode)
 		}
+	}
+	currentRoots, err := currentAuditInvocationOwnedRoots(invocation)
+	if err != nil || len(currentRoots) != 8 {
+		t.Fatalf("sealed HOME owned roots = %+v, %v; want exact eight bindings", currentRoots, err)
 	}
 	contents, err := os.ReadFile(invocation.ModelsPath)
 	if err != nil {
@@ -129,6 +156,23 @@ func TestAuditInvocationMaterializesPrivateStateAndBoundModels(t *testing.T) {
 	if err != nil || changedDescriptor == invocation.CommandDescriptorHash {
 		t.Fatalf("command descriptor did not bind native addon hash: %q, %v", changedDescriptor, err)
 	}
+	changed = material.entry
+	changed.GitExecutable.SHA256 = testHash("different-git-executable")
+	changedDescriptor, err = auditCommandDescriptorHash(changed, invocation.PromptSHA256, invocation.SessionRunID, invocation.Resume)
+	if err != nil || changedDescriptor == invocation.CommandDescriptorHash {
+		t.Fatalf("command descriptor did not bind Git executable identity: %q, %v", changedDescriptor, err)
+	}
+	changed = material.entry
+	changed.WorkRoot = filepath.Join(filepath.Dir(material.entry.WorkRoot), "different-work-root")
+	changedDescriptor, err = auditCommandDescriptorHash(changed, invocation.PromptSHA256, invocation.SessionRunID, invocation.Resume)
+	if err != nil || changedDescriptor == invocation.CommandDescriptorHash {
+		t.Fatalf("command descriptor did not bind Git discovery ceiling: %q, %v", changedDescriptor, err)
+	}
+	if auditCommandDescriptorSchemaVersion != "ananke.local-trusted-supervisor-command-descriptor.v7" ||
+		auditGitRepositoryDiscoveryPolicy != "exact_snapshot_parent_ceiling_no_global_or_system_config_v1" ||
+		auditChildExecutablePath != "/Library/Developer/CommandLineTools/usr/bin:/usr/bin:/bin" {
+		t.Fatal("command descriptor lost the fixed CLT Git startup policy contract")
+	}
 	if err := validateAuditInvocationTransport(material.entry, invocation); err != nil {
 		t.Fatalf("validate exact transport: %v", err)
 	}
@@ -152,6 +196,93 @@ func TestAuditInvocationMaterializesPrivateStateAndBoundModels(t *testing.T) {
 	}
 }
 
+func TestAuditSealedHomeOwnedRootBindingsRejectDrift(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		mutate func(*testing.T, *auditInvocation)
+	}{
+		{name: "omitted", mutate: func(_ *testing.T, invocation *auditInvocation) {
+			invocation.OwnedRoots = invocation.OwnedRoots[:len(invocation.OwnedRoots)-1]
+		}},
+		{name: "extra", mutate: func(_ *testing.T, invocation *auditInvocation) {
+			invocation.OwnedRoots = append(invocation.OwnedRoots, invocation.OwnedRoots[len(invocation.OwnedRoots)-1])
+		}},
+		{name: "swapped", mutate: func(_ *testing.T, invocation *auditInvocation) {
+			left, right := len(invocation.OwnedRoots)-2, len(invocation.OwnedRoots)-1
+			invocation.OwnedRoots[left], invocation.OwnedRoots[right] = invocation.OwnedRoots[right], invocation.OwnedRoots[left]
+		}},
+		{name: "state mode binding", mutate: func(_ *testing.T, invocation *auditInvocation) {
+			for index := range invocation.OwnedRoots {
+				if invocation.OwnedRoots[index].Role == "direct_omp_home_state" {
+					invocation.OwnedRoots[index].Mode ^= 0o200
+				}
+			}
+		}},
+		{name: "run parent binding", mutate: func(_ *testing.T, invocation *auditInvocation) {
+			for index := range invocation.OwnedRoots {
+				if invocation.OwnedRoots[index].Role == "direct_omp_home_run" {
+					invocation.OwnedRoots[index].ParentInode = "999999999"
+				}
+			}
+		}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			material := newGitArchivePolicyMaterial(t)
+			_, invocation := boundAuditInvocationForCleanupTest(t, material, "audit_run_home_binding_"+strconv.Itoa(len(testCase.name)))
+			testCase.mutate(t, &invocation)
+			if err := validateAuditInvocationTransport(material.entry, invocation); !errors.Is(err, ErrAuthentication) {
+				t.Fatalf("sealed HOME binding drift error = %v, want %v", err, ErrAuthentication)
+			}
+		})
+	}
+}
+
+func TestAuditSealedHomeReplacementSymlinkAndModeDriftFailBeforeEffect(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		mutate func(*testing.T, auditInvocation)
+	}{
+		{name: "state mode", mutate: func(t *testing.T, invocation auditInvocation) {
+			if err := os.Chmod(invocation.HomeStateDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "run replacement", mutate: func(t *testing.T, invocation auditInvocation) {
+			if err := os.Chmod(invocation.HomeStateDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			original := invocation.HomeRunDir + ".original"
+			if err := os.Rename(invocation.HomeRunDir, original); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(invocation.HomeRunDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(invocation.HomeStateDir, 0o500); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "state symlink", mutate: func(t *testing.T, invocation auditInvocation) {
+			original := invocation.HomeStateDir + ".original"
+			if err := os.Rename(invocation.HomeStateDir, original); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(original, invocation.HomeStateDir); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			material := newGitArchivePolicyMaterial(t)
+			_, invocation := boundAuditInvocationForCleanupTest(t, material, "audit_run_home_effect_"+strconv.Itoa(len(testCase.name)))
+			testCase.mutate(t, invocation)
+			if err := validateAuditInvocationTransport(material.entry, invocation); !errors.Is(err, ErrAuthentication) {
+				t.Fatalf("sealed HOME live drift error = %v, want %v", err, ErrAuthentication)
+			}
+		})
+	}
+}
+
 func TestCleanupAuditInvocationAllValidatesScrubsAndIsIdempotent(t *testing.T) {
 	material := newGitArchivePolicyMaterial(t)
 	snapshot, invocation := boundAuditInvocationForCleanupTest(t, material, "audit_run_cleanup_all_001")
@@ -165,6 +296,43 @@ func TestCleanupAuditInvocationAllValidatesScrubsAndIsIdempotent(t *testing.T) {
 		t.Fatalf("repeated full cleanup: %v", err)
 	}
 	assertAuditCleanupPathsAbsent(t, invocation, snapshot)
+}
+
+func TestAuthenticatedAuditCleanupScrubsSealedHomeRunAndRejectsStateDecoy(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		material := newGitArchivePolicyMaterial(t)
+		snapshot, invocation := boundAuditInvocationForCleanupTest(t, material, "audit_run_home_cleanup_success")
+		if err := os.WriteFile(filepath.Join(invocation.HomeRunDir, "runtime-state"), []byte("credential-must-be-scrubbed"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := cleanupAuthenticatedAuditInvocationAll(material.entry, invocation); err != nil {
+			t.Fatalf("authenticated sealed HOME cleanup: %v", err)
+		}
+		assertAuditCleanupPathsAbsent(t, invocation, snapshot)
+	})
+	t.Run("state decoy", func(t *testing.T) {
+		material := newGitArchivePolicyMaterial(t)
+		_, invocation := boundAuditInvocationForCleanupTest(t, material, "audit_run_home_cleanup_decoy")
+		retained := invocation.HomeStateDir + ".retained"
+		if err := os.Rename(invocation.HomeStateDir, retained); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(invocation.HomeStateDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		decoy := filepath.Join(invocation.HomeStateDir, "decoy")
+		if err := os.WriteFile(decoy, []byte("must-survive"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := cleanupAuthenticatedAuditInvocationAll(material.entry, invocation); !errors.Is(err, ErrAuthentication) {
+			t.Fatalf("sealed HOME decoy cleanup error = %v, want %v", err, ErrAuthentication)
+		}
+		for _, path := range []string{retained, decoy} {
+			if _, err := os.Lstat(path); err != nil {
+				t.Fatalf("authenticated cleanup altered retained path: %v", err)
+			}
+		}
+	})
 }
 
 func TestCleanupAuditInvocationTransientThenFullIsIdempotent(t *testing.T) {
@@ -264,11 +432,17 @@ func TestCleanupAuditInvocationRejectsPartialOrUnexpectedTransientState(t *testi
 			}
 		}},
 		{name: "missing temporary root", mutate: func(t *testing.T, invocation auditInvocation) {
+			if err := os.Chmod(invocation.HomeStateDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
 			if err := os.RemoveAll(invocation.TemporaryDir); err != nil {
 				t.Fatal(err)
 			}
 		}},
 		{name: "temporary root regular file", mutate: func(t *testing.T, invocation auditInvocation) {
+			if err := os.Chmod(invocation.HomeStateDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
 			if err := os.RemoveAll(invocation.TemporaryDir); err != nil {
 				t.Fatal(err)
 			}
@@ -277,6 +451,9 @@ func TestCleanupAuditInvocationRejectsPartialOrUnexpectedTransientState(t *testi
 			}
 		}},
 		{name: "temporary root symlink", mutate: func(t *testing.T, invocation auditInvocation) {
+			if err := os.Chmod(invocation.HomeStateDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
 			if err := os.RemoveAll(invocation.TemporaryDir); err != nil {
 				t.Fatal(err)
 			}
@@ -323,6 +500,7 @@ func boundAuditInvocationForCleanupTest(t *testing.T, material gitArchivePolicyM
 	if err := bindAuditInvocationTransport(material.entry, &invocation, "127.0.0.1:43210"); err != nil {
 		t.Fatal(err)
 	}
+	restoreAuditSealedHomeModeForTest(t, invocation.HomeDir)
 	return snapshot, invocation
 }
 
@@ -364,6 +542,7 @@ func TestAuditInvocationEnvironmentPinsStateConfigSessionAndOMPPath(t *testing.T
 	if err := bindAuditInvocationTransport(material.entry, &invocation, "127.0.0.1:43210"); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("PATH", filepath.Join(material.directory, "ambient-path-must-not-win"))
 	environment, _, err := auditInvocationEnvironment(material.entry, invocation)
 	if err != nil {
 		t.Fatal(err)
@@ -377,36 +556,84 @@ func TestAuditInvocationEnvironmentPinsStateConfigSessionAndOMPPath(t *testing.T
 		got[name] = value
 	}
 	want := map[string]string{
-		"HOME":                           invocation.HomeDir,
-		"LANG":                           "C",
-		"LC_ALL":                         "C",
-		"OMP_SESSION_ROOT":               invocation.SessionDir,
-		"OMP_WRAPPER_HARD_GRACE_SECONDS": strconv.Itoa(material.entry.WrapperGraceSeconds),
-		"OMP_WRAPPER_STATE_DIR":          invocation.WrapperStateDir,
-		"PATH":                           "/usr/bin:/bin",
-		"PI_CODING_AGENT_DIR":            invocation.AgentDir,
-		"TMPDIR":                         invocation.TemporaryDir,
-		"TZ":                             "UTC",
-		"XDG_DATA_HOME":                  material.entry.OMPRuntimeAuthority.NativeDataRoot,
+		"GIT_CEILING_DIRECTORIES": filepath.Dir(invocation.WorkDir),
+		"GIT_CONFIG_GLOBAL":       "/dev/null",
+		"GIT_CONFIG_NOSYSTEM":     "1",
+		"HOME":                    invocation.HomeDir,
+		"LANG":                    "C",
+		"LC_ALL":                  "C",
+		"OMP_SESSION_ROOT":        invocation.SessionDir,
+		"PATH":                    auditChildExecutablePath,
+		"PI_CODING_AGENT_DIR":     invocation.AgentDir,
+		"PI_CONFIG_DIR":           ".omp/run",
+		"TMPDIR":                  invocation.TemporaryDir,
+		"TZ":                      "UTC",
+		"XDG_DATA_HOME":           material.entry.OMPRuntimeAuthority.NativeDataRoot,
 	}
 	for name, value := range want {
 		if got[name] != value {
 			t.Fatalf("environment %s = %q, want %q", name, got[name], value)
 		}
 	}
-	bootstrap, err := auditOMPBootstrap(material.entry.OMPExecutable.Path)
+	if material.entry.OMPRuntimeAuthority.LauncherMode != atomicOMPLauncherModeDirectPinned ||
+		material.entry.OMPRuntimeAuthority.WrapperCompatibilityOracleSHA256 != material.entry.Wrapper.SHA256 ||
+		material.entry.OMPRuntimeAuthority.SandboxTargetPolicy != atomicOMPSandboxTargetPolicyExactPinned {
+		t.Fatal("runtime authority lost direct launcher or compatibility-oracle binding")
+	}
+	for _, forbidden := range []string{
+		"ALL_PROXY", "DEVELOPER_DIR", "GIT_EXEC_PATH", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "OMP_PROFILE", "PI_PROFILE", "XDG_CONFIG_HOME",
+	} {
+		if _, exists := got[forbidden]; exists {
+			t.Fatalf("environment retained ambient transport/config selector %s", forbidden)
+		}
+	}
+}
+
+func TestAuditInvocationEnvironmentProjectsPreferredSudoCredentialToRuntimeName(t *testing.T) {
+	material := newGitArchivePolicyMaterial(t)
+	snapshot := materializeSnapshotForExecutorTest(t, material, "audit_run_credential_projection_001")
+	invocation, err := prepareAuditInvocation(material.policy, material.entry, snapshot, "audit_run_credential_projection_attempt_1", "audit_run_credential_projection_001", auditResume{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !filepath.IsAbs(material.entry.OMPExecutable.Path) ||
-		!bytes.Contains(bootstrap, []byte("'"+material.entry.OMPExecutable.Path+"'")) ||
-		hashJournalBytes(bootstrap) != material.entry.OMPRuntimeAuthority.BootstrapSHA256 {
-		t.Fatalf("trusted OMP bootstrap = %q with hash %q; want absolute executable %q and hash %q", bootstrap, hashJournalBytes(bootstrap), material.entry.OMPExecutable.Path, material.entry.OMPRuntimeAuthority.BootstrapSHA256)
+	if err := bindAuditInvocationTransport(material.entry, &invocation, "127.0.0.1:43210"); err != nil {
+		t.Fatal(err)
 	}
-	for _, forbidden := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "XDG_CONFIG_HOME", "OMP_PROFILE", "PI_PROFILE"} {
-		if _, exists := got[forbidden]; exists {
-			t.Fatalf("environment retained ambient transport/config key %s", forbidden)
+	const secret = "preferred-coding-key-fixture"
+	material.entry.CredentialEnvironmentNames = []string{"SUDO_CODING_KEY"}
+	invocation.CommandDescriptorHash, err = auditCommandDescriptorHash(material.entry, invocation.PromptSHA256, invocation.SessionRunID, invocation.Resume)
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment, credentials, err := auditInvocationEnvironmentWithLookup(material.entry, invocation, func(name string) (string, bool) {
+		switch name {
+		case "SUDO_CODING_KEY":
+			return secret, true
+		case "SUDO_API_KEY":
+			return "ambient-api-key-must-not-enter-child", true
+		default:
+			return "", false
 		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]string, len(environment))
+	for _, item := range environment {
+		name, value, found := strings.Cut(item, "=")
+		if !found {
+			t.Fatalf("malformed environment item %q", item)
+		}
+		got[name] = value
+	}
+	if got["SUDO_API_KEY"] != secret {
+		t.Fatalf("child SUDO_API_KEY was not projected from the selected source")
+	}
+	if _, exists := got["SUDO_CODING_KEY"]; exists {
+		t.Fatal("child retained source-only SUDO_CODING_KEY")
+	}
+	if !reflect.DeepEqual(credentials, []string{secret}) {
+		t.Fatalf("tracked credential values = %#v, want selected source only", credentials)
 	}
 }
 
@@ -452,23 +679,38 @@ func TestExecutionPolicyRejectsOMPReplacementAndPathShadow(t *testing.T) {
 }
 
 func TestAuditHTTPGatewayRoutesOnlyExactProviderRequestOverPinnedTLS(t *testing.T) {
-	var upstreamRequests atomic.Int32
-	var upstreamHost, upstreamPath, upstreamSNI string
+	if !auditPlatformSupported(runtime.GOOS) {
+		t.Skip("transparent fake-IP transport is restricted to the Darwin audit boundary")
+	}
+	const requestBody = `{"model":"gpt-5.6-sol","input":"preserve exactly"}`
+	const authorization = "Bearer probe-secret-never-log"
+	var upstreamRequests, upstreamDials atomic.Int32
+	var upstreamMethod, upstreamHost, upstreamRequestURI, upstreamSNI, upstreamAuthorization, upstreamContentType string
+	var upstreamBody []byte
 	server, roots := newAuditGatewayTLSServerForTest(t, "coding.sudoai.cc", func(writer http.ResponseWriter, request *http.Request) {
 		upstreamRequests.Add(1)
+		upstreamMethod = request.Method
 		upstreamHost = request.Host
-		upstreamPath = request.URL.Path
+		upstreamRequestURI = request.RequestURI
 		upstreamSNI = request.TLS.ServerName
-		_, _ = io.Copy(io.Discard, request.Body)
+		upstreamAuthorization = request.Header.Get("Authorization")
+		upstreamContentType = request.Header.Get("Content-Type")
+		upstreamBody, _ = io.ReadAll(request.Body)
 		writer.Header().Set("Content-Type", "application/json")
+		writer.Header().Set("Proxy-Authenticate", authorization)
+		writer.Header().Set("X-Audit-Upstream", "preserved")
 		writer.WriteHeader(http.StatusUnauthorized)
 		_, _ = io.WriteString(writer, `{"error":{"message":"deterministic probe rejection"}}`)
 	})
 	dependencies := auditBrokerDependencies{
 		LookupIPAddr: func(context.Context, string) ([]net.IPAddr, error) {
-			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+			return []net.IPAddr{{IP: net.ParseIP("198.18.0.34")}}, nil
 		},
-		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		DialContext: func(ctx context.Context, network, authority string) (net.Conn, error) {
+			upstreamDials.Add(1)
+			if authority != "198.18.0.34:443" {
+				t.Fatalf("TLS dial authority = %q, want pinned fake IP", authority)
+			}
 			return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
 		},
 		TLSRootCAs: roots,
@@ -479,11 +721,11 @@ func TestAuditHTTPGatewayRoutesOnlyExactProviderRequestOverPinnedTLS(t *testing.
 	}
 	defer gateway.Close()
 
-	request, err := http.NewRequest(http.MethodPost, "http://"+gateway.Address()+"/v1/responses", strings.NewReader(`{"model":"gpt-5.6-sol"}`))
+	request, err := http.NewRequest(http.MethodPost, "http://"+gateway.Address()+"/v1/responses", strings.NewReader(requestBody))
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.Header.Set("Authorization", "Bearer probe-secret-never-log")
+	request.Header.Set("Authorization", authorization)
 	request.Header.Set("Content-Type", "application/json")
 	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
 	if err != nil {
@@ -491,9 +733,56 @@ func TestAuditHTTPGatewayRoutesOnlyExactProviderRequestOverPinnedTLS(t *testing.
 	}
 	_, _ = io.Copy(io.Discard, response.Body)
 	_ = response.Body.Close()
-	if response.StatusCode != http.StatusUnauthorized || upstreamRequests.Load() != 1 || upstreamHost != "coding.sudoai.cc" ||
-		upstreamPath != "/v1/responses" || upstreamSNI != "coding.sudoai.cc" {
-		t.Fatalf("gateway route = status %d requests %d host %q path %q SNI %q", response.StatusCode, upstreamRequests.Load(), upstreamHost, upstreamPath, upstreamSNI)
+	if response.StatusCode != http.StatusUnauthorized || response.Header.Get("X-Audit-Upstream") != "preserved" || response.Header.Get("Proxy-Authenticate") != "" ||
+		upstreamRequests.Load() != 1 || upstreamDials.Load() != 1 || upstreamMethod != http.MethodPost || upstreamHost != "coding.sudoai.cc" ||
+		upstreamRequestURI != "/v1/responses" || upstreamSNI != "coding.sudoai.cc" || upstreamAuthorization != authorization ||
+		upstreamContentType != "application/json" || !bytes.Equal(upstreamBody, []byte(requestBody)) {
+		t.Fatalf("gateway route = status %d upstream_header %q proxy_auth %q requests %d dials %d method %q host %q target %q SNI %q auth_match %t content_type %q body_match %t",
+			response.StatusCode, response.Header.Get("X-Audit-Upstream"), response.Header.Get("Proxy-Authenticate"), upstreamRequests.Load(), upstreamDials.Load(), upstreamMethod,
+			upstreamHost, upstreamRequestURI, upstreamSNI, upstreamAuthorization == authorization, upstreamContentType, bytes.Equal(upstreamBody, []byte(requestBody)))
+	}
+}
+
+func TestAuditHTTPGatewayTransparentFakeIPTLSRejectsWrongHostnameCertificate(t *testing.T) {
+	if !auditPlatformSupported(runtime.GOOS) {
+		t.Skip("transparent fake-IP transport is restricted to the Darwin audit boundary")
+	}
+	var requests, dials atomic.Int32
+	server, roots := newAuditGatewayTLSServerForTest(t, "attacker.example", func(writer http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		writer.WriteHeader(http.StatusNoContent)
+	})
+	gateway, err := startAuditHTTPGateway(context.Background(), "custom:sudo", executionPolicyEndpoint{Hostname: "coding.sudoai.cc", Port: 443}, time.Minute, auditBrokerDependencies{
+		LookupIPAddr: func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("198.18.0.34")}}, nil
+		},
+		DialContext: func(ctx context.Context, network, authority string) (net.Conn, error) {
+			dials.Add(1)
+			if authority != "198.18.0.34:443" {
+				t.Fatalf("TLS dial authority = %q, want pinned fake IP", authority)
+			}
+			return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+		},
+		TLSRootCAs: roots,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+	request, err := http.NewRequest(http.MethodPost, "http://"+gateway.Address()+"/v1/responses", strings.NewReader(`{"model":"gpt-5.6-sol"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer must-not-cross-invalid-TLS")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusBadGateway || requests.Load() != 0 || dials.Load() != 1 {
+		t.Fatalf("wrong-host TLS result = status %d requests %d dials %d", response.StatusCode, requests.Load(), dials.Load())
 	}
 }
 
@@ -612,8 +901,9 @@ func TestAuditInstalledOMPProviderFreeTransportPreflight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if result.Method != http.MethodPost || result.Path != "/v1/responses" || result.Host == "" || result.RequestCount != 1 || !result.NetworkConfined ||
-		result.OMPNativeAddonSHA256 != fileIdentityForTest(t, nativeAddon).SHA256 {
+		!result.HomeLogsAbsent || result.OMPNativeAddonSHA256 != fileIdentityForTest(t, nativeAddon).SHA256 {
 		t.Fatalf("installed OMP transport proof = %+v", result)
 	}
 	if strings.Contains(fmt.Sprint(result), "probe-secret") {
@@ -627,6 +917,7 @@ type auditInstalledOMPTransportProbeResult struct {
 	Host                 string
 	RequestCount         int
 	NetworkConfined      bool
+	HomeLogsAbsent       bool
 	OMPNativeAddonSHA256 string
 }
 
@@ -635,7 +926,7 @@ func runAuditInstalledOMPTransportProbe(ctx context.Context, executable executio
 		return auditInstalledOMPTransportProbeResult{}, authenticationError("installed OMP transport probe platform")
 	}
 	entry := executionPolicyEntry{
-		HermesProvider: "custom:sudo", HermesModel: "gpt-5.6-sol", CredentialEnvironmentNames: []string{"SUDO_API_KEY"},
+		HermesProvider: "custom:sudo", HermesModel: "gpt-5.6-sol", TaskTier: "normal", CredentialEnvironmentNames: []string{"SUDO_CODING_KEY"},
 		OMPVersion: supportedOMPVersion, OMPExecutable: executable, OMPExecutableRoot: root, OMPNativeAddon: nativeAddon,
 	}
 	if err := validatePinnedOMPExecutableRoot(entry.OMPExecutableRoot, entry.OMPExecutable); err != nil {
@@ -674,33 +965,67 @@ func runAuditInstalledOMPTransportProbe(ctx context.Context, executable executio
 	if err != nil {
 		return auditInstalledOMPTransportProbeResult{}, err
 	}
-	defer func() { _ = os.RemoveAll(rootPath) }()
-	for _, name := range []string{"agent", "home", "session", "tmp", "work"} {
+	defer func() {
+		_ = os.Chmod(filepath.Join(rootPath, "home", ".omp"), 0o700)
+		_ = os.RemoveAll(rootPath)
+	}()
+	for _, name := range []string{"agent", "bin", "data", "home", "session", "tmp", "work"} {
 		if err := os.Mkdir(filepath.Join(rootPath, name), 0o700); err != nil {
 			return auditInstalledOMPTransportProbeResult{}, err
 		}
 	}
 	agentDir := filepath.Join(rootPath, "agent")
+	probeExecutablePath := filepath.Join(rootPath, "bin", "omp")
+	dataDir := filepath.Join(rootPath, "data")
 	homeDir := filepath.Join(rootPath, "home")
 	sessionDir := filepath.Join(rootPath, "session")
 	temporaryDir := filepath.Join(rootPath, "tmp")
 	workDir := filepath.Join(rootPath, "work")
+	if err := os.WriteFile(filepath.Join(workDir, "go.mod"), []byte("module example.invalid/auditprobe\n\ngo 1.26\n"), 0o444); err != nil {
+		return auditInstalledOMPTransportProbeResult{}, authenticationError("populate installed OMP probe work root")
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "main.go"), []byte("package main\nfunc main() {}\n"), 0o444); err != nil {
+		return auditInstalledOMPTransportProbeResult{}, authenticationError("populate installed OMP probe work root")
+	}
+	if err := os.Chmod(workDir, 0o555); err != nil {
+		return auditInstalledOMPTransportProbeResult{}, authenticationError("seal installed OMP probe work root")
+	}
+	defer func() { _ = os.Chmod(workDir, 0o700) }()
 	ompDir := filepath.Join(homeDir, ".omp")
-	nativesDir := filepath.Join(ompDir, "natives")
+	homeRunDir := filepath.Join(ompDir, "run")
+	nativesDir := filepath.Join(dataDir, "omp", "natives")
 	nativeVersionDir := filepath.Join(nativesDir, entry.OMPVersion)
 	nativePath := filepath.Join(nativeVersionDir, auditOMPNativeAddonFilename)
 	for _, directory := range []struct{ path, parent string }{
-		{ompDir, homeDir}, {nativesDir, ompDir}, {nativeVersionDir, nativesDir},
+		{ompDir, homeDir}, {homeRunDir, ompDir}, {filepath.Dir(nativesDir), dataDir}, {nativesDir, filepath.Dir(nativesDir)}, {nativeVersionDir, nativesDir},
 	} {
 		if filepath.Dir(directory.path) != directory.parent || os.Mkdir(directory.path, 0o700) != nil {
-			return auditInstalledOMPTransportProbeResult{}, authenticationError("create installed OMP probe native root")
+			return auditInstalledOMPTransportProbeResult{}, authenticationError("create installed OMP probe runtime root")
 		}
 	}
+	if err := os.Chmod(ompDir, 0o500); err != nil {
+		return auditInstalledOMPTransportProbeResult{}, authenticationError("seal installed OMP probe HOME state")
+	}
+
 	models, err := auditModelsConfigBytes(entry, authority)
 	if err != nil {
 		return auditInstalledOMPTransportProbeResult{}, err
 	}
 	modelsPath := filepath.Join(agentDir, "models.yml")
+	executableContents, _, err := readPinnedRegularFile(entry.OMPExecutable.Path, entry.OMPExecutable.OwnerUID, false, maxAuditOMPExecutableBytes)
+	if err != nil {
+		return auditInstalledOMPTransportProbeResult{}, authenticationError("read installed OMP probe executable")
+	}
+	defer zeroBytes(executableContents)
+	if err := writePrivateAuditFile(probeExecutablePath, executableContents, 0o500); err != nil {
+		return auditInstalledOMPTransportProbeResult{}, authenticationError("copy installed OMP probe executable")
+	}
+	probeExecutableRead, probeExecutable, err := readPinnedRegularFile(probeExecutablePath, uint32(os.Getuid()), false, maxAuditOMPExecutableBytes)
+	if err != nil || probeExecutable.SHA256 != entry.OMPExecutable.SHA256 || probeExecutable.Size != entry.OMPExecutable.Size {
+		zeroBytes(probeExecutableRead)
+		return auditInstalledOMPTransportProbeResult{}, authenticationError("pin copied installed OMP probe executable")
+	}
+	zeroBytes(probeExecutableRead)
 	if err := writePrivateAuditFile(modelsPath, models, 0o600); err != nil {
 		return auditInstalledOMPTransportProbeResult{}, authenticationError("create installed OMP probe models configuration")
 	}
@@ -732,11 +1057,12 @@ func runAuditInstalledOMPTransportProbe(ctx context.Context, executable executio
 		return auditInstalledOMPTransportProbeResult{}, authenticationError("pinned OMP native addon changed during probe copy")
 	}
 	result.OMPNativeAddonSHA256 = copiedNative.SHA256
+
 	sandboxAuthority, err := auditSandboxBrokerAddress(authority)
 	if err != nil {
 		return auditInstalledOMPTransportProbeResult{}, err
 	}
-	profile := auditInstalledOMPProbeSandboxProfile(entry.OMPExecutable, entry.OMPExecutableRoot, rootPath, nativePath, sandboxAuthority)
+	profile := auditInstalledOMPProbeSandboxProfile(probeExecutable, executionPolicyDirectoryIdentity{Path: filepath.Dir(probeExecutable.Path)}, rootPath, nativePath, sandboxAuthority)
 	nativeLiteral := `(literal "` + sandboxLiteral(nativePath) + `")`
 	if strings.Count(profile, "(allow network-outbound") != 1 || !strings.Contains(profile, "(remote tcp \""+sandboxLiteral(sandboxAuthority)+"\")") ||
 		strings.Contains(profile, "remote udp") || strings.Contains(profile, "*:443") || strings.Contains(profile, "*:53") || strings.Contains(profile, "mDNSResponder") ||
@@ -746,14 +1072,14 @@ func runAuditInstalledOMPTransportProbe(ctx context.Context, executable executio
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	command := exec.Command(auditSandboxExecutable, "-p", profile, entry.OMPExecutable.Path,
-		"-p", "Return no content; this is a local transport preflight.", "--yolo", "--max-time", "5",
-		"--model", strings.TrimPrefix(entry.HermesProvider, "custom:")+"/"+entry.HermesModel, "--thinking", "minimal", "--session-dir", sessionDir)
+	command := exec.Command(auditSandboxExecutable, "-p", profile, probeExecutable.Path,
+		"-p", readOnlyAuditPromptTemplate, "--yolo", "--max-time", "5",
+		"--model", strings.TrimPrefix(entry.HermesProvider, "custom:")+"/"+entry.HermesModel, "--thinking", "xhigh", "--session-dir", sessionDir)
 	command.Dir = workDir
 	command.Env = []string{
 		"HOME=" + homeDir, "LANG=C", "LC_ALL=C", "OMP_SESSION_ROOT=" + sessionDir,
-		"PATH=" + root.Path + ":/usr/bin:/bin", "PI_CODING_AGENT_DIR=" + agentDir,
-		"SUDO_API_KEY=" + probeCredential, "TMPDIR=" + temporaryDir, "TZ=UTC",
+		"PATH=" + root.Path + ":/usr/bin:/bin", "PI_CODING_AGENT_DIR=" + agentDir, "PI_CONFIG_DIR=.omp/run",
+		"SUDO_API_KEY=" + probeCredential, "TMPDIR=" + temporaryDir, "TZ=UTC", "XDG_DATA_HOME=" + dataDir,
 	}
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdout := &boundedCommandBuffer{limit: maxAuditCaptureBytes}
@@ -779,7 +1105,7 @@ func runAuditInstalledOMPTransportProbe(ctx context.Context, executable executio
 		}
 		return auditInstalledOMPTransportProbeResult{}, ErrDeadline
 	}
-	confirmation := confirmAuditProcessExit(context.Background(), identity, waiter, systemAuditProcessOperations{}, defaultAuditKillGrace)
+	confirmation := confirmAuditProcessExit(context.Background(), identity, waiter, systemAuditProcessOperations{}, defaultAuditTerminationBounds())
 	if confirmation.Outcome != auditTerminationConfirmedExit {
 		return auditInstalledOMPTransportProbeResult{}, confirmation.Failure
 	}
@@ -792,6 +1118,15 @@ func runAuditInstalledOMPTransportProbe(ctx context.Context, executable executio
 	if bytes.Contains(stdoutBytes, []byte(probeCredential)) || bytes.Contains(stderrBytes, []byte(probeCredential)) {
 		return auditInstalledOMPTransportProbeResult{}, authenticationError("installed OMP probe credential output")
 	}
+	entries, err := os.ReadDir(ompDir)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "run" || !entries[0].IsDir() {
+		return auditInstalledOMPTransportProbeResult{}, authenticationError("installed OMP probe sealed HOME inventory")
+	}
+	homeEntries, err := os.ReadDir(homeDir)
+	if err != nil || len(homeEntries) != 1 || homeEntries[0].Name() != ".omp" || !homeEntries[0].IsDir() {
+		return auditInstalledOMPTransportProbeResult{}, authenticationError("installed OMP probe exact HOME inventory")
+	}
+	result.HomeLogsAbsent = true
 	copiedRead, err = readPinnedOMPNativeAddon(copiedNative)
 	if err != nil || hashJournalBytes(copiedRead) != entry.OMPNativeAddon.SHA256 {
 		zeroBytes(copiedRead)
@@ -801,13 +1136,14 @@ func runAuditInstalledOMPTransportProbe(ctx context.Context, executable executio
 	if err := validateOMPNativeAddonIdentity(entry.OMPVersion, entry.OMPNativeAddon, uint32(os.Getuid())); err != nil {
 		return auditInstalledOMPTransportProbeResult{}, authenticationError("pinned OMP native addon changed during probe")
 	}
+
 	recordMu.Lock()
 	result.NetworkConfined = true
 	final := result
 	finalCredentialMatched := credentialMatched
 	recordMu.Unlock()
 	if final.RequestCount != 1 || final.Method != http.MethodPost || final.Path != "/v1/responses" || final.Host != authority || !finalCredentialMatched ||
-		final.OMPNativeAddonSHA256 != entry.OMPNativeAddon.SHA256 {
+		!final.HomeLogsAbsent || final.OMPNativeAddonSHA256 != entry.OMPNativeAddon.SHA256 {
 		exitCode := -1
 		if command.ProcessState != nil {
 			exitCode = command.ProcessState.ExitCode()
@@ -824,7 +1160,7 @@ func auditInstalledOMPProbeSandboxProfile(executable executionPolicyFileIdentity
 	profile.WriteString("(allow process-fork)\n(allow process-info* (target self) (target children))\n(allow signal (target self) (target children))\n")
 	profile.WriteString("(allow sysctl-read (sysctl-name \"security.mac.lockdown_mode_state\" \"kern.bootargs\" \"kern.osproductversion\" \"kern.iossupportversion\" \"kern.osvariant_status\" \"hw.ephemeral_storage\" \"hw.pagesize_compat\"))\n")
 	readRoots := []string{writableRoot, root.Path, "/usr/lib", "/usr/share", "/System/Library", "/Library/Apple", "/private/var/db/timezone"}
-	executables := append([]string{executable.Path}, auditWrapperDependencyPaths()...)
+	executables := []string{executable.Path}
 	profile.WriteString("(allow file-read-metadata file-test-existence (literal \"/\")")
 	for _, path := range sandboxPathVariants(append(readRoots, executables...)...) {
 		writeSandboxFilter(&profile, "path-ancestors", path)
@@ -851,9 +1187,7 @@ func auditInstalledOMPProbeSandboxProfile(executable executionPolicyFileIdentity
 		writeSandboxFilter(&profile, "literal", path)
 	}
 	profile.WriteString(")\n(allow file-write* (literal \"/dev/null\")")
-	for _, path := range sandboxPathVariants(writableRoot) {
-		writeSandboxFilter(&profile, "subpath", path)
-	}
+	writeAuditSealedTemporaryWriteFilters(&profile, writableRoot)
 	profile.WriteString(")\n")
 	writeAuditNativeWriteDenials(&profile, nativeAddonPath)
 	profile.WriteString("(allow process-exec")
@@ -864,14 +1198,4 @@ func auditInstalledOMPProbeSandboxProfile(executable executionPolicyFileIdentity
 	profile.WriteString(sandboxLiteral(gatewayAuthority))
 	profile.WriteString("\"))\n")
 	return profile.String()
-}
-
-func TestAuditWrapperDependencySetIsExact(t *testing.T) {
-	want := []string{
-		"/bin/bash", "/bin/cat", "/bin/chmod", "/bin/date", "/bin/kill", "/bin/mkdir", "/bin/mv", "/bin/ps", "/bin/rm", "/bin/rmdir", "/bin/sleep",
-		"/usr/bin/awk", "/usr/bin/cksum", "/usr/bin/dirname", "/usr/bin/git", "/usr/bin/grep", "/usr/bin/mktemp", "/usr/bin/python3", "/usr/bin/tr", "/usr/bin/wc",
-	}
-	if got := auditWrapperDependencyPaths(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("wrapper dependency paths = %q, want %q", got, want)
-	}
 }

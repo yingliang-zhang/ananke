@@ -239,7 +239,8 @@ func TestProductionServerMakesReconcileAndCancelReceiptExclusive(t *testing.T) {
 			now := time.Now().UTC().Truncate(time.Second)
 			material := newServerTestMaterial(t, now)
 			if firstOperation == operationCancel {
-				executing := newExecutingServerTestMaterial(t, now, "#!/bin/sh\nset -eu\n/bin/sleep 30\n")
+				executing := newExecutingServerTestMaterial(t, now, fakeAuditOMPFixture{Scenario: "hang"})
+
 				material = executing.material
 			}
 			running := startInProcessProductionServer(t, material, now)
@@ -275,7 +276,8 @@ func TestProductionServerMakesReconcileAndCancelReceiptExclusive(t *testing.T) {
 
 func TestProductionServerConflictsDifferentlySealedHandoffIDsForOneReceipt(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	executing := newExecutingServerTestMaterial(t, now, "#!/bin/sh\nset -eu\n/bin/sleep 30\n")
+	executing := newExecutingServerTestMaterial(t, now, fakeAuditOMPFixture{Scenario: "hang"})
+
 	material := executing.material
 	running := startInProcessProductionServer(t, material, now)
 	defer running.stop(t)

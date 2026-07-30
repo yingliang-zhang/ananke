@@ -1,10 +1,11 @@
 package trustedsupervisor
 
 import (
-	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
+
 	"errors"
-	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -19,63 +21,33 @@ import (
 	"time"
 )
 
-func TestDarwinAuditWrapperSandboxEnforcesReadonlySnapshotAndRootIsolation(t *testing.T) {
+func TestDarwinDirectOMPSandboxEnforcesReadonlySnapshotAndRootIsolation(t *testing.T) {
+
 	if runtime.GOOS != "darwin" {
 		t.Skip("Darwin sandbox contract")
 	}
 	material := newGitArchivePolicyMaterial(t)
 	originalPath := filepath.Join(material.entry.Repository.Path, "audit.txt")
-	script := `#!/bin/sh
-set -eu
-[ "$#" -eq 11 ]
-[ "$1" = "60" ]
-prompt=$2
-output=$3
-[ "$4" = "--hermes-provider" ]
-[ "$5" = "custom:sudo" ]
-[ "$6" = "--hermes-model" ]
-[ "$7" = "gpt-5.6-sol" ]
-[ "$8" = "--task-tier" ]
-[ "$9" = "normal" ]
-[ "${10}" = "--session-dir" ]
-[ "${11}" = "$OMP_SESSION_ROOT" ]
-[ "$SUDO_API_KEY" = "credential-must-not-leak" ]
-if /bin/chmod u+w "$PWD/audit.txt" 2>/dev/null; then exit 70; fi
-if /bin/mv "$PWD/audit.txt" "$PWD/moved.txt" 2>/dev/null; then exit 71; fi
-if /bin/ln -s "$PWD/audit.txt" "$TMPDIR/source-link" && /bin/sh -c 'printf tamper > "$1"' sh "$TMPDIR/source-link" 2>/dev/null; then exit 72; fi
-if /bin/sh -c 'printf tamper > "$1"' sh '` + originalPath + `' 2>/dev/null; then exit 73; fi
-native_addon="$HOME/.omp/natives/17.1.3/pi_natives.darwin-arm64.node"
-case "$native_addon" in
-  /var/*) native_alias="/private$native_addon" ;;
-  /private/var/*) native_alias="${native_addon#/private}" ;;
-  *) exit 69 ;;
-esac
-if /bin/sh -c 'printf tamper > "$1"' sh "$native_addon" 2>/dev/null; then exit 74; fi
-if /bin/mkdir "$HOME/.omp/natives/17.1.3/child-mutation" 2>/dev/null; then exit 75; fi
-if /bin/sh -c 'printf tamper > "$1"' sh "$native_alias" 2>/dev/null; then exit 76; fi
-if /bin/mkdir "${native_alias%/*}/alias-child-mutation" 2>/dev/null; then exit 77; fi
-/bin/sh -c 'printf prompt-write > "$1"' sh "$prompt.touch"
-/bin/sh -c 'printf temporary > "$1"' sh "$TMPDIR/temporary"
-/bin/sh -c 'printf session > "$1"' sh "$OMP_SESSION_ROOT/session.uuid"
-/bin/sh -c 'printf audit-success > "$1"' sh "$output"
-`
-	setFakeAuditWrapperForTest(t, &material, script, "/bin/ln", "/bin/sh")
+	setNativeFakeAuditOMPForTest(t, &material, fakeAuditOMPFixture{Scenario: "sandbox_isolation", OriginalPath: originalPath})
+
 	snapshot := materializeSnapshotForExecutorTest(t, material, "audit_run_sandbox_001")
 	invocation, err := prepareAuditInvocation(material.policy, material.entry, snapshot, "audit_run_sandbox_001", "audit_run_sandbox_001", auditResume{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("SUDO_API_KEY", "credential-must-not-leak")
+	t.Setenv("SUDO_CODING_KEY", "credential-must-not-leak")
 	var sandboxProfile string
 	result, err := runAuditInvocation(context.Background(), material.policy, material.entry, invocation, auditInvocationHooks{
 		BrokerReady: func(_ string, profile string) { sandboxProfile = profile },
 	})
 	if err != nil || result.ExitCode != 0 || result.TimedOut {
-		t.Fatalf("sandboxed fake wrapper result = %+v, %v\n%s", result, err, sandboxProfile)
+		t.Fatalf("sandboxed fake direct OMP result = %+v, %v\n%s", result, err, sandboxProfile)
+
 	}
 	assertAuditNativeWriteDenyVariants(t, sandboxProfile, result.boundInvocation.NativeAddonPath)
 	if output, err := os.ReadFile(invocation.OutputPath); err != nil || string(output) != "audit-success" {
-		t.Fatalf("wrapper output = %q, %v", output, err)
+		t.Fatalf("direct OMP output = %q, %v", output, err)
+
 	}
 	if source, err := os.ReadFile(filepath.Join(snapshot.SourceRoot, "audit.txt")); err != nil || string(source) != "immutable audit source\n" {
 		t.Fatalf("snapshot mutated = %q, %v", source, err)
@@ -83,13 +55,131 @@ if /bin/mkdir "${native_alias%/*}/alias-child-mutation" 2>/dev/null; then exit 7
 	if original, err := os.ReadFile(originalPath); err != nil || string(original) != "immutable audit source\n" {
 		t.Fatalf("original repository mutated = %q, %v", original, err)
 	}
-	for _, path := range []string{invocation.PromptPath + ".touch", filepath.Join(invocation.TemporaryDir, "temporary"), filepath.Join(invocation.SessionDir, "session.uuid")} {
+	for _, path := range []string{filepath.Join(invocation.TemporaryDir, "temporary"), filepath.Join(invocation.SessionDir, "session.uuid")} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("allowed isolated root write %s: %v", path, err)
 		}
 	}
+	if _, err := os.Stat(invocation.PromptPath + ".touch"); !os.IsNotExist(err) {
+		t.Fatalf("direct OMP wrote supervisor-owned prompt root: %v", err)
+	}
+
 	if _, err := os.Stat(filepath.Join(invocation.TemporaryDir, "source-link")); err != nil {
 		t.Fatalf("sandbox did not permit isolated symlink creation: %v", err)
+	}
+}
+
+func TestDarwinDirectOMPSandboxSealsHomeStateAndAllowsOnlyRunWrites(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin sandbox contract")
+	}
+	material := newGitArchivePolicyMaterial(t)
+	setNativeFakeAuditOMPForTest(t, &material, fakeAuditOMPFixture{Scenario: "sealed_home"})
+	snapshot := materializeSnapshotForExecutorTest(t, material, "audit_run_sealed_home_001")
+	if err := os.WriteFile(filepath.Join(filepath.Dir(snapshot.RunRoot), "ancestor-secret"), []byte("must remain unreadable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invocation, err := prepareAuditInvocation(material.policy, material.entry, snapshot, "audit_run_sealed_home_001", "audit_run_sealed_home_001", auditResume{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var profile string
+	result, err := runAuditInvocation(context.Background(), material.policy, material.entry, invocation, auditInvocationHooks{
+		BrokerReady: func(_ string, sandbox string) { profile = sandbox },
+	})
+	if err != nil || result.ExitCode != 0 || result.Stdout != "sealed-home-success" {
+		t.Fatalf("sealed HOME result = %+v, %v\n%s", result, err, profile)
+	}
+	bound := result.boundInvocation
+	restoreAuditSealedHomeModeForTest(t, bound.HomeDir)
+	for _, expected := range []struct {
+		path string
+		mode os.FileMode
+	}{
+		{path: bound.HomeDir, mode: 0o700},
+		{path: bound.HomeStateDir, mode: 0o500},
+		{path: bound.HomeRunDir, mode: 0o700},
+	} {
+		information, statErr := os.Lstat(expected.path)
+		if statErr != nil || !information.IsDir() || information.Mode().Perm() != expected.mode {
+			t.Fatalf("sealed HOME path mode = %v, %v; want %04o", information, statErr, expected.mode)
+		}
+	}
+	if contents, readErr := os.ReadFile(filepath.Join(bound.HomeRunDir, "runtime-state")); readErr != nil || string(contents) != "run-state" {
+		t.Fatalf("required HOME run state = %q, %v", contents, readErr)
+	}
+	for _, forbidden := range []string{filepath.Join(bound.HomeStateDir, "logs"), filepath.Join(bound.HomeStateDir, "sibling"), bound.HomeStateDir + ".moved"} {
+		if _, statErr := os.Lstat(forbidden); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("forbidden HOME sibling exists: %v", statErr)
+		}
+	}
+}
+
+func TestDarwinDirectOMPSandboxExecutesPinnedGitWithoutParentRepositoryDiscovery(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin sandbox Git startup contract")
+	}
+	physicalTemporaryRoot, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", physicalTemporaryRoot)
+	material := newGitArchivePolicyMaterial(t)
+	if output, err := exec.Command(material.entry.GitExecutable.Path, "init", "--quiet", material.entry.WorkRoot).CombinedOutput(); err != nil {
+		t.Fatalf("initialize snapshot-parent repository: %v\n%s", err, output)
+	}
+	parentHeadPath := filepath.Join(material.entry.WorkRoot, ".git", "HEAD")
+	parentHeadBefore, err := os.ReadFile(parentHeadPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setNativeFakeAuditOMPForTest(t, &material, fakeAuditOMPFixture{Scenario: "git_startup_boundary"})
+	for _, path := range []string{
+		"/Applications/Xcode-beta.app/Contents/Developer/usr/bin/git",
+		"/Library/Developer/CommandLineTools/usr/bin/make",
+	} {
+		information, statErr := os.Stat(path)
+		if statErr != nil || !information.Mode().IsRegular() || information.Mode().Perm()&0o111 == 0 {
+			t.Fatalf("blocked executable probe fixture %q unavailable: %v", path, statErr)
+		}
+	}
+	ambientPath := filepath.Join(material.directory, "ambient-path")
+	if err := os.Mkdir(ambientPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ambientPath, "git"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", ambientPath)
+
+	snapshot := materializeSnapshotForExecutorTest(t, material, "audit_run_git_startup_001")
+	invocation, err := prepareAuditInvocation(material.policy, material.entry, snapshot, "audit_run_git_startup_001", "audit_run_git_startup_001", auditResume{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SUDO_CODING_KEY", "credential-must-not-leak")
+	var sandboxProfile string
+	t.Setenv("GIT_CEILING_DIRECTORIES", material.entry.WorkRoot)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(material.entry.WorkRoot, "ambient-global-config"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "0")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "ananke.boundary")
+	t.Setenv("GIT_CONFIG_VALUE_0", "ambient-command-config")
+	result, err := runAuditInvocation(context.Background(), material.policy, material.entry, invocation, auditInvocationHooks{
+		BrokerReady: func(_ string, profile string) { sandboxProfile = profile },
+	})
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("pinned Git startup boundary result = %+v, %v\n%s", result, err, sandboxProfile)
+	}
+	output, err := os.ReadFile(invocation.OutputPath)
+	if err != nil || string(output) != "git-startup-isolated" {
+		t.Fatalf("pinned Git startup output = %q, %v", output, err)
+	}
+	if source, err := os.ReadFile(filepath.Join(snapshot.SourceRoot, "audit.txt")); err != nil || string(source) != "immutable audit source\n" {
+		t.Fatalf("Git startup boundary mutated snapshot source = %q, %v", source, err)
+	}
+	if parentHeadAfter, err := os.ReadFile(parentHeadPath); err != nil || string(parentHeadAfter) != string(parentHeadBefore) {
+		t.Fatalf("Git startup boundary mutated parent repository HEAD = %q, %v", parentHeadAfter, err)
 	}
 }
 
@@ -129,21 +219,8 @@ func TestAuditInvocationUsesExactArgvMinimalEnvironmentAndFourRoots(t *testing.T
 		t.Skip("Darwin sandbox contract")
 	}
 	material := newGitArchivePolicyMaterial(t)
-	script := `#!/bin/sh
-set -eu
-[ "$0" = "/bin/bash" ]
-[ "$#" -eq 11 ]
-[ "$1" = "60" ]
-[ "$4" = "--hermes-provider" ] && [ "$5" = "custom:sudo" ]
-[ "$6" = "--hermes-model" ] && [ "$7" = "gpt-5.6-sol" ]
-[ "$8" = "--task-tier" ] && [ "$9" = "normal" ]
-[ "${10}" = "--session-dir" ] && [ "${11}" = "$OMP_SESSION_ROOT" ]
-/usr/bin/env | /usr/bin/sed 's/=.*//' | /usr/bin/sort > "$OMP_SESSION_ROOT/env.names"
-printf '%s' "$XDG_DATA_HOME" > "$OMP_SESSION_ROOT/xdg-data-home"
-[ "${HTTP_PROXY+x}" != x ] && [ "${HTTPS_PROXY+x}" != x ] && [ "${ALL_PROXY+x}" != x ] && [ "${NO_PROXY+x}" != x ]
-printf exact > "$3"
-`
-	setFakeAuditWrapperForTest(t, &material, script, "/usr/bin/env", "/usr/bin/sed", "/usr/bin/sort")
+	setNativeFakeAuditOMPForTest(t, &material, fakeAuditOMPFixture{Scenario: "environment"})
+
 	snapshot := materializeSnapshotForExecutorTest(t, material, "audit_run_argv_001")
 	invocation, err := prepareAuditInvocation(material.policy, material.entry, snapshot, "audit_run_argv_001", "audit_run_argv_001", auditResume{})
 	if err != nil {
@@ -157,7 +234,7 @@ printf exact > "$3"
 			}
 		}
 	}
-	t.Setenv("SUDO_API_KEY", "credential-must-not-leak")
+	t.Setenv("SUDO_CODING_KEY", "credential-must-not-leak")
 	t.Setenv("UNRELATED_SECRET", "must-not-inherit")
 	t.Setenv("OPENAI_API_KEY", "unselected-route-credential")
 	var sandboxProfile string
@@ -175,10 +252,12 @@ printf exact > "$3"
 	}
 	names := strings.Fields(string(namesBytes))
 	sort.Strings(names)
-	want := []string{"HOME", "LANG", "LC_ALL", "OMP_SESSION_ROOT", "OMP_WRAPPER_HARD_GRACE_SECONDS", "OMP_WRAPPER_STATE_DIR", "PATH", "PI_CODING_AGENT_DIR", "PWD", "SHLVL", "SUDO_API_KEY", "TMPDIR", "TZ", "XDG_DATA_HOME", "_"}
+	want := []string{"GIT_CEILING_DIRECTORIES", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "HOME", "LANG", "LC_ALL", "OMP_SESSION_ROOT", "PATH", "PI_CODING_AGENT_DIR", "SUDO_API_KEY", "TMPDIR", "TZ", "XDG_DATA_HOME"}
+
 	sort.Strings(want)
 	if !reflect.DeepEqual(names, want) {
-		t.Fatalf("wrapper environment names = %q, want %q", names, want)
+		t.Fatalf("direct OMP environment names = %q, want %q", names, want)
+
 	}
 	xdgDataHome, err := os.ReadFile(filepath.Join(invocation.SessionDir, "xdg-data-home"))
 	if err != nil || string(xdgDataHome) != material.entry.OMPRuntimeAuthority.NativeDataRoot {
@@ -187,7 +266,7 @@ printf exact > "$3"
 	commandInvocation := invocation
 	commandInvocation.SandboxProfile = sandboxProfile
 	commandInvocation.SandboxProfileHash = hashJournalBytes([]byte(sandboxProfile))
-	wantCommandArguments := append([]string{"-p", sandboxProfile, auditBashExecutable, "-s", "--"}, invocation.Arguments...)
+	wantCommandArguments := append([]string{"-p", sandboxProfile, material.entry.OMPExecutable.Path}, invocation.Arguments...)
 	if got := auditSandboxCommandArguments(commandInvocation); !reflect.DeepEqual(got, wantCommandArguments) {
 		t.Fatalf("sandbox command arguments = %q, want %q", got, wantCommandArguments)
 	}
@@ -198,77 +277,13 @@ printf exact > "$3"
 	}
 }
 
-func TestAuditInvocationExecutesFrozenWrapperBytesAcrossAllMutationWindows(t *testing.T) {
-	if auditPlatformSupported("linux") {
-		t.Fatal("unsupported production platform was admitted")
-	}
-	if runtime.GOOS != "darwin" {
-		return
-	}
-	for _, testCase := range []struct {
-		name  string
-		hooks func(*testing.T, *gitArchivePolicyMaterial) auditInvocationHooks
-	}{
-		{
-			name: "path replacement after final hash",
-			hooks: func(t *testing.T, material *gitArchivePolicyMaterial) auditInvocationHooks {
-				return auditInvocationHooks{BeforeStart: func() {
-					if err := os.Rename(material.entry.Wrapper.Path, material.entry.Wrapper.Path+".pinned"); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.WriteFile(material.entry.Wrapper.Path, []byte("#!/bin/sh\nprintf replacement > \"$3\"\n"), 0o700); err != nil {
-						t.Fatal(err)
-					}
-				}}
-			},
-		},
-		{
-			name: "in-place rewrite after final hash",
-			hooks: func(t *testing.T, material *gitArchivePolicyMaterial) auditInvocationHooks {
-				return auditInvocationHooks{BeforeStart: func() {
-					if err := os.WriteFile(material.entry.Wrapper.Path, []byte("#!/bin/sh\nprintf replacement > \"$3\"\n"), 0o700); err != nil {
-						t.Fatal(err)
-					}
-				}}
-			},
-		},
-		{
-			name: "in-place rewrite while bash waits for pipe bytes",
-			hooks: func(t *testing.T, material *gitArchivePolicyMaterial) auditInvocationHooks {
-				return auditInvocationHooks{BeforeWrapperWrite: func() {
-					if err := os.WriteFile(material.entry.Wrapper.Path, []byte("#!/bin/sh\nprintf replacement > \"$3\"\n"), 0o700); err != nil {
-						t.Fatal(err)
-					}
-				}}
-			},
-		},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			material := newGitArchivePolicyMaterial(t)
-			setFakeAuditWrapperForTest(t, &material, "#!/bin/sh\nprintf frozen-original > \"$3\"\n")
-			snapshot := materializeSnapshotForExecutorTest(t, material, "audit_run_toctou_001")
-			invocation, err := prepareAuditInvocation(material.policy, material.entry, snapshot, "audit_run_toctou_001", "audit_run_toctou_001", auditResume{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			result, err := runAuditInvocation(context.Background(), material.policy, material.entry, invocation, testCase.hooks(t, &material))
-			if err != nil || result.ExitCode != 0 {
-				t.Fatalf("frozen wrapper result = %+v, %v", result, err)
-			}
-			contents, err := os.ReadFile(invocation.OutputPath)
-			if err != nil || string(contents) != "frozen-original" {
-				t.Fatalf("frozen wrapper output = %q, %v", contents, err)
-			}
-		})
-	}
-}
-
 func TestAuditInvocationRejectsWrapperMutationBeforeFreeze(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("Darwin sandbox contract")
 	}
 	material := newGitArchivePolicyMaterial(t)
-	setFakeAuditWrapperForTest(t, &material, "#!/bin/sh\nprintf frozen-original > \"$3\"\n")
+	setNativeFakeAuditOMPForTest(t, &material, fakeAuditOMPFixture{Scenario: "report", Output: "frozen-original"})
+
 	snapshot := materializeSnapshotForExecutorTest(t, material, "audit_run_prefreeze_001")
 	invocation, err := prepareAuditInvocation(material.policy, material.entry, snapshot, "audit_run_prefreeze_001", "audit_run_prefreeze_001", auditResume{})
 	if err != nil {
@@ -288,7 +303,8 @@ func TestAuditInvocationFrozenWrapperBoundaryStillRejectsModelsMutation(t *testi
 		t.Skip("Darwin sandbox contract")
 	}
 	material := newGitArchivePolicyMaterial(t)
-	setFakeAuditWrapperForTest(t, &material, "#!/bin/sh\nprintf frozen-original > \"$3\"\n")
+	setNativeFakeAuditOMPForTest(t, &material, fakeAuditOMPFixture{Scenario: "report", Output: "frozen-original"})
+
 	snapshot := materializeSnapshotForExecutorTest(t, material, "audit_run_frozen_models_001")
 	invocation, err := prepareAuditInvocation(material.policy, material.entry, snapshot, "audit_run_frozen_models_001", "audit_run_frozen_models_001", auditResume{})
 	if err != nil {
@@ -313,7 +329,8 @@ func TestAuditInvocationHardTimeoutConfirmsTERMExitBeforeTimedOut(t *testing.T) 
 		t.Skip("Darwin process identity contract")
 	}
 	material := newGitArchivePolicyMaterial(t)
-	setFakeAuditWrapperForTest(t, &material, "#!/bin/sh\ntrap 'exit 0' TERM\n/bin/sleep 30\n")
+	setNativeFakeAuditOMPForTest(t, &material, fakeAuditOMPFixture{Scenario: "hang"})
+
 	snapshot := materializeSnapshotForExecutorTest(t, material, "audit_run_hard_timeout_001")
 	invocation, err := prepareAuditInvocation(material.policy, material.entry, snapshot, "audit_run_hard_timeout_001", "audit_run_hard_timeout_001", auditResume{})
 	if err != nil {
@@ -367,50 +384,22 @@ func TestDarwinAuditSandboxDeniesPrivateAuthorityParentAndLocalEndpoints(t *test
 	defer tcpListener.Close()
 	material.policy.setProtectedPaths(append(protected, material.policyPath, unixPath)...)
 	originalPath := filepath.Join(material.entry.Repository.Path, "audit.txt")
-	script := fmt.Sprintf(`#!/bin/sh
-set -eu
-[ "$SUDO_API_KEY" = "selected-route-credential" ]
-[ "${OPENAI_API_KEY+x}" != x ]
-for path in %q %q %q %q %q %q %q %q; do
-  if /bin/cat "$path" >/dev/null 2>&1; then exit 80; fi
-done
-if /bin/ps -p "$PPID" -o command= >/dev/null 2>&1; then exit 81; fi
-if /bin/kill -0 "$PPID" >/dev/null 2>&1; then exit 82; fi
-if /usr/bin/nc -z -w 1 -U %q >/dev/null 2>&1; then exit 83; fi
-if /usr/bin/nc -z -w 1 %s >/dev/null 2>&1; then exit 84; fi
-broker=$(/usr/bin/sed -n 's|^[[:space:]]*baseUrl: http://\([^/]*\)/v1$|\1|p' "$PI_CODING_AGENT_DIR/models.yml")
-broker_host=${broker%%:*}
-broker_port=${broker##*:}
-[ -n "$broker_host" ] && [ -n "$broker_port" ] || exit 85
-if ! /usr/bin/nc -z -w 1 "$broker_host" "$broker_port" >/dev/null 2>&1; then exit 85; fi
-if /usr/bin/nc -z -w 1 93.184.216.34 443 >/dev/null 2>&1; then exit 86; fi
-if /usr/bin/nc -z -w 1 api.anthropic.com 443 >/dev/null 2>&1; then exit 87; fi
-if /bin/sh -c 'printf tamper > "$1"' sh "$PWD/audit.txt" 2>/dev/null; then exit 88; fi
-if /bin/sh -c 'printf tamper > "$1"' sh %q 2>/dev/null; then exit 89; fi
-native_addon="$XDG_DATA_HOME/omp/natives/17.1.3/pi_natives.darwin-arm64.node"
-case "$native_addon" in
-  /var/*) native_alias="/private$native_addon" ;;
-  /private/var/*) native_alias="${native_addon#/private}" ;;
-  *) exit 79 ;;
-esac
-if /bin/sh -c 'printf tamper > "$1"' sh "$native_addon" 2>/dev/null; then exit 90; fi
-if /bin/mkdir "${native_addon%%/*}/child-mutation" 2>/dev/null; then exit 91; fi
-if /bin/sh -c 'printf tamper > "$1"' sh "$native_alias" 2>/dev/null; then exit 92; fi
-if /bin/mkdir "${native_alias%%/*}/alias-child-mutation" 2>/dev/null; then exit 93; fi
-printf prompt-write > "$2.touch"
-printf temporary > "$TMPDIR/temporary"
-printf session > "$OMP_SESSION_ROOT/session.uuid"
-printf fake-api-and-write-root-success > "$3"
-`, protected[0], protected[1], protected[2], protected[3], protected[4], protected[5], protected[6], material.policyPath,
-		unixPath, tcpListener.Addr().String(), originalPath)
-	setFakeAuditWrapperForTest(t, &material, script, "/bin/sh", "/usr/bin/nc", "/usr/bin/sed")
+	setNativeFakeAuditOMPForTest(t, &material, fakeAuditOMPFixture{
+		Scenario:       "least_authority",
+		Output:         "fake-api-and-write-root-success",
+		OriginalPath:   originalPath,
+		ProtectedPaths: append(append([]string(nil), protected...), material.policyPath),
+		UnixSocketPath: unixPath,
+		TCPAddress:     tcpListener.Addr().String(),
+	})
+
 	material.policy.setProtectedPaths(append(protected, material.policyPath, unixPath)...)
 	snapshot := materializeSnapshotForExecutorTest(t, material, "audit_run_least_authority_001")
 	invocation, err := prepareAuditInvocation(material.policy, material.entry, snapshot, "audit_run_least_authority_001", "audit_run_least_authority_001", auditResume{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("SUDO_API_KEY", "selected-route-credential")
+	t.Setenv("SUDO_CODING_KEY", "selected-route-credential")
 	t.Setenv("OPENAI_API_KEY", "unselected-route-credential")
 	var brokerAddress, sandboxProfile string
 	result, err := runAuditInvocation(context.Background(), material.policy, material.entry, invocation, auditInvocationHooks{
@@ -436,7 +425,8 @@ printf fake-api-and-write-root-success > "$3"
 		},
 	})
 	if err != nil || result.ExitCode != 0 {
-		t.Fatalf("least-authority fake wrapper result = %+v, %v", result, err)
+		t.Fatalf("least-authority fake direct OMP result = %+v, %v", result, err)
+
 	}
 	contents, err := os.ReadFile(invocation.OutputPath)
 	if err != nil || string(contents) != "fake-api-and-write-root-success" {
@@ -452,6 +442,23 @@ printf fake-api-and-write-root-success > "$3"
 	}
 	nativeAddonPath := result.boundInvocation.NativeAddonPath
 	assertAuditNativeWriteDenyVariants(t, sandboxProfile, nativeAddonPath)
+	for _, path := range sandboxPathVariants(nativeAddonPath) {
+		rule := `(path-ancestors "` + path + `")`
+		if strings.Count(sandboxProfile, rule) != 1 {
+			t.Fatalf("sandbox profile native metadata rule count for %q = %d, want 1:\n%s", rule, strings.Count(sandboxProfile, rule), sandboxProfile)
+		}
+	}
+	for _, identity := range append(append([]executionPolicyDirectoryIdentity(nil), material.entry.OMPRuntimeAuthority.ExecutableAncestors...), material.entry.OMPRuntimeAuthority.NativeAddonAncestors...) {
+		for _, path := range sandboxPathVariants(identity.Path) {
+			if path == "/" {
+				continue
+			}
+			rule := `(literal "` + path + `")`
+			if !strings.Contains(sandboxProfile, rule) {
+				t.Fatalf("sandbox profile omitted exact runtime ancestor read-data rule %q:\n%s", rule, sandboxProfile)
+			}
+		}
+	}
 	wantRuntimeRules := []string{
 		`(allow file-read-data (literal "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld") (literal "/dev/dtracehelper"))`,
 		`(allow file-read-metadata (literal "/System/Cryptexes/OS") (literal "/System/Volumes/Data"))`,
@@ -481,18 +488,8 @@ func TestDarwinAuditSandboxOwnsLocalhostGatewayOnIPv4AndIPv6(t *testing.T) {
 	}
 	material := newGitArchivePolicyMaterial(t)
 	const fakeCredential = "sandbox-dual-stack-fake-credential"
-	script := `#!/bin/sh
-set -eu
-broker=$(/usr/bin/sed -n 's|^[[:space:]]*baseUrl: http://\([^/]*\)/v1$|\1|p' "$PI_CODING_AGENT_DIR/models.yml")
-broker_host=${broker%:*}
-broker_port=${broker##*:}
-[ "$broker_host" = "127.0.0.1" ]
-[ "$SUDO_API_KEY" = "` + fakeCredential + `" ]
-if ! /usr/bin/printf 'POST /v1/responses HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}' "$broker" "$SUDO_API_KEY" | /usr/bin/nc -4 -w 2 127.0.0.1 "$broker_port" | /usr/bin/grep -q '^HTTP/1.1 502 Bad Gateway'; then exit 94; fi
-if ! /usr/bin/printf 'POST /v1/responses HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}' "$broker" "$SUDO_API_KEY" | /usr/bin/nc -6 -w 2 ::1 "$broker_port" | /usr/bin/grep -q '^HTTP/1.1 502 Bad Gateway'; then exit 95; fi
-/usr/bin/printf dual-stack-gateway > "$3"
-`
-	setFakeAuditWrapperForTest(t, &material, script, "/usr/bin/grep", "/usr/bin/nc", "/usr/bin/printf", "/usr/bin/sed")
+	setNativeFakeAuditOMPForTest(t, &material, fakeAuditOMPFixture{Scenario: "dual_stack", Output: "dual-stack-gateway"})
+
 	var gatewayDials atomic.Int32
 	dependencies := material.policy.testBrokerDependencies
 	dependencies.DialContext = func(context.Context, string, string) (net.Conn, error) {
@@ -505,7 +502,7 @@ if ! /usr/bin/printf 'POST /v1/responses HTTP/1.1\r\nHost: %s\r\nAuthorization: 
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("SUDO_API_KEY", fakeCredential)
+	t.Setenv("SUDO_CODING_KEY", fakeCredential)
 	var sandboxProfile string
 	result, err := runAuditInvocation(context.Background(), material.policy, material.entry, invocation, auditInvocationHooks{
 		BrokerReady: func(address, profile string) {
@@ -545,6 +542,411 @@ if ! /usr/bin/printf 'POST /v1/responses HTTP/1.1\r\nHost: %s\r\nAuthorization: 
 
 const auditGatewayIPv6BindProbeEnvironment = "ANANKE_TEST_AUDIT_GATEWAY_IPV6_BIND_AUTHORITY"
 
+type auditSessionJSONLTestSpec struct {
+	UUID       string
+	CWD        string
+	Prompt     string
+	PathRefs   []string
+	Additional []any
+}
+
+func TestAuditFreshSessionArtifactAllowsAuthenticatedInvocationOwnedPaths(t *testing.T) {
+	material := newGitArchivePolicyMaterial(t)
+	snapshot := materializeSnapshotForExecutorTest(t, material, "audit_run_fresh_session_001")
+	invocation, err := prepareAuditInvocation(material.policy, material.entry, snapshot, "audit_run_fresh_session_001", "audit_run_fresh_session_001", auditResume{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := authenticatedFreshAuditSessionSpecForTest(t, invocation)
+	writeAuditSessionJSONLForTest(t, filepath.Join(invocation.SessionDir, "fresh.jsonl"), spec)
+	if err := scanAuditInvocationWritableTrees(material.policy, material.entry, invocation); err != nil {
+		t.Fatalf("authenticated fresh session artifact rejected: %v", err)
+	}
+}
+
+func TestAuditArtifactScanFailuresAreClosedAndTyped(t *testing.T) {
+	type scanCase struct {
+		name      string
+		wantClass string
+		wantCause error
+		mutate    func(*testing.T, *gitArchivePolicyMaterial, auditInvocation)
+		scan      func(*executionPolicy, executionPolicyEntry, auditInvocation) error
+	}
+	cases := []scanCase{
+		{
+			name: "walk", wantClass: "artifact_scan_prompt_walk", wantCause: ErrAuthentication,
+			mutate: func(t *testing.T, _ *gitArchivePolicyMaterial, invocation auditInvocation) {
+				if err := os.RemoveAll(invocation.PromptDir); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "symlink", wantClass: "artifact_scan_session_symlink", wantCause: ErrAuthentication,
+			mutate: func(t *testing.T, _ *gitArchivePolicyMaterial, invocation auditInvocation) {
+				target := filepath.Join(t.TempDir(), "target")
+				if err := os.WriteFile(target, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, filepath.Join(invocation.SessionDir, "session-link")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "special", wantClass: "artifact_scan_temporary_special", wantCause: ErrAuthentication,
+			mutate: func(t *testing.T, _ *gitArchivePolicyMaterial, invocation auditInvocation) {
+				if err := syscall.Mkfifo(filepath.Join(invocation.TemporaryDir, "special"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "limit", wantClass: "artifact_scan_output_limit", wantCause: ErrLimit,
+			mutate: func(t *testing.T, _ *gitArchivePolicyMaterial, invocation auditInvocation) {
+				for index := range maxAuditTreeScanFiles {
+					if err := os.WriteFile(filepath.Join(invocation.OutputDir, "artifact-"+strconv.Itoa(index)), nil, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+		},
+		{
+			name: "read", wantClass: "artifact_scan_output_read", wantCause: ErrAuthentication,
+			mutate: func(t *testing.T, _ *gitArchivePolicyMaterial, invocation auditInvocation) {
+				path := filepath.Join(invocation.OutputDir, "unreadable")
+				if err := os.WriteFile(path, []byte("bounded"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(path, 0o200); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "timeout secret", wantClass: "artifact_scan_session_timeout_secret", wantCause: ErrAuthentication,
+			mutate: func(t *testing.T, _ *gitArchivePolicyMaterial, invocation auditInvocation) {
+				t.Setenv("SUDO_API_KEY", "timeout-secret-must-not-leak")
+				if err := os.WriteFile(filepath.Join(invocation.SessionDir, "timeout.jsonl"), []byte("timeout-secret-must-not-leak"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			scan: func(policy *executionPolicy, entry executionPolicyEntry, invocation auditInvocation) error {
+				sessionPath := filepath.Join(invocation.SessionDir, "timeout.jsonl")
+				return scanAuditInvocationWritableTreesExcept(policy, entry, invocation, invocation.OutputPath, auditTimeoutEvidence{SessionPath: sessionPath})
+			},
+		},
+		{
+			name: "fresh authentication", wantClass: "artifact_scan_session_fresh_authentication", wantCause: ErrAuthentication,
+			mutate: func(t *testing.T, _ *gitArchivePolicyMaterial, invocation auditInvocation) {
+				if err := os.WriteFile(filepath.Join(invocation.SessionDir, "fresh.jsonl"), []byte("{malformed\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "fresh authority", wantClass: "artifact_scan_session_fresh_authority", wantCause: ErrAuthentication,
+			mutate: func(t *testing.T, _ *gitArchivePolicyMaterial, invocation auditInvocation) {
+				t.Setenv("SUDO_API_KEY", "fresh-secret-must-not-leak")
+				spec := authenticatedFreshAuditSessionSpecForTest(t, invocation)
+				spec.Additional = append(spec.Additional, map[string]any{"credential": "fresh-secret-must-not-leak"})
+				writeAuditSessionJSONLForTest(t, filepath.Join(invocation.SessionDir, "fresh.jsonl"), spec)
+			},
+		},
+		{
+			name: "authority", wantClass: "artifact_scan_temporary_authority_temporary_root_repository", wantCause: ErrAuthentication,
+			mutate: func(t *testing.T, material *gitArchivePolicyMaterial, invocation auditInvocation) {
+				if err := os.WriteFile(filepath.Join(invocation.TemporaryDir, "authority"), []byte(material.entry.Repository.Path), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "protected", wantClass: "artifact_scan_output_protected", wantCause: ErrAuthentication,
+			mutate: func(t *testing.T, material *gitArchivePolicyMaterial, invocation auditInvocation) {
+				const protected = "/fixture/closed-protected-path"
+				material.policy.protectedPaths = []string{protected}
+				if err := os.WriteFile(filepath.Join(invocation.OutputDir, "protected"), []byte(protected), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			material := newGitArchivePolicyMaterial(t)
+			runID := "audit_run_scan_class_" + strconv.Itoa(len(testCase.name))
+			snapshot := materializeSnapshotForExecutorTest(t, material, runID)
+			invocation, err := prepareAuditInvocation(material.policy, material.entry, snapshot, runID, runID, auditResume{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			testCase.mutate(t, &material, invocation)
+			scan := testCase.scan
+			if scan == nil {
+				scan = scanAuditInvocationWritableTrees
+			}
+			err = scan(material.policy, material.entry, invocation)
+			var failure *auditArtifactScanError
+			if !errors.As(err, &failure) || failure.failureClass() != testCase.wantClass || err.Error() != testCase.wantClass {
+				t.Fatalf("scan error = %T %v, class %q, want typed class %q", err, err, failure.failureClass(), testCase.wantClass)
+			}
+			if !errors.Is(err, testCase.wantCause) {
+				t.Fatalf("scan error = %v, want errors.Is(..., %v)", err, testCase.wantCause)
+			}
+			if !protocolIdentifierPattern.MatchString(failure.failureClass()) {
+				t.Fatalf("scan class is not a protocol identifier: %q", failure.failureClass())
+			}
+		})
+	}
+}
+
+func TestAuditArtifactScanFailureVocabularyIsClosed(t *testing.T) {
+	roles := []auditArtifactScanRole{
+		auditArtifactScanRolePrompt,
+		auditArtifactScanRoleOutput,
+		auditArtifactScanRoleSession,
+		auditArtifactScanRoleTemporary,
+		auditArtifactScanRoleUnclassified,
+	}
+	reasons := []auditArtifactScanReason{
+		auditArtifactScanReasonWalk,
+		auditArtifactScanReasonSymlink,
+		auditArtifactScanReasonSpecial,
+		auditArtifactScanReasonLimit,
+		auditArtifactScanReasonRead,
+		auditArtifactScanReasonTimeoutSecret,
+		auditArtifactScanReasonFreshAuthentication,
+		auditArtifactScanReasonFreshAuthority,
+		auditArtifactScanReasonAuthority,
+		auditArtifactScanReasonProtected,
+	}
+	for _, role := range roles {
+		for _, reason := range reasons {
+			failure := &auditArtifactScanError{role: role, reason: reason, cause: errors.New("sensitive-unbounded-cause")}
+			if reason == auditArtifactScanReasonAuthority {
+				failure.authorityKind = auditAuthorityKindRepository
+				if role == auditArtifactScanRoleTemporary {
+					failure.temporaryLocation = auditArtifactTemporaryLocationOther
+				}
+			}
+			class := failure.failureClass()
+			if !protocolIdentifierPattern.MatchString(class) || failure.Error() != class || strings.Contains(failure.Error(), "sensitive") {
+				t.Fatalf("role %q reason %q produced unsafe class/error %q/%q", role, reason, class, failure.Error())
+			}
+		}
+	}
+	for _, failure := range []*auditArtifactScanError{
+		{role: "path", reason: auditArtifactScanReasonRead, cause: ErrAuthentication},
+		{role: auditArtifactScanRoleSession, reason: "content", cause: ErrAuthentication},
+	} {
+		if class := failure.failureClass(); class != "" {
+			t.Fatalf("open scanner vocabulary produced class %q", class)
+		}
+	}
+}
+
+func TestAuditTemporaryArtifactAuthorityLocationVocabularyIsClosed(t *testing.T) {
+	invocation := auditInvocation{
+		TemporaryDir: "/closed-temporary",
+		AgentDir:     "/closed-temporary/omp-agent",
+		HomeDir:      "/closed-temporary/home",
+	}
+	for _, testCase := range []struct {
+		name string
+		path string
+		want auditArtifactTemporaryLocation
+	}{
+		{name: "agent", path: "/closed-temporary/omp-agent/nested/artifact", want: auditArtifactTemporaryLocationAgent},
+		{name: "home", path: "/closed-temporary/home/artifact", want: auditArtifactTemporaryLocationHome},
+		{name: "temporary root", path: "/closed-temporary/artifact", want: auditArtifactTemporaryLocationRoot},
+		{name: "other temporary", path: "/closed-temporary/supervisor_tests/artifact", want: auditArtifactTemporaryLocationOther},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			location := classifyAuditArtifactTemporaryLocation(invocation, testCase.path)
+			failure := &auditArtifactScanError{
+				role: auditArtifactScanRoleTemporary, reason: auditArtifactScanReasonAuthority,
+				authorityKind: auditAuthorityKindWorkPath, temporaryLocation: location,
+				cause: errors.New("sensitive-unbounded-cause"),
+			}
+			wantClass := "artifact_scan_temporary_authority_" + string(testCase.want) + "_work_path"
+			if location != testCase.want || failure.failureClass() != wantClass || failure.Error() != wantClass || strings.Contains(failure.Error(), "sensitive") {
+				t.Fatalf("temporary path classified as location/class/error %q/%q/%q, want %q/%q", location, failure.failureClass(), failure.Error(), testCase.want, wantClass)
+			}
+		})
+	}
+	if location := classifyAuditArtifactTemporaryLocation(invocation, "/outside/artifact"); location != "" {
+		t.Fatalf("outside path received temporary location %q", location)
+	}
+	for _, failure := range []*auditArtifactScanError{
+		{
+			role: auditArtifactScanRoleTemporary, reason: auditArtifactScanReasonAuthority,
+			authorityKind: "raw-kind", temporaryLocation: auditArtifactTemporaryLocationHome,
+			cause: errors.New("sensitive-unbounded-cause"),
+		},
+		{
+			role: auditArtifactScanRoleTemporary, reason: auditArtifactScanReasonAuthority,
+			authorityKind: auditAuthorityKindWorkPath, temporaryLocation: "raw-location",
+			cause: errors.New("sensitive-unbounded-cause"),
+		},
+	} {
+		if class := failure.failureClass(); class != "" || strings.Contains(failure.Error(), "sensitive") {
+			t.Fatalf("open authority vocabulary produced class/error %q/%q", class, failure.Error())
+		}
+	}
+}
+
+func TestAuditFreshSessionArtifactDenialVectorsFailClosed(t *testing.T) {
+	type denialCase struct {
+		name      string
+		wantLimit bool
+		create    func(*testing.T, gitArchivePolicyMaterial, auditInvocation, string, auditSessionJSONLTestSpec)
+	}
+	writeValid := func(t *testing.T, _ gitArchivePolicyMaterial, _ auditInvocation, path string, spec auditSessionJSONLTestSpec) {
+		writeAuditSessionJSONLForTest(t, path, spec)
+	}
+	for _, testCase := range []denialCase{
+		{name: "malformed JSONL", create: func(t *testing.T, _ gitArchivePolicyMaterial, invocation auditInvocation, path string, _ auditSessionJSONLTestSpec) {
+			if err := os.WriteFile(path, []byte("{malformed\n"+invocation.WorkDir), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "non JSONL", create: func(t *testing.T, _ gitArchivePolicyMaterial, _ auditInvocation, path string, spec auditSessionJSONLTestSpec) {
+			writeAuditSessionJSONLForTest(t, strings.TrimSuffix(path, ".jsonl")+".log", spec)
+		}},
+		{name: "symlink", create: func(t *testing.T, _ gitArchivePolicyMaterial, _ auditInvocation, path string, spec auditSessionJSONLTestSpec) {
+			target := filepath.Join(t.TempDir(), "foreign.jsonl")
+			writeAuditSessionJSONLForTest(t, target, spec)
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "special file", create: func(t *testing.T, _ gitArchivePolicyMaterial, _ auditInvocation, path string, _ auditSessionJSONLTestSpec) {
+			if err := syscall.Mkfifo(path, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "nested artifact", create: func(t *testing.T, _ gitArchivePolicyMaterial, invocation auditInvocation, _ string, spec auditSessionJSONLTestSpec) {
+			nested := filepath.Join(invocation.SessionDir, "nested")
+			if err := os.Mkdir(nested, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeAuditSessionJSONLForTest(t, filepath.Join(nested, "fresh.jsonl"), spec)
+		}},
+		{name: "wrong UUID", create: func(t *testing.T, material gitArchivePolicyMaterial, invocation auditInvocation, path string, spec auditSessionJSONLTestSpec) {
+			spec.UUID = "not-a-session-uuid"
+			writeValid(t, material, invocation, path, spec)
+		}},
+		{name: "wrong CWD", create: func(t *testing.T, material gitArchivePolicyMaterial, invocation auditInvocation, path string, spec auditSessionJSONLTestSpec) {
+			spec.CWD = filepath.Join(spec.CWD, "foreign")
+			writeValid(t, material, invocation, path, spec)
+		}},
+		{name: "wrong prompt", create: func(t *testing.T, material gitArchivePolicyMaterial, invocation auditInvocation, path string, spec auditSessionJSONLTestSpec) {
+			spec.Prompt += "\nforeign prompt"
+			writeValid(t, material, invocation, path, spec)
+		}},
+		{name: "credential bytes", create: func(t *testing.T, material gitArchivePolicyMaterial, invocation auditInvocation, path string, spec auditSessionJSONLTestSpec) {
+			t.Setenv("SUDO_API_KEY", "fresh-session-credential-must-not-leak")
+			spec.Additional = append(spec.Additional, map[string]any{"credential": "fresh-session-credential-must-not-leak"})
+			writeValid(t, material, invocation, path, spec)
+		}},
+		{name: "original repository path", create: func(t *testing.T, material gitArchivePolicyMaterial, invocation auditInvocation, path string, spec auditSessionJSONLTestSpec) {
+			spec.Additional = append(spec.Additional, map[string]any{"path": material.entry.Repository.Path})
+			writeValid(t, material, invocation, path, spec)
+		}},
+		{name: "wrapper path", create: func(t *testing.T, material gitArchivePolicyMaterial, invocation auditInvocation, path string, spec auditSessionJSONLTestSpec) {
+			spec.Additional = append(spec.Additional, map[string]any{"path": material.entry.Wrapper.Path})
+			writeValid(t, material, invocation, path, spec)
+		}},
+		{name: "protected path", create: func(t *testing.T, material gitArchivePolicyMaterial, invocation auditInvocation, path string, spec auditSessionJSONLTestSpec) {
+			if len(material.policy.protectedPaths) == 0 {
+				t.Fatal("test policy has no protected paths")
+			}
+			spec.Additional = append(spec.Additional, map[string]any{"path": material.policy.protectedPaths[0]})
+			writeValid(t, material, invocation, path, spec)
+		}},
+		{name: "stale invocation path", create: func(t *testing.T, material gitArchivePolicyMaterial, invocation auditInvocation, path string, spec auditSessionJSONLTestSpec) {
+			spec.Additional = append(spec.Additional, map[string]any{"path": filepath.Join(material.entry.WorkRoot, "stale", "source")})
+			writeValid(t, material, invocation, path, spec)
+		}},
+		{name: "foreign path", create: func(t *testing.T, material gitArchivePolicyMaterial, invocation auditInvocation, path string, spec auditSessionJSONLTestSpec) {
+			spec.Additional = append(spec.Additional, map[string]any{"path": "/private/var/tmp/ananke-foreign-session-path"})
+			writeValid(t, material, invocation, path, spec)
+		}},
+		{name: "too many artifacts", wantLimit: true, create: func(t *testing.T, material gitArchivePolicyMaterial, invocation auditInvocation, path string, spec auditSessionJSONLTestSpec) {
+			writeValid(t, material, invocation, path, spec)
+			for index := range maxAuditTreeScanFiles {
+				if err := os.WriteFile(filepath.Join(invocation.SessionDir, "artifact-"+strconv.Itoa(index)), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}},
+		{name: "oversized artifact", wantLimit: true, create: func(t *testing.T, material gitArchivePolicyMaterial, invocation auditInvocation, path string, spec auditSessionJSONLTestSpec) {
+			spec.Additional = append(spec.Additional, map[string]any{"blob": strings.Repeat("x", maxAuditTreeScanBytes)})
+			writeValid(t, material, invocation, path, spec)
+		}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			material := newGitArchivePolicyMaterial(t)
+			runID := "audit_run_fresh_deny_" + strconv.Itoa(len(testCase.name))
+			snapshot := materializeSnapshotForExecutorTest(t, material, runID)
+			invocation, err := prepareAuditInvocation(material.policy, material.entry, snapshot, runID, runID, auditResume{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec := authenticatedFreshAuditSessionSpecForTest(t, invocation)
+			testCase.create(t, material, invocation, filepath.Join(invocation.SessionDir, "fresh.jsonl"), spec)
+			err = scanAuditInvocationWritableTrees(material.policy, material.entry, invocation)
+			if err == nil || testCase.wantLimit && !errors.Is(err, ErrLimit) || !testCase.wantLimit && !errors.Is(err, ErrAuthentication) {
+				t.Fatalf("denial vector error = %v, want %v", err, map[bool]error{true: ErrLimit, false: ErrAuthentication}[testCase.wantLimit])
+			}
+		})
+	}
+}
+
+func authenticatedFreshAuditSessionSpecForTest(t *testing.T, invocation auditInvocation) auditSessionJSONLTestSpec {
+	t.Helper()
+	physicalWorkDir, err := filepath.EvalSymlinks(invocation.WorkDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt, err := os.ReadFile(invocation.PromptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return auditSessionJSONLTestSpec{
+		UUID: "019f9a4a-a904-7000-b341-e07ecf0e3baf", CWD: physicalWorkDir, Prompt: string(prompt),
+		PathRefs: []string{
+			invocation.PromptDir, invocation.PromptPath, invocation.OutputDir, invocation.OutputPath,
+			invocation.SessionDir, invocation.TemporaryDir, physicalWorkDir,
+		},
+	}
+}
+
+func writeAuditSessionJSONLForTest(t *testing.T, path string, spec auditSessionJSONLTestSpec) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoder := json.NewEncoder(file)
+	records := []any{
+		map[string]any{"type": "session", "id": spec.UUID, "cwd": spec.CWD},
+		map[string]any{"type": "message", "message": map[string]any{"role": "user", "content": spec.Prompt}},
+		map[string]any{"type": "invocation_paths", "paths": spec.PathRefs},
+	}
+	records = append(records, spec.Additional...)
+	for _, record := range records {
+		if err := encoder.Encode(record); err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAuditGatewayIPv6BindProbeProcess(t *testing.T) {
 	authority := os.Getenv(auditGatewayIPv6BindProbeEnvironment)
 	if authority == "" {
@@ -578,107 +980,83 @@ func resultBrokerAddressForProfileTest(t *testing.T, profile string) string {
 	return profile[start : start+end]
 }
 
-func TestFrozenAuditWrapperWriterHandlesPartialWritesAndErrors(t *testing.T) {
-	frozen := []byte("#!/bin/sh\nprintf frozen\n")
-	partial := &partialAuditWrapperWriter{maximum: 3}
-	if err := writeFrozenAuditWrapper(partial, frozen, time.Second); err != nil {
-		t.Fatalf("partial frozen wrapper write: %v", err)
-	}
-	if !partial.closed || !bytes.Equal(partial.Bytes(), frozen) || partial.deadline.IsZero() {
-		t.Fatalf("partial writer lifecycle = closed %v, bytes %q, deadline %v", partial.closed, partial.Bytes(), partial.deadline)
-	}
-	failing := &partialAuditWrapperWriter{maximum: 2, failAfter: 4}
-	if err := writeFrozenAuditWrapper(failing, frozen, time.Second); !errors.Is(err, ErrAuthentication) || !failing.closed {
-		t.Fatalf("failing writer result = %v, closed %v", err, failing.closed)
+type fakeAuditOMPFixture struct {
+	Scenario                    string   `json:"scenario"`
+	Output                      string   `json:"output,omitempty"`
+	ResumeOutput                string   `json:"resume_output,omitempty"`
+	SessionUUID                 string   `json:"session_uuid,omitempty"`
+	ExitCode                    int      `json:"exit_code,omitempty"`
+	DelayMilliseconds           int      `json:"delay_milliseconds,omitempty"`
+	OriginalPath                string   `json:"original_path,omitempty"`
+	ExpectedGitExecutablePath   string   `json:"expected_git_executable_path,omitempty"`
+	ProtectedPaths              []string `json:"protected_paths,omitempty"`
+	UnixSocketPath              string   `json:"unix_socket_path,omitempty"`
+	TCPAddress                  string   `json:"tcp_address,omitempty"`
+	SpoofLog                    string   `json:"spoof_log,omitempty"`
+	EmitCredential              bool     `json:"emit_credential,omitempty"`
+	WriteCredentialArtifacts    bool     `json:"write_credential_artifacts,omitempty"`
+	WriteTemporaryWorkAuthority bool     `json:"write_temporary_work_authority,omitempty"`
+	FreshSessionMode            string   `json:"fresh_session_mode,omitempty"`
+}
+
+func TestNativeFakeAuditOMPRejectsCallerSelectedGitPath(t *testing.T) {
+	entry := executionPolicyEntry{GitExecutable: executionPolicyFileIdentity{Path: auditGitExecutable}}
+	fixture := fakeAuditOMPFixture{Scenario: "git_startup_boundary", ExpectedGitExecutablePath: "/usr/bin/git"}
+	if _, err := bindFakeAuditOMPFixtureGitExecutable(entry, fixture); !errors.Is(err, ErrAuthentication) {
+		t.Fatalf("caller-selected fake OMP Git path error = %v, want %v", err, ErrAuthentication)
 	}
 }
 
-func TestFrozenAuditWrapperWriterBoundsEarlyCloseAndHang(t *testing.T) {
-	t.Run("early reader close", func(t *testing.T) {
-		reader, writer, err := os.Pipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := reader.Close(); err != nil {
-			t.Fatal(err)
-		}
-		if err := writeFrozenAuditWrapper(writer, []byte("#!/bin/sh\nexit 0\n"), time.Second); !errors.Is(err, ErrAuthentication) {
-			t.Fatalf("early-close writer error = %v, want %v", err, ErrAuthentication)
-		}
-	})
-	t.Run("reader never consumes", func(t *testing.T) {
-		reader, writer, err := os.Pipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer reader.Close()
-		started := time.Now()
-		err = writeFrozenAuditWrapper(writer, bytes.Repeat([]byte{'x'}, 2*1024*1024), 25*time.Millisecond)
-		if !errors.Is(err, ErrAuthentication) || time.Since(started) > time.Second {
-			t.Fatalf("hung writer error = %v after %v", err, time.Since(started))
-		}
-	})
+func bindFakeAuditOMPFixtureGitExecutable(entry executionPolicyEntry, fixture fakeAuditOMPFixture) (fakeAuditOMPFixture, error) {
+	if entry.GitExecutable.Path != auditGitExecutable ||
+		fixture.ExpectedGitExecutablePath != "" && fixture.ExpectedGitExecutablePath != entry.GitExecutable.Path {
+		return fakeAuditOMPFixture{}, authenticationError("fake OMP Git executable binding")
+	}
+	fixture.ExpectedGitExecutablePath = entry.GitExecutable.Path
+	return fixture, nil
 }
 
-func TestAuditCommandStartFailureClosesPrivatePipe(t *testing.T) {
-	reader, writer, err := os.Pipe()
+func installNativeFakeAuditOMPForTest(t *testing.T, entry *executionPolicyEntry, fixture fakeAuditOMPFixture) {
+	t.Helper()
+	if entry == nil || fixture.Scenario == "" {
+		t.Fatal("invalid native fake OMP fixture")
+	}
+	var err error
+	fixture, err = bindFakeAuditOMPFixtureGitExecutable(*entry, fixture)
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(filepath.Join(t.TempDir(), "missing-sandbox"))
-	if err := startAuditCommand(command, reader, writer); !errors.Is(err, ErrAuthentication) {
-		t.Fatalf("start failure = %v, want %v", err, ErrAuthentication)
-	}
-	if _, err := writer.Write([]byte("must-not-block")); err == nil {
-		t.Fatal("writer remained open after command start failure")
-	}
-}
-
-type partialAuditWrapperWriter struct {
-	bytes.Buffer
-	maximum   int
-	failAfter int
-	closed    bool
-	deadline  time.Time
-}
-
-func (writer *partialAuditWrapperWriter) Write(value []byte) (int, error) {
-	if writer.failAfter > 0 && writer.Len() >= writer.failAfter {
-		return 0, errors.New("injected writer failure")
-	}
-	if len(value) > writer.maximum {
-		value = value[:writer.maximum]
-	}
-	return writer.Buffer.Write(value)
-}
-
-func (writer *partialAuditWrapperWriter) Close() error {
-	writer.closed = true
-	return nil
-}
-
-func (writer *partialAuditWrapperWriter) SetWriteDeadline(deadline time.Time) error {
-	writer.deadline = deadline
-	return nil
-}
-
-func setFakeAuditWrapperForTest(t *testing.T, material *gitArchivePolicyMaterial, script string, executablePaths ...string) {
-	t.Helper()
-	if err := os.WriteFile(material.entry.Wrapper.Path, []byte(script), 0o700); err != nil {
+	fixtureBytes, err := marshalCanonical(fixture)
+	if err != nil {
 		t.Fatal(err)
 	}
-	material.entry.Wrapper = fileIdentityForTest(t, material.entry.Wrapper.Path)
-	seenExecutables := make(map[string]struct{}, len(material.entry.WrapperExecutables)+len(executablePaths))
-	for _, identity := range material.entry.WrapperExecutables {
-		seenExecutables[identity.Path] = struct{}{}
+	encoded := base64.RawURLEncoding.EncodeToString(fixtureBytes)
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, identity := range fileIdentitiesForTest(t, executablePaths...) {
-		if _, exists := seenExecutables[identity.Path]; exists {
-			continue
-		}
-		material.entry.WrapperExecutables = append(material.entry.WrapperExecutables, identity)
-		seenExecutables[identity.Path] = struct{}{}
+	if err := os.Chmod(entry.OMPExecutable.Path, 0o700); err != nil {
+		t.Fatal(err)
 	}
+	if err := os.Remove(entry.OMPExecutable.Path); err != nil {
+		t.Fatal(err)
+	}
+	linkerFlags := "-X main.encodedSpec=" + encoded + " -X main.expectedGitExecutablePath=" + entry.GitExecutable.Path
+	command := exec.Command("go", "build", "-trimpath", "-ldflags", linkerFlags, "-o", entry.OMPExecutable.Path, "./internal/trustedsupervisor/testdata/fakeomp")
+	command.Dir = root
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build native fake OMP: %v: %s", err, output)
+	}
+	if err := os.Chmod(entry.OMPExecutable.Path, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	entry.OMPExecutable = fileIdentityForTest(t, entry.OMPExecutable.Path)
+	entry.OMPRuntimeAuthority = executionPolicyAtomicRuntimeAuthorityForTest(t, *entry)
+}
+
+func setNativeFakeAuditOMPForTest(t *testing.T, material *gitArchivePolicyMaterial, fixture fakeAuditOMPFixture) {
+	t.Helper()
+	installNativeFakeAuditOMPForTest(t, &material.entry, fixture)
 	material.entry = mustSealExecutionPolicyEntryForTest(t, material.entry)
 	writeExecutionPolicyFileForTest(t, material.policyPath, []executionPolicyEntry{material.entry})
 	policy, err := loadExecutionPolicyForTest(material.policyPath, uint32(os.Getuid()))

@@ -43,6 +43,80 @@ func TestExecutionPolicyLoadsCanonicalPinnedLaunchEntry(t *testing.T) {
 	}
 }
 
+func TestExecutionPolicyRequiresExactRootOwnedCommandLineToolsGit(t *testing.T) {
+	const expectedGitPath = "/Library/Developer/CommandLineTools/usr/bin/git"
+	if auditGitExecutable != expectedGitPath {
+		t.Errorf("production Git path = %q, want exact CLT Git %q", auditGitExecutable, expectedGitPath)
+	}
+	exact := fileIdentityForTest(t, expectedGitPath)
+	if err := validateGitExecutableIdentity(exact); err != nil {
+		t.Errorf("exact root-owned CLT Git rejected: %v", err)
+	}
+
+	rejected := []struct {
+		name     string
+		identity executionPolicyFileIdentity
+	}{
+		{name: "xcselect forwarding Git", identity: fileIdentityForTest(t, "/usr/bin/git")},
+		{name: "active Xcode Git", identity: func() executionPolicyFileIdentity {
+			identity := exact
+			identity.Path = "/Applications/Xcode.app/Contents/Developer/usr/bin/git"
+			return identity
+		}()},
+		{name: "active Xcode-beta Git", identity: func() executionPolicyFileIdentity {
+			identity := exact
+			identity.Path = "/Applications/Xcode-beta.app/Contents/Developer/usr/bin/git"
+			return identity
+		}()},
+		{name: "user-owned Git", identity: func() executionPolicyFileIdentity {
+			identity := exact
+			identity.OwnerUID = 501
+			return identity
+		}()},
+		{name: "missing CLT Git identity", identity: executionPolicyFileIdentity{Path: expectedGitPath, OwnerUID: 0}},
+		{name: "hash drift", identity: func() executionPolicyFileIdentity {
+			identity := exact
+			identity.SHA256 = testHash("drifted-clt-git")
+			return identity
+		}()},
+		{name: "inode drift", identity: func() executionPolicyFileIdentity {
+			identity := exact
+			identity.Inode = statDecimal(1)
+			return identity
+		}()},
+		{name: "device drift", identity: func() executionPolicyFileIdentity {
+			identity := exact
+			identity.Device = statDecimal(1)
+			return identity
+		}()},
+		{name: "owner drift", identity: func() executionPolicyFileIdentity {
+			identity := exact
+			identity.OwnerUID = 1
+			return identity
+		}()},
+		{name: "mode drift", identity: func() executionPolicyFileIdentity {
+			identity := exact
+			identity.Mode = 0o755 ^ 0o100
+			return identity
+		}()},
+	}
+	link := filepath.Join(t.TempDir(), "git")
+	if err := os.Symlink(expectedGitPath, link); err != nil {
+		t.Fatal(err)
+	}
+	rejected = append(rejected, struct {
+		name     string
+		identity executionPolicyFileIdentity
+	}{name: "symlink", identity: fileIdentityForTest(t, link)})
+	for _, testCase := range rejected {
+		t.Run(testCase.name, func(t *testing.T) {
+			if err := validateGitExecutableIdentity(testCase.identity); !errors.Is(err, ErrAuthentication) {
+				t.Fatalf("rejected Git identity error = %v, want %v", err, ErrAuthentication)
+			}
+		})
+	}
+}
+
 func TestReadOnlyAuditPromptTemplateStatesClosedCanonicalContractAndBindsHash(t *testing.T) {
 	for _, required := range []string{
 		"read-only audit",
@@ -117,6 +191,7 @@ func TestRunbookMatchesExecutionPolicySchemaAndNamesInstalledPreflightSeparately
 		"Most executor tests use dynamically created fake route-aware",
 		"Separately, `TestAuditInstalledOMPProviderFreeTransportPreflight`",
 		"provider-free installed OMP v17.1.3 preflight",
+		"current pinned runtime and canary contract accepts only OMP v17.1.8",
 		"fixed fake credential",
 		"local deterministic rejection",
 		"no real model or provider API canary",
@@ -125,6 +200,37 @@ func TestRunbookMatchesExecutionPolicySchemaAndNamesInstalledPreflightSeparately
 		if !strings.Contains(operational, required) {
 			t.Fatalf("runbook operational gate does not state %q", required)
 		}
+	}
+}
+
+func TestExecutionPolicyRejectsStaleCommandLineToolsGitSchemas(t *testing.T) {
+	if executionPolicySchemaVersion != "ananke.local-trusted-supervisor-execution-policy.v7" ||
+		executionPolicyEntrySchemaVersion != "ananke.local-trusted-supervisor-execution-policy-entry.v7" {
+		t.Fatal("execution policy lost the CLT Git schema cutover")
+	}
+	for _, testCase := range []struct {
+		name     string
+		document string
+		entry    string
+	}{
+		{name: "stale document", document: "ananke.local-trusted-supervisor-execution-policy.v6", entry: executionPolicyEntrySchemaVersion},
+		{name: "stale entry", document: executionPolicySchemaVersion, entry: "ananke.local-trusted-supervisor-execution-policy-entry.v6"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			material := newExecutionPolicyTestMaterial(t)
+			material.entry.SchemaVersion = testCase.entry
+			material.entry = mustSealExecutionPolicyEntryForTest(t, material.entry)
+			contents, err := marshalCanonical(executionPolicyFile{SchemaVersion: testCase.document, Executions: []executionPolicyEntry{material.entry}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(material.policyPath, contents, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := loadExecutionPolicyForTest(material.policyPath, uint32(os.Getuid())); !errors.Is(err, ErrAuthentication) {
+				t.Fatalf("stale schema error = %v, want %v", err, ErrAuthentication)
+			}
+		})
 	}
 }
 
@@ -395,7 +501,7 @@ func TestExecutionPolicyAcceptsOnlyExactCustomSudoCredentialDeclarations(t *test
 		wantAccepted bool
 	}{
 		{name: "preferred coding key", provider: "custom:sudo", credentials: []string{"SUDO_CODING_KEY"}, wantAccepted: true},
-		{name: "legacy API key", provider: "custom:sudo", credentials: []string{"SUDO_API_KEY"}, wantAccepted: true},
+		{name: "legacy API key", provider: "custom:sudo", credentials: []string{"SUDO_API_KEY"}},
 		{name: "empty", provider: "custom:sudo"},
 		{name: "both alternatives", provider: "custom:sudo", credentials: []string{"SUDO_CODING_KEY", "SUDO_API_KEY"}},
 		{name: "mixed known names", provider: "custom:sudo", credentials: []string{"SUDO_CODING_KEY", "OPENAI_API_KEY"}},
@@ -602,11 +708,15 @@ func TestExecutionPolicyRejectsInvalidOMPVersionAddonAuthorityAndRoute(t *testin
 		name   string
 		mutate func(*testing.T, *executionPolicyEntry)
 	}{
-		{"OMP version", func(_ *testing.T, entry *executionPolicyEntry) { entry.OMPVersion = "17.1.2" }},
+		{"stale OMP version", func(_ *testing.T, entry *executionPolicyEntry) { entry.OMPVersion = "17.1.3" }},
+		{"other OMP version", func(_ *testing.T, entry *executionPolicyEntry) { entry.OMPVersion = "17.1.2" }},
 		{"addon basename", func(_ *testing.T, entry *executionPolicyEntry) {
 			entry.OMPNativeAddon.Path = filepath.Join(filepath.Dir(entry.OMPNativeAddon.Path), "attacker.node")
 		}},
-		{"addon version directory", func(_ *testing.T, entry *executionPolicyEntry) {
+		{"stale addon version directory", func(_ *testing.T, entry *executionPolicyEntry) {
+			entry.OMPNativeAddon.Path = filepath.Join(filepath.Dir(filepath.Dir(entry.OMPNativeAddon.Path)), "17.1.3", auditOMPNativeAddonFilename)
+		}},
+		{"other addon version directory", func(_ *testing.T, entry *executionPolicyEntry) {
 			entry.OMPNativeAddon.Path = filepath.Join(filepath.Dir(filepath.Dir(entry.OMPNativeAddon.Path)), "17.1.2", auditOMPNativeAddonFilename)
 		}},
 		{"addon overlaps repository", func(_ *testing.T, entry *executionPolicyEntry) {
@@ -625,6 +735,39 @@ func TestExecutionPolicyRejectsInvalidOMPVersionAddonAuthorityAndRoute(t *testin
 			writeExecutionPolicyFileForTest(t, material.policyPath, []executionPolicyEntry{material.entry})
 			if _, err := loadExecutionPolicyForTest(material.policyPath, uint32(os.Getuid())); !errors.Is(err, ErrAuthentication) {
 				t.Fatalf("invalid OMP route policy error = %v, want %v", err, ErrAuthentication)
+			}
+		})
+	}
+}
+
+func TestSupportedOMPVersionAcceptsOnly1718NativeLayout(t *testing.T) {
+	if supportedOMPVersion != "17.1.8" {
+		t.Fatalf("supported OMP version = %q, want sole closed version 17.1.8", supportedOMPVersion)
+	}
+	for _, testCase := range []struct {
+		version string
+		accept  bool
+	}{
+		{version: "17.1.8", accept: true},
+		{version: "17.1.4"},
+		{version: "17.1.3"},
+		{version: "17.1.2"},
+		{version: "18.0.0"},
+	} {
+		t.Run(testCase.version, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), ".omp", "natives", testCase.version, auditOMPNativeAddonFilename)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("pinned-native-layout"), 0o444); err != nil {
+				t.Fatal(err)
+			}
+			err := validateOMPNativeAddonIdentity(testCase.version, fileIdentityForTest(t, path), uint32(os.Getuid()))
+			if testCase.accept && err != nil {
+				t.Fatalf("current OMP native layout rejected: %v", err)
+			}
+			if !testCase.accept && !errors.Is(err, ErrAuthentication) {
+				t.Fatalf("stale/other OMP native layout error = %v, want %v", err, ErrAuthentication)
 			}
 		})
 	}
@@ -694,7 +837,7 @@ func newExecutionPolicyTestMaterial(t *testing.T) executionPolicyTestMaterial {
 	if err := os.WriteFile(ompPath, []byte("#!/bin/sh\nexit 0\n"), 0o500); err != nil {
 		t.Fatal(err)
 	}
-	gitPath := "/usr/bin/git"
+	gitPath := auditGitExecutable
 	envelope := store.ExternalSupervisorEnvelope{
 		LaunchSpecHash: testHash("p5-launch-spec"), RepositoryIdentity: "code.example/operator/p5-audit-target",
 		RouteMappingHash: testHash("p5-route"), AttemptCap: 3,
@@ -709,9 +852,8 @@ func newExecutionPolicyTestMaterial(t *testing.T) executionPolicyTestMaterial {
 		PromptTemplateHash: readOnlyAuditPromptTemplateHash(), RouteMappingHash: envelope.RouteMappingHash,
 		Wrapper: fileIdentityForTest(t, wrapperPath), OMPExecutable: fileIdentityForTest(t, ompPath),
 		OMPExecutableRoot: directoryIdentityForTest(t, ompRoot), OMPVersion: supportedOMPVersion,
-		OMPNativeAddon:     ompNativeAddonIdentityForTest(t, directory, "pinned-home"),
-		WrapperExecutables: fileIdentitiesForTest(t, auditWrapperDependencyPaths()...),
-		HermesProvider:     "custom:sudo", HermesModel: "gpt-5.6-sol",
+		OMPNativeAddon: ompNativeAddonIdentityForTest(t, directory, "pinned-home"),
+		HermesProvider: "custom:sudo", HermesModel: "gpt-5.6-sol",
 		ProviderEndpoint: executionPolicyEndpoint{Hostname: "coding.sudoai.cc", Port: 443},
 		TaskTier:         "normal", InternalDeadlineSeconds: 60, WrapperGraceSeconds: 5, AttemptCap: envelope.AttemptCap,
 		AllowedTests: []executionPolicyTestCommand{executionPolicyTestCommandForTest(t, "focused_go_test", "/usr/bin/true")},
@@ -719,7 +861,7 @@ func newExecutionPolicyTestMaterial(t *testing.T) executionPolicyTestMaterial {
 		WorkRoot: makeRoot("work"), TemporaryRoot: makeRoot("tmp"),
 		RuntimeReadRoots:           directoryIdentitiesForTest(t, "/bin", "/usr/bin", "/usr/lib", "/usr/share", "/System/Library", "/Library/Apple", "/private/var/db/timezone"),
 		ExecutableRoots:            directoryIdentitiesForTest(t, "/bin", "/usr/bin"),
-		CredentialEnvironmentNames: []string{"SUDO_API_KEY"},
+		CredentialEnvironmentNames: []string{"SUDO_CODING_KEY"},
 	}
 	entry = mustSealExecutionPolicyEntryForTest(t, entry)
 	policyPath := filepath.Join(directory, "execution-policy.json")
@@ -813,22 +955,23 @@ func executionPolicyAtomicRuntimeAuthorityForTest(t *testing.T, entry executionP
 	if err != nil {
 		t.Fatal(err)
 	}
-	bootstrap, err := auditOMPBootstrap(entry.OMPExecutable.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
 	nativeDataRoot := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(entry.OMPNativeAddon.Path))))
 	authority := executionPolicyOMPRuntimeAuthority{
-		SchemaVersion:             atomicOMPRuntimeAuthoritySchemaVersion,
-		AuthorityPolicyVersion:    atomicOMPRuntimeAuthorityPolicyVersion,
-		TrustedOwnerUID:           0,
-		ExecutableAncestors:       atomicRuntimeAncestorIdentitiesForTest(t, entry.OMPExecutable.Path),
-		NativeAddonAncestors:      atomicRuntimeAncestorIdentitiesForTest(t, entry.OMPNativeAddon.Path),
-		NativeDataRoot:            nativeDataRoot,
-		DeniedNativeFallbackRoots: []string{filepath.Join(filepath.Dir(nativeDataRoot), "denied-home", ".omp"), filepath.Join(entry.OMPExecutableRoot.Path, "natives")},
-		BootstrapSHA256:           hashJournalBytes(bootstrap),
-		FramedWrapperStreamSHA256: auditFramedOMPWrapperStreamSHA256(bootstrap, wrapper),
-		ArtifactFDPolicy:          atomicOMPRuntimeArtifactFDPolicyParentRetainedCLOEXEC,
+		SchemaVersion:                    atomicOMPRuntimeAuthoritySchemaVersion,
+		AuthorityPolicyVersion:           atomicOMPRuntimeAuthorityPolicyVersion,
+		TrustedOwnerUID:                  0,
+		ExecutableAncestors:              atomicRuntimeAncestorIdentitiesForTest(t, entry.OMPExecutable.Path),
+		NativeAddonAncestors:             atomicRuntimeAncestorIdentitiesForTest(t, entry.OMPNativeAddon.Path),
+		NativeDataRoot:                   nativeDataRoot,
+		DeniedNativeFallbackRoots:        []string{filepath.Join(filepath.Dir(nativeDataRoot), "denied-home", ".omp"), filepath.Join(entry.OMPExecutableRoot.Path, "natives")},
+		LauncherMode:                     atomicOMPLauncherModeDirectPinned,
+		OMPArgvPolicy:                    atomicOMPArgvPolicyExactSudoRoute,
+		SandboxTargetPolicy:              atomicOMPSandboxTargetPolicyExactPinned,
+		OutputTransport:                  atomicOMPOutputTransportSupervisorStdout,
+		TimeoutOwner:                     atomicOMPTimeoutOwnerSupervisor,
+		WrapperCompatibilityOracleSHA256: hashJournalBytes(wrapper),
+		ArtifactFDPolicy:                 atomicOMPRuntimeArtifactFDPolicyParentRetainedCLOEXEC,
+		ProcessGroupPolicy:               atomicOMPProcessGroupPolicySingleGroup,
 	}
 	authority, err = sealExecutionPolicyOMPRuntimeAuthority(authority, entry.OMPExecutable, entry.OMPNativeAddon)
 	if err != nil {
@@ -983,15 +1126,14 @@ func writeServerExecutionPolicyForTest(t *testing.T, directory string, envelope 
 		SchemaVersion: executionPolicyEntrySchemaVersion, LaunchSpecHash: envelope.LaunchSpecHash,
 		TaskID: "audit_task_server_001", RepositoryIdentity: envelope.RepositoryIdentity,
 		RepositoryIdentityHash: repositoryIdentityHash(envelope.RepositoryIdentity), Repository: directoryIdentityForTest(t, repositoryPath),
-		GitExecutable: fileIdentityForTest(t, "/usr/bin/git"), GitCommit: "0123456789abcdef0123456789abcdef01234567",
+		GitExecutable: fileIdentityForTest(t, auditGitExecutable), GitCommit: "0123456789abcdef0123456789abcdef01234567",
 		GitCommitObjectSHA256: testHash("server-commit-object"), GitTree: "89abcdef0123456789abcdef0123456789abcdef",
 		SourceArchiveSHA256: testHash("server-archive"), PromptTemplateID: readOnlyAuditPromptTemplateID,
 		PromptTemplateHash: readOnlyAuditPromptTemplateHash(), RouteMappingHash: envelope.RouteMappingHash,
 		Wrapper: fileIdentityForTest(t, wrapperPath), OMPExecutable: fileIdentityForTest(t, ompPath),
 		OMPExecutableRoot: directoryIdentityForTest(t, ompRoot), OMPVersion: supportedOMPVersion,
-		OMPNativeAddon:     ompNativeAddonIdentityForTest(t, directory, "pinned-server-home"),
-		WrapperExecutables: fileIdentitiesForTest(t, auditWrapperDependencyPaths()...),
-		HermesProvider:     "custom:sudo", HermesModel: "gpt-5.6-sol",
+		OMPNativeAddon: ompNativeAddonIdentityForTest(t, directory, "pinned-server-home"),
+		HermesProvider: "custom:sudo", HermesModel: "gpt-5.6-sol",
 		ProviderEndpoint: executionPolicyEndpoint{Hostname: "coding.sudoai.cc", Port: 443},
 		TaskTier:         "normal", InternalDeadlineSeconds: 60, WrapperGraceSeconds: 5, AttemptCap: envelope.AttemptCap,
 		AllowedTests: []executionPolicyTestCommand{executionPolicyTestCommandForTest(t, "focused_go_test", "/usr/bin/true")},
@@ -999,7 +1141,7 @@ func writeServerExecutionPolicyForTest(t *testing.T, directory string, envelope 
 		WorkRoot: makeRoot("audit-work"), TemporaryRoot: makeRoot("audit-tmp"),
 		RuntimeReadRoots:           directoryIdentitiesForTest(t, "/bin", "/usr/bin", "/usr/lib", "/usr/share", "/System/Library", "/Library/Apple", "/private/var/db/timezone"),
 		ExecutableRoots:            directoryIdentitiesForTest(t, "/bin", "/usr/bin"),
-		CredentialEnvironmentNames: []string{"SUDO_API_KEY"},
+		CredentialEnvironmentNames: []string{"SUDO_CODING_KEY"},
 	}
 	entry = mustSealExecutionPolicyEntryForTest(t, entry)
 	path := filepath.Join(directory, "execution-policy.json")

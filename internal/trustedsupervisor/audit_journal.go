@@ -13,7 +13,7 @@ import (
 
 const (
 	auditExecutionIntentSchemaVersion              = "ananke.local-trusted-supervisor-audit-intent.v1"
-	auditExecutionEventSchemaVersion               = "ananke.local-trusted-supervisor-audit-event.v3"
+	auditExecutionEventSchemaVersion               = "ananke.local-trusted-supervisor-audit-event.v4"
 	auditExecutionEventAuthenticationSchemaVersion = "ananke.local-trusted-supervisor-audit-event-authentication.v1"
 	maxAuditEvidenceBytes                          = 256 * 1024
 
@@ -73,9 +73,10 @@ type auditExecutionEvent struct {
 	StdoutSHA256          string                            `json:"stdout_sha256"`
 	StderrSHA256          string                            `json:"stderr_sha256"`
 	SessionUUID           string                            `json:"session_uuid"`
+	TimeoutObservation    auditTimeoutEvidence              `json:"timeout_observation"`
 	EvidenceJSON          string                            `json:"evidence_json"`
 	EvidenceHash          string                            `json:"evidence_hash"`
-	FinalizingEventHash    string                            `json:"finalizing_event_hash"`
+	FinalizingEventHash   string                            `json:"finalizing_event_hash"`
 	FailureClass          string                            `json:"failure_class"`
 	WorkPath              string                            `json:"work_path"`
 	OutputPath            string                            `json:"output_path"`
@@ -133,6 +134,9 @@ func sealAuditExecutionEvent(event auditExecutionEvent) (auditExecutionEvent, er
 		!validAuditPrivatePath(event.SessionPath) || !validAuditPrivatePath(event.PromptPath) || !validAuditPrivatePath(event.TemporaryPath) {
 		return auditExecutionEvent{}, ErrProtocol
 	}
+	if event.State != auditStateTimedOut && event.TimeoutObservation != (auditTimeoutEvidence{}) {
+		return auditExecutionEvent{}, ErrProtocol
+	}
 	switch event.State {
 	case auditStatePrepared:
 		if event.PID != 0 || event.PGID != 0 || event.ProcessStartIdentity != "" || event.ProcessStartedAt != "" || event.ProcessFinishedAt != "" ||
@@ -158,8 +162,16 @@ func sealAuditExecutionEvent(event auditExecutionEvent) (auditExecutionEvent, er
 			return auditExecutionEvent{}, ErrProtocol
 		}
 	case auditStateTimedOut:
+		observation := event.TimeoutObservation
 		if event.PID <= 0 || event.PGID != event.PID || event.ProcessStartIdentity == "" || !validServerJournalTimestamp(event.ProcessStartedAt) ||
-			!validServerJournalTimestamp(event.ProcessFinishedAt) || !auditSessionUUIDPattern.MatchString(event.SessionUUID) || event.FinalizingEventHash != "" {
+			!validServerJournalTimestamp(event.ProcessFinishedAt) || !auditSessionUUIDPattern.MatchString(event.SessionUUID) || event.FinalizingEventHash != "" ||
+			!validAuditTimeoutEvidence(observation) || observation.RunID != filepath.Base(filepath.Dir(event.PromptPath)) ||
+			observation.SessionRunID != event.SessionRunID || observation.CommandDescriptorHash != event.CommandDescriptorHash ||
+			observation.PromptSHA256 != event.PromptSHA256 || observation.ResumeSessionUUID != event.ResumeSessionUUID ||
+			observation.SessionUUID != event.SessionUUID || observation.SessionRoot != event.SessionPath || observation.PID != event.PID ||
+			observation.PGID != event.PGID || observation.ProcessStartIdentity != event.ProcessStartIdentity ||
+			observation.ProcessStartedAt != event.ProcessStartedAt || observation.ProcessFinishedAt != event.ProcessFinishedAt ||
+			observation.ExitCode != event.ExitCode || observation.StdoutSHA256 != event.StdoutSHA256 || observation.StderrSHA256 != event.StderrSHA256 {
 			return auditExecutionEvent{}, ErrProtocol
 		}
 	case auditStateFailed:

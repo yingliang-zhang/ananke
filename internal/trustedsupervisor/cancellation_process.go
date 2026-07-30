@@ -12,9 +12,12 @@ import (
 )
 
 const (
-	defaultAuditTermGrace = 250 * time.Millisecond
-	defaultAuditKillGrace = 750 * time.Millisecond
-	defaultAuditPoll      = 10 * time.Millisecond
+	defaultAuditTermGrace         = 250 * time.Millisecond
+	defaultAuditKillGrace         = 750 * time.Millisecond
+	defaultAuditResidualExitGrace = 5 * time.Second
+	defaultAuditPoll              = 10 * time.Millisecond
+	maximumAuditTerminationGrace  = 30 * time.Second
+	auditTerminationControlMargin = 250 * time.Millisecond
 )
 
 type auditProcessOperations interface {
@@ -24,9 +27,10 @@ type auditProcessOperations interface {
 }
 
 type auditTerminationBounds struct {
-	TermGrace    time.Duration
-	KillGrace    time.Duration
-	PollInterval time.Duration
+	TermGrace         time.Duration
+	KillGrace         time.Duration
+	ResidualExitGrace time.Duration
+	PollInterval      time.Duration
 }
 
 type auditTerminationOutcome string
@@ -112,7 +116,35 @@ func (systemAuditProcessOperations) GroupExists(pgid int) (bool, error) {
 }
 
 func defaultAuditTerminationBounds() auditTerminationBounds {
-	return auditTerminationBounds{TermGrace: defaultAuditTermGrace, KillGrace: defaultAuditKillGrace, PollInterval: defaultAuditPoll}
+	return auditTerminationBounds{
+		TermGrace: defaultAuditTermGrace, KillGrace: defaultAuditKillGrace,
+		ResidualExitGrace: defaultAuditResidualExitGrace, PollInterval: defaultAuditPoll,
+	}
+}
+
+func resolveAuditTerminationBounds(bounds auditTerminationBounds) (auditTerminationBounds, error) {
+	if bounds == (auditTerminationBounds{}) {
+		bounds = defaultAuditTerminationBounds()
+	}
+	if !validAuditTerminationBounds(bounds) {
+		return auditTerminationBounds{}, ErrProtocol
+	}
+	return bounds, nil
+}
+
+func validAuditTerminationBounds(bounds auditTerminationBounds) bool {
+	return bounds.TermGrace > 0 && bounds.TermGrace <= maximumAuditTerminationGrace &&
+		bounds.KillGrace > 0 && bounds.KillGrace <= maximumAuditTerminationGrace &&
+		bounds.ResidualExitGrace > 0 && bounds.ResidualExitGrace <= maximumAuditTerminationGrace &&
+		bounds.PollInterval > 0 && bounds.PollInterval <= bounds.TermGrace &&
+		bounds.PollInterval <= bounds.KillGrace && bounds.PollInterval <= bounds.ResidualExitGrace
+}
+
+func auditTerminationControlBound(bounds auditTerminationBounds) (time.Duration, error) {
+	if !validAuditTerminationBounds(bounds) {
+		return 0, ErrProtocol
+	}
+	return bounds.TermGrace + bounds.KillGrace + bounds.ResidualExitGrace + auditTerminationControlMargin, nil
 }
 
 func terminateOwnedAuditProcess(
@@ -123,19 +155,22 @@ func terminateOwnedAuditProcess(
 	bounds auditTerminationBounds,
 ) auditTerminationResult {
 	if ctx == nil || operations == nil || expected.PID <= 0 || expected.PGID != expected.PID || expected.ProcessStartIdentity == "" ||
-		bounds.TermGrace <= 0 || bounds.KillGrace <= 0 || bounds.PollInterval <= 0 ||
-		bounds.PollInterval > bounds.TermGrace || bounds.PollInterval > bounds.KillGrace {
+		!validAuditTerminationBounds(bounds) {
 		return auditTerminationResult{Outcome: auditTerminationFailure, Failure: ErrProtocol}
 	}
-	leaderExists, groupExists, inspectErr := inspectAuditTerminationTarget(expected, operations)
-	if inspectErr != nil {
-		return auditTerminationResult{Outcome: auditTerminationFailure, Failure: inspectErr}
+	observed, leaderExists, err := operations.Inspect(expected.PID)
+	if err != nil {
+		return failedAuditTermination("process_inspection_failed", err)
+	}
+	if leaderExists && !sameAuditProcessIdentity(observed, expected) {
+		return failedAuditTermination("process_identity_mismatch", ErrAuthentication)
 	}
 	if !leaderExists {
-		if groupExists {
-			return failedAuditTermination("process_identity_unavailable", ErrAuthentication)
-		}
-		return confirmAuditProcessExit(ctx, expected, waiter, operations, bounds.KillGrace)
+		return confirmAuditProcessExit(ctx, expected, waiter, operations, bounds)
+	}
+	groupExists, err := operations.GroupExists(expected.PGID)
+	if err != nil {
+		return failedAuditTermination("group_inspection_failed", err)
 	}
 	if !groupExists {
 		return failedAuditTermination("group_inspection_failed", ErrAuthentication)
@@ -148,15 +183,12 @@ func terminateOwnedAuditProcess(
 		return auditTerminationResult{Outcome: auditTerminationFailure, Failure: waitErr}
 	}
 	if !exited {
-		leaderExists, groupExists, inspectErr = inspectAuditTerminationTarget(expected, operations)
+		leaderExists, groupExists, inspectErr := inspectAuditTerminationTarget(expected, operations)
 		if inspectErr != nil {
 			return auditTerminationResult{Outcome: auditTerminationFailure, Failure: inspectErr}
 		}
 		if !leaderExists {
-			if groupExists {
-				return failedAuditTermination("process_identity_unavailable", ErrAuthentication)
-			}
-			return confirmAuditProcessExit(ctx, expected, waiter, operations, bounds.KillGrace)
+			return confirmAuditProcessExit(ctx, expected, waiter, operations, bounds)
 		}
 		if !groupExists {
 			return failedAuditTermination("group_inspection_failed", ErrAuthentication)
@@ -169,10 +201,20 @@ func terminateOwnedAuditProcess(
 			return auditTerminationResult{Outcome: auditTerminationFailure, Failure: waitErr}
 		}
 		if !exited {
+			leaderExists, groupExists, inspectErr = inspectAuditTerminationTarget(expected, operations)
+			if inspectErr != nil {
+				return auditTerminationResult{Outcome: auditTerminationFailure, Failure: inspectErr}
+			}
+			if !leaderExists {
+				return confirmAuditProcessExit(ctx, expected, waiter, operations, bounds)
+			}
+			if !groupExists {
+				return failedAuditTermination("group_inspection_failed", ErrAuthentication)
+			}
 			return failedAuditTermination("group_exit_unconfirmed", ErrDeadline)
 		}
 	}
-	return confirmAuditProcessExit(ctx, expected, waiter, operations, bounds.KillGrace)
+	return confirmAuditProcessExit(ctx, expected, waiter, operations, bounds)
 }
 
 func waitForOwnedAuditProcessExit(
@@ -216,10 +258,16 @@ func confirmAuditProcessExit(
 	expected auditProcessIdentity,
 	waiter *auditProcessWaiter,
 	operations auditProcessOperations,
-	timeout time.Duration,
+	bounds auditTerminationBounds,
 ) auditTerminationResult {
-	if err := waiter.await(ctx, timeout); err != nil {
-		return auditTerminationResult{Outcome: auditTerminationFailure, Failure: err}
+	if ctx == nil || operations == nil || expected.PID <= 0 || expected.PGID != expected.PID ||
+		expected.ProcessStartIdentity == "" || !validAuditTerminationBounds(bounds) {
+		return auditTerminationResult{Outcome: auditTerminationFailure, Failure: ErrProtocol}
+	}
+	if waiter != nil {
+		if err := waiter.await(ctx, bounds.KillGrace); err != nil {
+			return auditTerminationResult{Outcome: auditTerminationFailure, Failure: err}
+		}
 	}
 	observed, exists, err := operations.Inspect(expected.PID)
 	if err != nil {
@@ -231,14 +279,45 @@ func confirmAuditProcessExit(
 		}
 		return failedAuditTermination("group_exit_unconfirmed", ErrDeadline)
 	}
-	groupExists, err := operations.GroupExists(expected.PGID)
-	if err != nil {
-		return failedAuditTermination("group_inspection_failed", err)
+	if waiter == nil {
+		groupExists, err := operations.GroupExists(expected.PGID)
+		if err != nil {
+			return failedAuditTermination("group_inspection_failed", err)
+		}
+		if groupExists {
+			return failedAuditTermination("group_exit_unconfirmed", ErrDeadline)
+		}
+		return confirmedAuditTermination()
 	}
-	if groupExists {
-		return failedAuditTermination("group_exit_unconfirmed", ErrDeadline)
+	return observeNaturalAuditProcessGroupExit(ctx, expected.PGID, operations, bounds)
+}
+
+func observeNaturalAuditProcessGroupExit(
+	ctx context.Context,
+	pgid int,
+	operations auditProcessOperations,
+	bounds auditTerminationBounds,
+) auditTerminationResult {
+	deadline := time.NewTimer(bounds.ResidualExitGrace)
+	defer deadline.Stop()
+	ticker := time.NewTicker(bounds.PollInterval)
+	defer ticker.Stop()
+	for {
+		groupExists, err := operations.GroupExists(pgid)
+		if err != nil {
+			return failedAuditTermination("group_inspection_failed", err)
+		}
+		if !groupExists {
+			return confirmedAuditTermination()
+		}
+		select {
+		case <-ctx.Done():
+			return failedAuditTermination("group_exit_unconfirmed", ErrDeadline)
+		case <-deadline.C:
+			return failedAuditTermination("group_exit_unconfirmed", ErrDeadline)
+		case <-ticker.C:
+		}
 	}
-	return confirmedAuditTermination()
 }
 
 type auditProcessWaiter struct {

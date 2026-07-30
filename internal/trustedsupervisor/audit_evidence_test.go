@@ -78,24 +78,68 @@ func TestAuditEvidenceRejectsKnownCredentialValues(t *testing.T) {
 	}
 }
 
+func TestAuditAuthorityClassifierExhaustsMatchSetInPrecedenceOrder(t *testing.T) {
+	t.Setenv("SUDO_API_KEY", "closed-authority-secret")
+	entry := executionPolicyEntry{
+		Repository:  executionPolicyDirectoryIdentity{Path: "/closed-authority/repository"},
+		Wrapper:     executionPolicyFileIdentity{Path: "/closed-authority/wrapper"},
+		PromptRoot:  "/closed-authority/prompt-root",
+		OutputRoot:  "/closed-authority/output-root",
+		SessionRoot: "/closed-authority/session-root",
+		WorkRoot:    "/closed-authority/work-root",
+	}
+	invocation := auditInvocation{
+		PromptPath: "/closed-authority/prompt-path",
+		OutputPath: "/closed-authority/output-path",
+		SessionDir: "/closed-authority/session-path",
+		WorkDir:    "/closed-authority/work-path",
+	}
+	matches := []struct {
+		kind  auditAuthorityKind
+		value string
+	}{
+		{auditAuthorityKindSecret, "closed-authority-secret"},
+		{auditAuthorityKindRepository, entry.Repository.Path},
+		{auditAuthorityKindWrapper, entry.Wrapper.Path},
+		{auditAuthorityKindPromptRoot, entry.PromptRoot},
+		{auditAuthorityKindOutputRoot, entry.OutputRoot},
+		{auditAuthorityKindSessionRoot, entry.SessionRoot},
+		{auditAuthorityKindWorkRoot, entry.WorkRoot},
+		{auditAuthorityKindPromptPath, invocation.PromptPath},
+		{auditAuthorityKindOutputPath, invocation.OutputPath},
+		{auditAuthorityKindSessionPath, invocation.SessionDir},
+		{auditAuthorityKindWorkPath, invocation.WorkDir},
+	}
+	for index, match := range matches {
+		values := make([]string, 0, len(matches)-index)
+		for _, candidate := range matches[index:] {
+			values = append(values, candidate.value)
+		}
+		contents := []byte(strings.Join(values, "\n"))
+		kind, leaked := classifyAuditBytesLeakAuthority(contents, entry, invocation)
+		if !leaked || kind != match.kind || !auditBytesLeakAuthority(contents, entry, invocation) {
+			t.Fatalf("authority matches from %d classified as %q/%v, want %q/true", index, kind, leaked, match.kind)
+		}
+	}
+	if kind, leaked := classifyAuditBytesLeakAuthority([]byte("bounded non-authority"), entry, invocation); leaked || kind != "" || auditBytesLeakAuthority([]byte("bounded non-authority"), entry, invocation) {
+		t.Fatalf("non-authority classified as %q/%v", kind, leaked)
+	}
+}
+
 func TestAuditEvidenceRejectsOutputTamperSecretOversizeAndMalformedSession(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("Darwin sandbox contract")
 	}
 	for _, testCase := range []struct {
 		name               string
-		script             string
-		executablePaths    []string
+		fixture            fakeAuditOMPFixture
 		mutate             func(*testing.T, auditInvocation)
 		verifyBeforeMutate bool
 		runRejected        bool
+		limitRejected      bool
 	}{
 		{
-			name: "output tamper",
-			script: `#!/bin/sh
-set -eu
-printf '%s' '` + validAuditModelReportJSONForTest + `' > "$3"
-`,
+			name: "output tamper", fixture: fakeAuditOMPFixture{Scenario: "report", Output: validAuditModelReportJSONForTest},
 			verifyBeforeMutate: true,
 			mutate: func(t *testing.T, invocation auditInvocation) {
 				if err := os.WriteFile(invocation.OutputPath, []byte("tampered"), 0o600); err != nil {
@@ -103,27 +147,13 @@ printf '%s' '` + validAuditModelReportJSONForTest + `' > "$3"
 				}
 			},
 		},
-		{
-			name: "secret output",
-			script: `#!/bin/sh
-set -eu
-printf '%s' "$SUDO_API_KEY" > "$3"
-`,
-			runRejected: true,
-		},
-		{
-			name: "oversize output",
-			script: `#!/bin/sh
-set -eu
-/bin/dd if=/dev/zero of="$3" bs=262145 count=1 2>/dev/null
-`,
-			executablePaths: []string{"/bin/dd"},
-		},
+		{name: "secret output", fixture: fakeAuditOMPFixture{Scenario: "report", EmitCredential: true}, runRejected: true},
+		{name: "oversize output", fixture: fakeAuditOMPFixture{Scenario: "oversize"}, limitRejected: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			material := newGitArchivePolicyMaterial(t)
-			script := strings.ReplaceAll(testCase.script, "COMMAND_HASH", material.entry.AllowedTests[0].CommandSHA256)
-			setFakeAuditWrapperForTest(t, &material, script, testCase.executablePaths...)
+			setNativeFakeAuditOMPForTest(t, &material, testCase.fixture)
+
 			snapshot := materializeSnapshotForExecutorTest(t, material, "audit_run_evidence_001")
 			invocation, err := prepareAuditInvocation(material.policy, material.entry, snapshot, "audit_run_evidence_001_attempt_1", "audit_run_evidence_001", auditResume{})
 			if err != nil {
@@ -131,6 +161,14 @@ set -eu
 			}
 			t.Setenv("SUDO_API_KEY", "credential-must-not-leak")
 			result, err := runAuditInvocation(context.Background(), material.policy, material.entry, invocation, auditInvocationHooks{})
+			if testCase.limitRejected {
+				if !errors.Is(err, ErrLimit) {
+					t.Fatalf("oversize direct capture error = %v, want %v", err, ErrLimit)
+				}
+				assertAuditExecutionRootsEmpty(t, material.entry)
+				return
+			}
+
 			if testCase.runRejected {
 				if !errors.Is(err, ErrAuthentication) {
 					t.Fatalf("run rejected evidence fixture error = %v, want %v", err, ErrAuthentication)
@@ -163,7 +201,7 @@ set -eu
 }
 
 func TestCompletedAuditCallbackRequiresEveryOwnedRootAbsent(t *testing.T) {
-	for _, rootName := range []string{"prompt", "output", "session", "temporary", "work", "wrapper_transport"} {
+	for _, rootName := range []string{"prompt", "output", "session", "temporary", "work"} {
 		t.Run(rootName, func(t *testing.T) {
 			fixture := validAuditExecutionHistoryForTest(t)
 			completed := fixture.Events[len(fixture.Events)-1]
@@ -183,8 +221,6 @@ func TestCompletedAuditCallbackRequiresEveryOwnedRootAbsent(t *testing.T) {
 				root = completed.TemporaryPath
 			case "work":
 				root = filepath.Dir(completed.WorkPath)
-			case "wrapper_transport":
-				root = filepath.Join(completed.TemporaryPath, "wrapper-state")
 			}
 			if err := os.MkdirAll(root, 0o700); err != nil {
 				t.Fatal(err)
@@ -227,16 +263,14 @@ func auditEvidenceLifecycleForTest(t *testing.T, entry executionPolicyEntry, inv
 	return intent, completed
 }
 
-func TestAuditWrapperCredentialLeakNeverReachesJournalOrCapture(t *testing.T) {
+func TestAuditDirectOMPCredentialLeakNeverReachesJournalOrCapture(t *testing.T) {
+
 	if runtime.GOOS != "darwin" {
 		t.Skip("Darwin sandbox contract")
 	}
 	now := time.Now().UTC().Truncate(time.Second)
-	fixture := newExecutingServerTestMaterial(t, now, `#!/bin/sh
-set -eu
-printf '%s' "$SUDO_API_KEY"
-printf should-not-be-trusted > "$3"
-`)
+	fixture := newExecutingServerTestMaterial(t, now, fakeAuditOMPFixture{Scenario: "report", Output: "should-not-be-trusted", EmitCredential: true})
+
 	t.Setenv("SUDO_API_KEY", "credential-must-not-leak")
 	running := startInProcessProductionServer(t, fixture.material, now)
 	client := newServerTestClient(t, fixture.material, int32(os.Getpid()), now)
@@ -247,7 +281,8 @@ printf should-not-be-trusted > "$3"
 	_, events := waitForAuditState(t, running.server.journal, fixture.material.fixture.envelope.EnvelopeHash, auditStateFailed)
 	running.stop(t)
 	terminal := events[len(events)-1]
-	if terminal.State != auditStateFailed || terminal.FailureClass != "wrapper_or_capture_verification_failed" {
+	if terminal.State != auditStateFailed || terminal.FailureClass != "direct_omp_or_capture_verification_failed" {
+
 		t.Fatalf("credential leak terminal = %+v", terminal)
 	}
 	encoded, err := marshalCanonical(terminal)
@@ -272,67 +307,118 @@ printf should-not-be-trusted > "$3"
 	assertAuditExecutionRootsEmpty(t, fixture.entry)
 }
 
+func TestAuditFreshSessionNonzeroExitSeparatesExitFromScannerFailureInJournal(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin sandbox contract")
+	}
+	const sessionUUID = "019f9a4a-a904-7000-b341-e07ecf0e3baf"
+	for _, testCase := range []struct {
+		name         string
+		fixture      fakeAuditOMPFixture
+		failureClass string
+	}{
+		{
+			name: "authenticated",
+			fixture: fakeAuditOMPFixture{
+				Scenario: "report", ExitCode: 9, SessionUUID: sessionUUID, FreshSessionMode: "authenticated",
+			},
+			failureClass: "direct_omp_exit_nonzero",
+		},
+		{
+			name: "leaking",
+			fixture: fakeAuditOMPFixture{
+				Scenario: "report", ExitCode: 9, SessionUUID: sessionUUID, FreshSessionMode: "leaking",
+				OriginalPath: "/private/var/tmp/ananke-fresh-session-leak",
+			},
+			failureClass: "artifact_scan_session_fresh_authentication",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			now := time.Now().UTC().Truncate(time.Second)
+			fixture := newExecutingServerTestMaterial(t, now, testCase.fixture)
+			running := startInProcessProductionServer(t, fixture.material, now)
+			client := newServerTestClient(t, fixture.material, int32(os.Getpid()), now)
+			if _, err := client.Deliver(context.Background(), fixture.material.fixture.envelope); err != nil {
+				running.stop(t)
+				t.Fatal(err)
+			}
+			_, events := waitForAuditState(t, running.server.journal, fixture.material.fixture.envelope.EnvelopeHash, auditStateFailed)
+			terminal := events[len(events)-1]
+			running.stop(t)
+			if terminal.State != auditStateFailed || terminal.FailureClass != testCase.failureClass {
+				t.Fatalf("fresh session terminal = %+v, want class %q", terminal, testCase.failureClass)
+			}
+		})
+	}
+}
+
+func TestAuditTemporaryAuthorityFailureClassInJournal(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin sandbox contract")
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	fixture := newExecutingServerTestMaterial(t, now, fakeAuditOMPFixture{
+		Scenario: "report", ExitCode: 9, WriteTemporaryWorkAuthority: true,
+	})
+	running := startInProcessProductionServer(t, fixture.material, now)
+	client := newServerTestClient(t, fixture.material, int32(os.Getpid()), now)
+	if _, err := client.Deliver(context.Background(), fixture.material.fixture.envelope); err != nil {
+		running.stop(t)
+		t.Fatal(err)
+	}
+	_, events := waitForAuditState(t, running.server.journal, fixture.material.fixture.envelope.EnvelopeHash, auditStateFailed)
+	terminal := events[len(events)-1]
+	running.stop(t)
+	if terminal.State != auditStateFailed || terminal.FailureClass != "artifact_scan_temporary_authority_home_work_root" {
+		t.Fatalf("temporary authority terminal = %+v, want closed home/work_root class", terminal)
+	}
+	assertAuditExecutionRootsEmpty(t, fixture.entry)
+}
+
 func TestAuditFailureAndTimeoutScrubCredentialBearingTrees(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("Darwin sandbox contract")
 	}
 	for _, testCase := range []struct {
 		name         string
-		script       string
+		fixture      fakeAuditOMPFixture
 		failureClass string
 	}{
 		{
 			name: "nonzero credential artifacts",
-			script: `#!/bin/sh
-set -eu
-printf '%s' "$SUDO_API_KEY" > "$3"
-printf '%s' "$SUDO_API_KEY" > "${11}/secret"
-printf '%s' "$SUDO_API_KEY" > "$TMPDIR/secret"
-exit 9
-`,
-			failureClass: "wrapper_or_capture_verification_failed",
+			fixture: fakeAuditOMPFixture{
+				Scenario: "report", ExitCode: 9, EmitCredential: true, WriteCredentialArtifacts: true,
+			},
+			failureClass: "direct_omp_or_capture_verification_failed",
 		},
 		{
 			name: "secret-bearing timeout",
-			script: `#!/bin/sh
-set -eu
-printf '%s' "$SUDO_API_KEY" > "${11}/secret"
-printf '[OMP_TIMEOUT]\ntimeout_source=internal\nsession_id=019f9a4a-a904-7000-b341-e07ecf0e3baf\nrecovery_hint=resume exact session\n' > "$3"
-exit 124
-`,
-			failureClass: "wrapper_or_capture_verification_failed",
+			fixture: fakeAuditOMPFixture{
+				Scenario: "timeout_always", SessionUUID: "019f9a4a-a904-7000-b341-e07ecf0e3baf", WriteCredentialArtifacts: true,
+			},
+			failureClass: "direct_omp_or_capture_verification_failed",
 		},
 		{
-			name: "malformed timeout",
-			script: `#!/bin/sh
-set -eu
-printf safe > "${11}/safe"
-printf '[OMP_TIMEOUT]\ntimeout_source=internal\n' > "$3"
-exit 124
-`,
+			name:         "malformed timeout",
+			fixture:      fakeAuditOMPFixture{Scenario: "malformed_timeout", ExitCode: 124},
 			failureClass: "malformed_timeout_evidence",
 		},
 		{
-			name: "evidence rejection",
-			script: `#!/bin/sh
-set -eu
-printf safe > "$3"
-printf '[OMP_SESSION] session_id=019f9a4a-a904-7000-b341-e07ecf0e3baf\n' > "${11}/incomplete.log"
-`,
+			name:         "evidence rejection",
+			fixture:      fakeAuditOMPFixture{Scenario: "evidence_rejection", Output: "safe"},
 			failureClass: "evidence_verification_failed",
 		},
 		{
-			name: "closed nonzero exit",
-			script: `#!/bin/sh
-set -eu
-exit 9
-`,
-			failureClass: "wrapper_exit_nonzero",
+			name: "closed nonzero exit with authenticated fresh session",
+			fixture: fakeAuditOMPFixture{
+				Scenario: "report", ExitCode: 9, SessionUUID: "019f9a4a-a904-7000-b341-e07ecf0e3baf", FreshSessionMode: "authenticated",
+			},
+			failureClass: "direct_omp_exit_nonzero",
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			now := time.Now().UTC().Truncate(time.Second)
-			fixture := newExecutingServerTestMaterial(t, now, testCase.script)
+			fixture := newExecutingServerTestMaterial(t, now, testCase.fixture)
 			t.Setenv("SUDO_API_KEY", "credential-must-not-persist")
 			running := startInProcessProductionServer(t, fixture.material, now)
 			client := newServerTestClient(t, fixture.material, int32(os.Getpid()), now)

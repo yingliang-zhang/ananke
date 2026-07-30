@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,10 +39,23 @@ const (
 )
 
 type auditBrokerDependencies struct {
-	LookupIPAddr func(context.Context, string) ([]net.IPAddr, error)
-	DialContext  func(context.Context, string, string) (net.Conn, error)
+	LookupIPAddr  func(context.Context, string) ([]net.IPAddr, error)
+	DialContext   func(context.Context, string, string) (net.Conn, error)
 	ListenContext func(context.Context, string, string) (net.Listener, error)
-	TLSRootCAs   *x509.CertPool
+	TLSRootCAs    *x509.CertPool
+}
+
+type auditProviderResolutionClass string
+
+const (
+	auditProviderResolutionInvalid           auditProviderResolutionClass = ""
+	auditProviderResolutionPublic            auditProviderResolutionClass = "ordinary_public_upstream"
+	auditProviderResolutionTransparentFakeIP auditProviderResolutionClass = "transparent_fake_ip_transport_alias"
+)
+
+type auditProviderResolution struct {
+	class     auditProviderResolutionClass
+	pinnedIPs []netip.Addr
 }
 
 type auditHTTPGateway struct {
@@ -57,6 +71,7 @@ type auditHTTPGateway struct {
 	deadline          time.Time
 	dialContext       func(context.Context, string, string) (net.Conn, error)
 	pinnedIPs         []netip.Addr
+	resolutionClass   auditProviderResolutionClass
 	nextIP            atomic.Uint64
 	client            *http.Client
 	transport         *http.Transport
@@ -70,6 +85,8 @@ type auditHTTPGateway struct {
 	shutdownOnce      sync.Once
 	closeOnce         sync.Once
 	closeErr          error
+	rejectionDiagMu   sync.Mutex
+	rejectionDiag     string
 }
 
 type auditGatewayRequest struct {
@@ -91,13 +108,7 @@ func startAuditHTTPGateway(parent context.Context, provider string, endpoint exe
 	} else if lookup == nil || dial == nil {
 		return nil, authenticationError("partial audit HTTP gateway dependency injection")
 	}
-	resolveContext, cancelResolve := context.WithTimeout(parent, auditBrokerConnectTimeout)
-	addresses, resolveErr := lookup(resolveContext, endpoint.Hostname)
-	cancelResolve()
-	if resolveErr != nil {
-		return nil, authenticationError("resolve audit provider endpoint")
-	}
-	pinned, err := validateAndPinAuditBrokerAddresses(addresses)
+	resolution, err := resolveAndPinAuditProviderAddresses(parent, provider, endpoint, lookup)
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +150,8 @@ func startAuditHTTPGateway(parent context.Context, provider string, endpoint exe
 		cancel:            cancel,
 		deadline:          time.Now().Add(total),
 		dialContext:       dial,
-		pinnedIPs:         pinned,
+		pinnedIPs:         resolution.pinnedIPs,
+		resolutionClass:   resolution.class,
 		semaphore:         make(chan struct{}, maxAuditBrokerConnections),
 		acceptDone:        make(chan struct{}),
 		done:              make(chan struct{}),
@@ -224,19 +236,53 @@ func validAuditProviderEndpointForAnyRoute(endpoint executionPolicyEndpoint) boo
 	return false
 }
 
-func validateAndPinAuditBrokerAddresses(addresses []net.IPAddr) ([]netip.Addr, error) {
+func resolveAndPinAuditProviderAddresses(parent context.Context, provider string, endpoint executionPolicyEndpoint, lookup func(context.Context, string) ([]net.IPAddr, error)) (auditProviderResolution, error) {
+	if parent == nil || parent.Err() != nil || lookup == nil || !validAuditProviderEndpoint(provider, endpoint) {
+		return auditProviderResolution{}, authenticationError("audit provider resolution route")
+	}
+	resolveContext, cancelResolve := context.WithTimeout(parent, auditBrokerConnectTimeout)
+	defer cancelResolve()
+	addresses, err := lookup(resolveContext, endpoint.Hostname)
+	if err != nil {
+		return auditProviderResolution{}, authenticationError("resolve audit provider endpoint")
+	}
+	return validateAndPinAuditBrokerAddresses(provider, endpoint, addresses)
+}
+
+func preflightAuditProviderResolution(parent context.Context, provider string, endpoint executionPolicyEndpoint, lookup func(context.Context, string) ([]net.IPAddr, error)) (auditProviderResolutionClass, error) {
+	resolution, err := resolveAndPinAuditProviderAddresses(parent, provider, endpoint, lookup)
+	if err != nil {
+		return auditProviderResolutionInvalid, err
+	}
+	return resolution.class, nil
+}
+
+func validateAndPinAuditBrokerAddresses(provider string, endpoint executionPolicyEndpoint, addresses []net.IPAddr) (auditProviderResolution, error) {
+	if !validAuditProviderEndpoint(provider, endpoint) {
+		return auditProviderResolution{}, authenticationError("audit provider resolution route")
+	}
 	if len(addresses) == 0 || len(addresses) > maxAuditBrokerResolvedIPs {
-		return nil, authenticationError("bounded audit provider resolution")
+		return auditProviderResolution{}, authenticationError("bounded audit provider resolution")
 	}
 	unique := make(map[netip.Addr]struct{}, len(addresses))
+	resolutionClass := auditProviderResolutionInvalid
 	for _, resolved := range addresses {
 		address, ok := netip.AddrFromSlice(resolved.IP)
 		if !ok || resolved.Zone != "" {
-			return nil, authenticationError("invalid audit provider resolution")
+			return auditProviderResolution{}, authenticationError("invalid audit provider resolution")
 		}
 		address = address.Unmap()
-		if !publicAuditBrokerAddress(address) {
-			return nil, authenticationError("non-public audit provider resolution")
+		addressClass := classifyAuditProviderAddress(provider, endpoint, address)
+		if addressClass == auditProviderResolutionInvalid {
+			return auditProviderResolution{}, authenticationError("disallowed audit provider resolution")
+		}
+		if resolutionClass == auditProviderResolutionInvalid {
+			resolutionClass = addressClass
+		} else if resolutionClass != addressClass {
+			return auditProviderResolution{}, authenticationError("mixed audit provider resolution classes")
+		}
+		if _, duplicate := unique[address]; duplicate {
+			return auditProviderResolution{}, authenticationError("duplicate audit provider resolution")
 		}
 		unique[address] = struct{}{}
 	}
@@ -245,10 +291,24 @@ func validateAndPinAuditBrokerAddresses(addresses []net.IPAddr) ([]netip.Addr, e
 		pinned = append(pinned, address)
 	}
 	sort.Slice(pinned, func(left, right int) bool { return pinned[left].Compare(pinned[right]) < 0 })
-	if len(pinned) == 0 {
-		return nil, authenticationError("empty audit provider resolution")
+	if len(pinned) == 0 || resolutionClass == auditProviderResolutionInvalid {
+		return auditProviderResolution{}, authenticationError("empty audit provider resolution")
 	}
-	return pinned, nil
+	return auditProviderResolution{class: resolutionClass, pinnedIPs: pinned}, nil
+}
+
+func classifyAuditProviderAddress(provider string, endpoint executionPolicyEndpoint, address netip.Addr) auditProviderResolutionClass {
+	if publicAuditBrokerAddress(address) {
+		return auditProviderResolutionPublic
+	}
+	if transparentFakeIPAuditBrokerAddress(provider, endpoint, address) {
+		return auditProviderResolutionTransparentFakeIP
+	}
+	return auditProviderResolutionInvalid
+}
+
+func transparentFakeIPAuditBrokerAddress(provider string, endpoint executionPolicyEndpoint, address netip.Addr) bool {
+	return auditPlatformSupported(runtime.GOOS) && validAuditProviderEndpoint(provider, endpoint) && address.Is4() && auditBrokerTransparentFakeIPPrefix.Contains(address)
 }
 
 func publicAuditBrokerAddress(address netip.Addr) bool {
@@ -264,17 +324,20 @@ func publicAuditBrokerAddress(address netip.Addr) bool {
 	return true
 }
 
-var auditBrokerReservedPrefixes = []netip.Prefix{
-	netip.MustParsePrefix("0.0.0.0/8"),
-	netip.MustParsePrefix("100.64.0.0/10"),
-	netip.MustParsePrefix("192.0.0.0/24"),
-	netip.MustParsePrefix("192.0.2.0/24"),
-	netip.MustParsePrefix("198.18.0.0/15"),
-	netip.MustParsePrefix("198.51.100.0/24"),
-	netip.MustParsePrefix("203.0.113.0/24"),
-	netip.MustParsePrefix("240.0.0.0/4"),
-	netip.MustParsePrefix("2001:db8::/32"),
-}
+var (
+	auditBrokerTransparentFakeIPPrefix = netip.MustParsePrefix("198.18.0.0/15")
+	auditBrokerReservedPrefixes        = []netip.Prefix{
+		netip.MustParsePrefix("0.0.0.0/8"),
+		netip.MustParsePrefix("100.64.0.0/10"),
+		netip.MustParsePrefix("192.0.0.0/24"),
+		netip.MustParsePrefix("192.0.2.0/24"),
+		auditBrokerTransparentFakeIPPrefix,
+		netip.MustParsePrefix("198.51.100.0/24"),
+		netip.MustParsePrefix("203.0.113.0/24"),
+		netip.MustParsePrefix("240.0.0.0/4"),
+		netip.MustParsePrefix("2001:db8::/32"),
+	}
+)
 
 func (gateway *auditHTTPGateway) Address() string {
 	if gateway == nil {
@@ -322,6 +385,7 @@ func (gateway *auditHTTPGateway) handle(client net.Conn) {
 	defer gateway.closeAndUnregister(client)
 	request, err := readAuditGatewayRequest(client, gateway.deadline, gateway.path, gateway.Address())
 	if err != nil {
+		gateway.captureRejection(err)
 		writeAuditGatewayRejection(client)
 		return
 	}
@@ -442,7 +506,7 @@ func validateAuditGatewayHeader(raw []byte, expectedPath, listenerAuthority stri
 			return nil, 0, authenticationError("audit gateway header value")
 		}
 		if auditHopByHopHeader(name) {
-			return nil, 0, authenticationError("audit gateway hop-by-hop header")
+			continue
 		}
 		headers.Set(http.CanonicalHeaderKey(name), value)
 	}
@@ -503,6 +567,20 @@ func copyAuditEndToEndHeaders(destination, source http.Header) {
 func writeAuditGatewayRejection(connection net.Conn) {
 	_ = connection.SetWriteDeadline(time.Now().Add(time.Second))
 	_, _ = io.WriteString(connection, "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+}
+
+func (gateway *auditHTTPGateway) captureRejection(err error) {
+	gateway.rejectionDiagMu.Lock()
+	if gateway.rejectionDiag == "" {
+		gateway.rejectionDiag = err.Error() + " [path=" + gateway.path + " authority=" + gateway.address + "]"
+	}
+	gateway.rejectionDiagMu.Unlock()
+}
+
+func (gateway *auditHTTPGateway) RejectionDiagnostic() string {
+	gateway.rejectionDiagMu.Lock()
+	defer gateway.rejectionDiagMu.Unlock()
+	return gateway.rejectionDiag
 }
 
 func writeAuditGatewayUpstreamFailure(connection net.Conn) {

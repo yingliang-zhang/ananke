@@ -218,10 +218,7 @@ func TestProductionServerSupervisorTestTerminationFailureRetainsResourcesUntilCl
 		t.Skip("Darwin process identity contract")
 	}
 	now := time.Now().UTC().Truncate(time.Second)
-	fixture := newExecutingServerTestMaterial(t, now, `#!/bin/sh
-set -eu
-printf '%s' '{"findings":[],"schema_version":"ananke.local-trusted-supervisor-model-audit-report.v1","summary":"No findings.","verdict":"approved"}' > "$3"
-`)
+	fixture := newExecutingServerTestMaterial(t, now, fakeAuditOMPFixture{Scenario: "report", Output: validAuditModelReportJSONForTest})
 	testRoot := filepath.Join(fixture.material.directory, "supervisor-test-failure-bin")
 	if err := os.Mkdir(testRoot, 0o700); err != nil {
 		t.Fatal(err)

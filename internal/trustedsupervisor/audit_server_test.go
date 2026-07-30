@@ -17,11 +17,8 @@ import (
 
 func TestProductionServerExecutesFakeAuditAndReconcilesWaitingThenCompleted(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	fixture := newExecutingServerTestMaterial(t, now, `#!/bin/sh
-set -eu
-/bin/sleep 1
-printf '%s' '`+validAuditModelReportJSONForTest+`' > "$3"
-`)
+	fixture := newExecutingServerTestMaterial(t, now, fakeAuditOMPFixture{Scenario: "report", Output: validAuditModelReportJSONForTest, DelayMilliseconds: 1000})
+
 	running := startInProcessProductionServer(t, fixture.material, now)
 	defer running.stop(t)
 	client := newServerTestClient(t, fixture.material, int32(os.Getpid()), now)
@@ -78,22 +75,11 @@ func TestProductionServerRejectsMalformedModelOutputDespiteSessionMarkers(t *tes
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			now := time.Now().UTC().Truncate(time.Second)
-			fixture := newExecutingServerTestMaterial(t, now, `#!/bin/sh
-set -eu
-printf '%s' 'MODEL_OUTPUT' > "$3"
-printf '[OMP_SESSION] session_id=019f9a4a-a904-7000-b341-e07ecf0e3baf\n[OMP_TEST] command_sha256=COMMAND_HASH\n[OMP_EVIDENCE_COMPLETE]\n' > "${11}/spoof.log"
-`)
-			contents, err := os.ReadFile(fixture.entry.Wrapper.Path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			contents = []byte(strings.ReplaceAll(string(contents), "MODEL_OUTPUT", testCase.output))
-			if err := os.WriteFile(fixture.entry.Wrapper.Path, contents, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			fixture.entry.Wrapper = fileIdentityForTest(t, fixture.entry.Wrapper.Path)
-			fixture.entry = mustSealExecutionPolicyEntryForTest(t, fixture.entry)
-			writeExecutionPolicyFileForTest(t, fixture.material.executionPolicyPath, []executionPolicyEntry{fixture.entry})
+			fixture := newExecutingServerTestMaterial(t, now, fakeAuditOMPFixture{
+				Scenario: "report", Output: testCase.output,
+				SpoofLog: "[OMP_SESSION] session_id=019f9a4a-a904-7000-b341-e07ecf0e3baf\n[OMP_TEST] command_sha256=COMMAND_HASH\n[OMP_EVIDENCE_COMPLETE]\n",
+			})
+
 			running := startInProcessProductionServer(t, fixture.material, now)
 			defer running.stop(t)
 			client := newServerTestClient(t, fixture.material, int32(os.Getpid()), now)
@@ -116,11 +102,11 @@ printf '[OMP_SESSION] session_id=019f9a4a-a904-7000-b341-e07ecf0e3baf\n[OMP_TEST
 
 func TestProductionServerRejectsModelTestSpoofWhenSupervisorTestFails(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	fixture := newExecutingServerTestMaterial(t, now, `#!/bin/sh
-set -eu
-printf '%s' '`+validAuditModelReportJSONForTest+`' > "$3"
-printf '[OMP_TEST] command_sha256=COMMAND_HASH\n[OMP_EVIDENCE_COMPLETE]\n' > "${11}/spoof.log"
-`)
+	fixture := newExecutingServerTestMaterial(t, now, fakeAuditOMPFixture{
+		Scenario: "report", Output: validAuditModelReportJSONForTest,
+		SpoofLog: "[OMP_TEST] command_sha256=COMMAND_HASH\n[OMP_EVIDENCE_COMPLETE]\n",
+	})
+
 	fixture.entry.AllowedTests = []executionPolicyTestCommand{executionPolicyTestCommandForTest(t, "focused_go_test", "/usr/bin/false")}
 	fixture.entry = mustSealExecutionPolicyEntryForTest(t, fixture.entry)
 	writeExecutionPolicyFileForTest(t, fixture.material.executionPolicyPath, []executionPolicyEntry{fixture.entry})
@@ -139,10 +125,8 @@ printf '[OMP_TEST] command_sha256=COMMAND_HASH\n[OMP_EVIDENCE_COMPLETE]\n' > "${
 
 func TestProductionServerRejectsOutputMutationBeforeLiveCallback(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	fixture := newExecutingServerTestMaterial(t, now, `#!/bin/sh
-set -eu
-printf '%s' '`+validAuditModelReportJSONForTest+`' > "$3"
-`)
+	fixture := newExecutingServerTestMaterial(t, now, fakeAuditOMPFixture{Scenario: "report", Output: validAuditModelReportJSONForTest})
+
 	running := startInProcessProductionServer(t, fixture.material, now)
 	defer running.stop(t)
 	beforeFinalizing := make(chan auditInvocation, 1)
@@ -191,10 +175,8 @@ printf '%s' '`+validAuditModelReportJSONForTest+`' > "$3"
 
 func TestProductionServerFinalizingRemainsPendingBeforeCleanup(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	fixture := newExecutingServerTestMaterial(t, now, `#!/bin/sh
-set -eu
-printf '%s' '`+validAuditModelReportJSONForTest+`' > "$3"
-`)
+	fixture := newExecutingServerTestMaterial(t, now, fakeAuditOMPFixture{Scenario: "report", Output: validAuditModelReportJSONForTest})
+
 	running := startInProcessProductionServer(t, fixture.material, now)
 	defer running.stop(t)
 	persisted := make(chan auditInvocation, 1)
@@ -228,11 +210,10 @@ printf '%s' '`+validAuditModelReportJSONForTest+`' > "$3"
 }
 
 func TestAuditFinalizingRecoveryCleanupFailureForEveryOwnedRootIsNonterminal(t *testing.T) {
-	for _, rootName := range []string{"prompt", "output", "session", "temporary", "work", "wrapper_transport"} {
+	for _, rootName := range []string{"prompt", "output", "session", "temporary", "work"} {
 		t.Run(rootName, func(t *testing.T) {
 			fixture := finalizingAuditExecutionHistoryForTest(t)
 			identities := materializeSignedFinalizingRootsForPhaseBTest(t, &fixture)
-			finalizing := fixture.Events[len(fixture.Events)-1]
 			journal, err := openServerJournal(filepath.Join(t.TempDir(), "finalizing-cleanup.sqlite"))
 			if err != nil {
 				t.Fatal(err)
@@ -255,8 +236,8 @@ func TestAuditFinalizingRecoveryCleanupFailureForEveryOwnedRootIsNonterminal(t *
 					roots[identity.Role] = identity.Path
 				}
 			}
-			roots["wrapper_transport"] = filepath.Join(finalizing.TemporaryPath, "wrapper-state")
 			target := roots[rootName]
+			makeAuditTestDirectoriesRemovable(target)
 			if err := os.RemoveAll(target); err != nil {
 				t.Fatal(err)
 			}
@@ -347,6 +328,7 @@ func TestAuditFinalizingRestartResumesCleanupWithoutRerunningEffects(t *testing.
 			}
 			if testCase.cleanupBeforeRun {
 				for _, root := range roots {
+					makeAuditTestDirectoriesRemovable(root)
 					if err := os.RemoveAll(root); err != nil {
 						t.Fatal(err)
 					}
@@ -394,10 +376,8 @@ func TestAuditFinalizingRestartResumesCleanupWithoutRerunningEffects(t *testing.
 
 func TestProductionServerRejectsOutputMutationAtCompletedPersistence(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	fixture := newExecutingServerTestMaterial(t, now, `#!/bin/sh
-set -eu
-printf '%s' '`+validAuditModelReportJSONForTest+`' > "$3"
-`)
+	fixture := newExecutingServerTestMaterial(t, now, fakeAuditOMPFixture{Scenario: "report", Output: validAuditModelReportJSONForTest})
+
 	running := startInProcessProductionServer(t, fixture.material, now)
 	defer running.stop(t)
 	running.server.auditExecutor.hooks.beforeFinalizingPersist = func(invocation auditInvocation) {
@@ -418,10 +398,8 @@ printf '%s' '`+validAuditModelReportJSONForTest+`' > "$3"
 
 func TestProductionServerExactCallbackReplayUsesJournalEvidenceAndRejectsRecreatedOutput(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	fixture := newExecutingServerTestMaterial(t, now, `#!/bin/sh
-set -eu
-printf '%s' '`+validAuditModelReportJSONForTest+`' > "$3"
-`)
+	fixture := newExecutingServerTestMaterial(t, now, fakeAuditOMPFixture{Scenario: "report", Output: validAuditModelReportJSONForTest})
+
 	running := startInProcessProductionServer(t, fixture.material, now)
 	defer running.stop(t)
 	client := newServerTestClient(t, fixture.material, int32(os.Getpid()), now)
@@ -472,13 +450,8 @@ func exchangeExactServerRequestForTest(socketPath string, requestBytes []byte) (
 
 func TestProductionServerCancelRunningFakeAuditKillsAndReapsPGID(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	fixture := newExecutingServerTestMaterial(t, now, `#!/bin/sh
-set -eu
-/bin/sleep 30 &
-child=$!
-printf '[OMP_SESSION] session_id=019f9a4a-a904-7000-b341-e07ecf0e3baf\n' > "${11}/audit.log"
-wait "$child"
-`)
+	fixture := newExecutingServerTestMaterial(t, now, fakeAuditOMPFixture{Scenario: "hang_child"})
+
 	running := startInProcessProductionServer(t, fixture.material, now)
 	defer running.stop(t)
 	client := newServerTestClient(t, fixture.material, int32(os.Getpid()), now)
@@ -512,7 +485,8 @@ wait "$child"
 
 func TestAuditExecutorServerContextKillFailurePersistsWaitingNotCancelled(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	fixture := newExecutingServerTestMaterial(t, now, "#!/bin/sh\nset -eu\n/bin/sleep 1\n")
+	fixture := newExecutingServerTestMaterial(t, now, fakeAuditOMPFixture{Scenario: "report", DelayMilliseconds: 1000})
+
 	running := startInProcessProductionServer(t, fixture.material, now)
 	running.server.auditExecutor.processOperations = killFailingAuditProcessOperations{delegate: systemAuditProcessOperations{}}
 	running.server.auditExecutor.terminationBounds = testAuditTerminationBounds()
@@ -591,28 +565,11 @@ func (operations killFailingAuditProcessOperations) GroupExists(pgid int) (bool,
 
 func TestProductionServerTimeoutRetriesExactSessionThenCompletes(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	fixture := newExecutingServerTestMaterial(t, now, `#!/bin/sh
-set -eu
-uuid=019f9a4a-a904-7000-b341-e07ecf0e3baf
-/bin/sleep 0.2
-if [ "$#" -eq 11 ]; then
-  [ "$OMP_SESSION_ROOT" = "${11}" ]
-  printf '%s' stable > "${11}/stable-root"
-  /bin/sleep 0.1
-  physical_session_root=$(cd "${11}" && pwd -P)
-  session_path="${physical_session_root}/probe.jsonl"
-  printf session > "$session_path"
-  cwd=$(pwd -P)
-  printf '[OMP_TIMEOUT]\ntimeout_source=internal\ninternal_deadline_seconds=%s\nhard_deadline_seconds=%s\ncwd=%s\nsession_id=%s\nsession_path=%s\nrecovery_hint=resume exact session with --resume %s and instruct it to synthesize without more tool calls\n' "$1" "$(( $1 + OMP_WRAPPER_HARD_GRACE_SECONDS))" "$cwd" "$uuid" "$session_path" "$uuid" > "$3"
-  exit 124
-fi
-[ "$#" -eq 13 ] && [ "$12" = "--resume" ] && [ "$13" = "$uuid" ]
-[ "$(/bin/cat "${11}/stable-root")" = stable ]
-[ "$OMP_SESSION_ROOT" = "${11}" ]
-/usr/bin/grep -q 'Do not call more tools; synthesize' "$2"
-printf '%s' '{"findings":[{"code":"READ_001","line":7,"message":"unsafe read","path":"internal/a.go","severity":"high"}],"schema_version":"ananke.local-trusted-supervisor-model-audit-report.v1","summary":"One finding.","verdict":"rejected"}' > "$3"
-printf '[OMP_SESSION] session_id=%s\n[OMP_TEST] command_sha256=COMMAND_HASH\n[OMP_EVIDENCE_COMPLETE]\n' "$uuid" > "${11}/audit.log"
-`)
+	fixture := newExecutingServerTestMaterial(t, now, fakeAuditOMPFixture{
+		Scenario: "timeout_once", SessionUUID: "019f9a4a-a904-7000-b341-e07ecf0e3baf",
+		ResumeOutput: validAuditModelReportJSONForTest, DelayMilliseconds: 200,
+	})
+
 	running := startInProcessProductionServer(t, fixture.material, now)
 	defer running.stop(t)
 	client := newServerTestClient(t, fixture.material, int32(os.Getpid()), now)
@@ -659,29 +616,10 @@ printf '[OMP_SESSION] session_id=%s\n[OMP_TEST] command_sha256=COMMAND_HASH\n[OM
 
 func TestProductionServerTimeoutAttemptCapWaitsForHuman(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	fixture := newExecutingServerTestMaterial(t, now, `#!/bin/sh
-set -eu
-uuid=019f9a4a-a904-7000-b341-e07ecf0e3baf
-/bin/sleep 0.2
-[ "$OMP_SESSION_ROOT" = "${11}" ]
-if [ "$#" -eq 11 ]; then
-  printf '%s' stable > "${11}/stable-root"
-else
-  [ "$#" -eq 13 ] && [ "$12" = "--resume" ] && [ "$13" = "$uuid" ]
-  [ "$(/bin/cat "${11}/stable-root")" = stable ]
-fi
-/bin/sleep 0.1
-cwd=$(pwd -P)
-if [ "$#" -eq 11 ]; then
-  physical_session_root=$(cd "${11}" && pwd -P)
-  session_path="${physical_session_root}/probe.jsonl"
-  printf session > "$session_path"
-else
-  session_path='provided by --resume'
-fi
-printf '[OMP_TIMEOUT]\ntimeout_source=internal\ninternal_deadline_seconds=%s\nhard_deadline_seconds=%s\ncwd=%s\nsession_id=%s\nsession_path=%s\nrecovery_hint=resume exact session with --resume %s and instruct it to synthesize without more tool calls\n' "$1" "$(( $1 + OMP_WRAPPER_HARD_GRACE_SECONDS))" "$cwd" "$uuid" "$session_path" "$uuid" > "$3"
-exit 124
-`)
+	fixture := newExecutingServerTestMaterial(t, now, fakeAuditOMPFixture{
+		Scenario: "timeout_always", SessionUUID: "019f9a4a-a904-7000-b341-e07ecf0e3baf", DelayMilliseconds: 200,
+	})
+
 	running := startInProcessProductionServer(t, fixture.material, now)
 	defer running.stop(t)
 	client := newServerTestClient(t, fixture.material, int32(os.Getpid()), now)
@@ -803,12 +741,8 @@ func TestAuditExecutorRestartFailsClosedOnWrongPIDStartIdentity(t *testing.T) {
 
 func TestProductionServerCrashRestartReconcilesRunningWithoutGuessingSuccess(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	fixture := newExecutingServerTestMaterial(t, now, `#!/bin/sh
-set -eu
-/bin/sleep 2
-printf 'completed after parent crash\n' > "$3"
-printf '[OMP_SESSION] session_id=019f9a4a-a904-7000-b341-e07ecf0e3baf\n[OMP_TEST] command_sha256=COMMAND_HASH\n[OMP_EVIDENCE_COMPLETE]\n' > "${11}/audit.log"
-`)
+	fixture := newExecutingServerTestMaterial(t, now, fakeAuditOMPFixture{Scenario: "report", Output: "completed after parent crash\n", DelayMilliseconds: 2000})
+
 	authority := newServerAuditAuthorityTestFixture(t, fixture.material, now)
 	first := startFakeBrokerServerProcess(t, fixture.material, now)
 	client := newServerTestClient(t, fixture.material, int32(first.command.Process.Pid), now)
@@ -867,7 +801,8 @@ type executingServerTestMaterial struct {
 	entry    executionPolicyEntry
 }
 
-func newExecutingServerTestMaterial(t *testing.T, now time.Time, wrapper string) executingServerTestMaterial {
+func newExecutingServerTestMaterial(t *testing.T, now time.Time, fixture fakeAuditOMPFixture) executingServerTestMaterial {
+
 	t.Helper()
 	material := newServerTestMaterial(t, now)
 	gitMaterial := newGitArchivePolicyMaterial(t)
@@ -882,11 +817,8 @@ func newExecutingServerTestMaterial(t *testing.T, now time.Time, wrapper string)
 	entry.InternalDeadlineSeconds = 5
 	entry.WrapperGraceSeconds = 2
 	entry.AllowedTests = []executionPolicyTestCommand{executionPolicyTestCommandForTest(t, "focused_go_test", "/usr/bin/true")}
-	wrapper = strings.ReplaceAll(wrapper, "COMMAND_HASH", entry.AllowedTests[0].CommandSHA256)
-	if err := os.WriteFile(entry.Wrapper.Path, []byte(wrapper), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	entry.Wrapper = fileIdentityForTest(t, entry.Wrapper.Path)
+	fixture.SpoofLog = strings.ReplaceAll(fixture.SpoofLog, "COMMAND_HASH", entry.AllowedTests[0].CommandSHA256)
+	installNativeFakeAuditOMPForTest(t, &entry, fixture)
 	entry = mustSealExecutionPolicyEntryForTest(t, entry)
 	writeExecutionPolicyFileForTest(t, material.executionPolicyPath, []executionPolicyEntry{entry})
 	return executingServerTestMaterial{material: material, entry: entry}

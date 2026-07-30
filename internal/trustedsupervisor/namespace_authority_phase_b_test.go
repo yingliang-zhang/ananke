@@ -11,6 +11,18 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func auditOwnedRootAncestorsForPhaseBTest(parent auditOwnedRootIdentity, byPath map[string]auditOwnedRootIdentity) []auditOwnedRootIdentity {
+	ancestors := make([]auditOwnedRootIdentity, 0, 3)
+	for path := parent.ParentPath; ; {
+		ancestor, ok := byPath[path]
+		if !ok {
+			return ancestors
+		}
+		ancestors = append(ancestors, ancestor)
+		path = ancestor.ParentPath
+	}
+}
+
 func syntheticAuditOwnedRootsForPhaseBTest(
 	t *testing.T,
 	policy *executionPolicy,
@@ -47,6 +59,23 @@ func syntheticAuditOwnedRootsForPhaseBTest(
 		}
 		identities = append(identities, identity)
 		byPath[identity.Path] = identity
+	}
+	var state *auditOwnedRootIdentity
+	for index := range identities {
+		if identities[index].Role == "direct_omp_home_state" {
+			identities[index].Mode = uint32(unix.S_IFDIR) | 0o500
+			state = &identities[index]
+			break
+		}
+	}
+	if state == nil {
+		t.Fatal("synthetic sealed HOME state identity missing")
+	}
+	for index := range identities {
+		if identities[index].Role == "direct_omp_home_run" {
+			identities[index].ParentMode = state.Mode
+			break
+		}
 	}
 	return identities
 }
@@ -178,11 +207,21 @@ func TestFinalizingOwnedRootDecoysRemainNonterminalLiveAndRestart(t *testing.T) 
 					roots := materializeSignedFinalizingRootsForPhaseBTest(t, &fixture)
 					target := roots[rootIndex]
 					retained := target.Path + ".retained-original"
+					if target.Role == "direct_omp_home_run" {
+						if err := os.Chmod(target.ParentPath, 0o700); err != nil {
+							t.Fatal(err)
+						}
+					}
 					if err := os.Rename(target.Path, retained); err != nil {
 						t.Fatal(err)
 					}
 					if err := os.Mkdir(target.Path, 0o700); err != nil {
 						t.Fatal(err)
+					}
+					if target.Role == "direct_omp_home_run" {
+						if err := os.Chmod(target.ParentPath, 0o500); err != nil {
+							t.Fatal(err)
+						}
 					}
 					decoyArtifact := filepath.Join(target.Path, "decoy-must-survive")
 					if err := os.WriteFile(decoyArtifact, []byte("decoy"), 0o600); err != nil {
@@ -329,7 +368,7 @@ func materializeSignedFinalizingRootsForPhaseBTest(t *testing.T, fixture *auditE
 	for _, spec := range specs {
 		var identity auditOwnedRootIdentity
 		if parent, nested := byPath[spec.parentPath]; nested {
-			identity, err = fixture.Policy.namespaceAuthority.mkdirAndCaptureOwnedChild(parent, filepath.Base(spec.path), spec.role, spec.cleanupRoot, false)
+			identity, err = fixture.Policy.namespaceAuthority.mkdirAndCaptureOwnedChild(parent, filepath.Base(spec.path), spec.role, spec.cleanupRoot, false, auditOwnedRootAncestorsForPhaseBTest(parent, byPath)...)
 		} else {
 			lease, leaseErr := fixture.Policy.namespaceAuthority.Duplicate(spec.parentPath)
 			if leaseErr != nil {
@@ -348,6 +387,31 @@ func materializeSignedFinalizingRootsForPhaseBTest(t *testing.T, fixture *auditE
 		identities = append(identities, identity)
 		byPath[identity.Path] = identity
 	}
+	stateIndex, runIndex := -1, -1
+	for index := range identities {
+		switch identities[index].Role {
+		case "direct_omp_home_state":
+			stateIndex = index
+		case "direct_omp_home_run":
+			runIndex = index
+		}
+	}
+	if stateIndex < 0 || runIndex < 0 {
+		t.Fatal("materialized sealed HOME identity missing")
+	}
+	state := identities[stateIndex]
+	state, err = fixture.Policy.namespaceAuthority.sealAndRecaptureOwnedDirectory(state, 0o500, auditOwnedRootAncestorsForPhaseBTest(state, byPath)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identities[stateIndex] = state
+	byPath[state.Path] = state
+	run, err := fixture.Policy.namespaceAuthority.captureOwnedChild(state, "run", "direct_omp_home_run", false, auditOwnedRootAncestorsForPhaseBTest(state, byPath)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identities[runIndex] = run
+	byPath[run.Path] = run
 	report.OwnedRoots = identities
 	finalizing, err = resealAuditEvidenceEventForPhaseBTest(t, finalizing, report)
 	if err != nil {

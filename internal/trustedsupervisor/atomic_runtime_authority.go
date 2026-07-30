@@ -2,10 +2,8 @@ package trustedsupervisor
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
-	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -43,9 +41,15 @@ const (
 
 	UnsupportedAtomicOMPRuntimeBoundaryFailureClass AtomicRuntimeBoundaryFailureClass = "unsupported_atomic_omp_runtime_boundary"
 
-	atomicOMPRuntimeAuthoritySchemaVersion                = "ananke.atomic-omp-runtime-authority.v1"
-	atomicOMPRuntimeAuthorityPolicyVersion                = "root-owned-immutable-hierarchy.v1"
+	atomicOMPRuntimeAuthoritySchemaVersion                = "ananke.atomic-omp-runtime-authority.v3"
+	atomicOMPRuntimeAuthorityPolicyVersion                = "root-owned-immutable-hierarchy-direct-exec.v3"
 	atomicOMPRuntimeArtifactFDPolicyParentRetainedCLOEXEC = "parent_retained_cloexec_not_inherited"
+	atomicOMPProcessGroupPolicySingleGroup                = "trusted_supervisor_single_group_v1"
+	atomicOMPLauncherModeDirectPinned                     = "sandbox_exec_direct_pinned_omp_v1"
+	atomicOMPArgvPolicyExactSudoRoute                     = "omp_print_exact_prompt_sudo_route_v1"
+	atomicOMPSandboxTargetPolicyExactPinned               = "exact_pinned_omp_executable_v1"
+	atomicOMPOutputTransportSupervisorStdout              = "supervisor_bounded_stdout_private_file_v1"
+	atomicOMPTimeoutOwnerSupervisor                       = "trusted_supervisor_typed_observation_v1"
 )
 
 type AtomicRuntimeBoundaryError struct {
@@ -93,17 +97,22 @@ func validAtomicRuntimeBoundaryReason(reason AtomicRuntimeBoundaryReason) bool {
 }
 
 type executionPolicyOMPRuntimeAuthority struct {
-	SchemaVersion             string                             `json:"schema_version"`
-	AuthorityPolicyVersion    string                             `json:"authority_policy_version"`
-	TrustedOwnerUID           uint32                             `json:"trusted_owner_uid"`
-	ExecutableAncestors       []executionPolicyDirectoryIdentity `json:"executable_ancestors"`
-	NativeAddonAncestors      []executionPolicyDirectoryIdentity `json:"native_addon_ancestors"`
-	NativeDataRoot            string                             `json:"native_data_root"`
-	DeniedNativeFallbackRoots []string                           `json:"denied_native_fallback_roots"`
-	BootstrapSHA256           string                             `json:"bootstrap_sha256"`
-	FramedWrapperStreamSHA256 string                             `json:"framed_wrapper_stream_sha256"`
-	ArtifactFDPolicy          string                             `json:"artifact_fd_policy"`
-	AuthorityHash             string                             `json:"authority_hash"`
+	SchemaVersion                    string                             `json:"schema_version"`
+	AuthorityPolicyVersion           string                             `json:"authority_policy_version"`
+	TrustedOwnerUID                  uint32                             `json:"trusted_owner_uid"`
+	ExecutableAncestors              []executionPolicyDirectoryIdentity `json:"executable_ancestors"`
+	NativeAddonAncestors             []executionPolicyDirectoryIdentity `json:"native_addon_ancestors"`
+	NativeDataRoot                   string                             `json:"native_data_root"`
+	DeniedNativeFallbackRoots        []string                           `json:"denied_native_fallback_roots"`
+	LauncherMode                     string                             `json:"launcher_mode"`
+	OMPArgvPolicy                    string                             `json:"omp_argv_policy"`
+	SandboxTargetPolicy              string                             `json:"sandbox_target_policy"`
+	OutputTransport                  string                             `json:"output_transport"`
+	TimeoutOwner                     string                             `json:"timeout_owner"`
+	WrapperCompatibilityOracleSHA256 string                             `json:"wrapper_compatibility_oracle_sha256"`
+	ArtifactFDPolicy                 string                             `json:"artifact_fd_policy"`
+	ProcessGroupPolicy               string                             `json:"process_group_policy"`
+	AuthorityHash                    string                             `json:"authority_hash"`
 }
 
 func sealExecutionPolicyOMPRuntimeAuthority(
@@ -140,6 +149,10 @@ func validateExecutionPolicyAtomicRuntimeAuthority(entry executionPolicyEntry) e
 	if err != nil || authority.SchemaVersion != atomicOMPRuntimeAuthoritySchemaVersion ||
 		authority.AuthorityPolicyVersion != atomicOMPRuntimeAuthorityPolicyVersion || authority.TrustedOwnerUID != 0 ||
 		authority.ArtifactFDPolicy != atomicOMPRuntimeArtifactFDPolicyParentRetainedCLOEXEC ||
+		authority.ProcessGroupPolicy != atomicOMPProcessGroupPolicySingleGroup ||
+		authority.LauncherMode != atomicOMPLauncherModeDirectPinned || authority.OMPArgvPolicy != atomicOMPArgvPolicyExactSudoRoute ||
+		authority.SandboxTargetPolicy != atomicOMPSandboxTargetPolicyExactPinned ||
+		authority.OutputTransport != atomicOMPOutputTransportSupervisorStdout || authority.TimeoutOwner != atomicOMPTimeoutOwnerSupervisor ||
 		sealed.AuthorityHash != authority.AuthorityHash || !protocolHashPattern.MatchString(authority.AuthorityHash) ||
 		!validAtomicNativeLayout(entry, authority) || !validDeniedNativeFallbackRoots(authority.NativeDataRoot, authority.DeniedNativeFallbackRoots) ||
 		!validExecutionPolicyAtomicAncestors(entry.OMPExecutable.Path, authority.ExecutableAncestors) ||
@@ -147,17 +160,14 @@ func validateExecutionPolicyAtomicRuntimeAuthority(entry executionPolicyEntry) e
 		len(authority.ExecutableAncestors) == 0 || entry.OMPExecutableRoot != authority.ExecutableAncestors[len(authority.ExecutableAncestors)-1] {
 		return authenticationError("execution policy atomic OMP runtime authority")
 	}
-	bootstrap, err := auditOMPBootstrap(entry.OMPExecutable.Path)
-	if err != nil || hashJournalBytes(bootstrap) != authority.BootstrapSHA256 {
-		return authenticationError("execution policy OMP bootstrap binding")
-	}
 	wrapper, err := freezeAuditWrapper(entry.Wrapper)
 	if err != nil {
 		return err
 	}
 	defer zeroBytes(wrapper)
-	if auditFramedOMPWrapperStreamSHA256(bootstrap, wrapper) != authority.FramedWrapperStreamSHA256 {
-		return authenticationError("execution policy framed OMP wrapper stream binding")
+	if hashJournalBytes(wrapper) != authority.WrapperCompatibilityOracleSHA256 ||
+		authority.WrapperCompatibilityOracleSHA256 != entry.Wrapper.SHA256 {
+		return authenticationError("execution policy wrapper compatibility-oracle binding")
 	}
 	return nil
 }
@@ -215,36 +225,6 @@ func runtimeAuthorityVerifier(policy *executionPolicy) atomicRuntimeAuthorityVer
 		return policy.atomicRuntimeAuthorityVerifier
 	}
 	return productionAtomicRuntimeAuthorityVerifier()
-}
-
-func auditOMPBootstrap(executablePath string) ([]byte, error) {
-	if executablePath == "" || !filepath.IsAbs(executablePath) || filepath.Clean(executablePath) != executablePath ||
-		strings.IndexByte(executablePath, 0) >= 0 || filepath.Base(executablePath) != "omp" {
-		return nil, unsupportedAtomicRuntimeBoundary(AtomicRuntimeBoundaryExecutable, AtomicRuntimeBoundaryInvalidPath)
-	}
-	literal := "'" + strings.ReplaceAll(executablePath, "'", "'\\''") + "'"
-	return []byte("omp() {\n    exec " + literal + " \"$@\"\n}\nreadonly -f omp\n"), nil
-}
-
-func auditOMPWrapperStream(bootstrap, wrapper []byte) []byte {
-	stream := make([]byte, len(bootstrap)+len(wrapper))
-	copy(stream, bootstrap)
-	copy(stream[len(bootstrap):], wrapper)
-	return stream
-}
-
-func auditFramedOMPWrapperStreamSHA256(bootstrap, wrapper []byte) string {
-	digest := sha256.New()
-	writeLengthFramedHashPart(digest, bootstrap)
-	writeLengthFramedHashPart(digest, wrapper)
-	return "sha256:" + hex.EncodeToString(digest.Sum(nil))
-}
-
-func writeLengthFramedHashPart(digest hash.Hash, value []byte) {
-	var length [8]byte
-	binary.BigEndian.PutUint64(length[:], uint64(len(value)))
-	_, _ = digest.Write(length[:])
-	_, _ = digest.Write(value)
 }
 
 type atomicRuntimeAuthorityDependencies struct {
@@ -333,12 +313,14 @@ func verifyAtomicOMPRuntimeAuthority(
 	if sealErr != nil || authority.SchemaVersion != atomicOMPRuntimeAuthoritySchemaVersion ||
 		authority.AuthorityPolicyVersion != atomicOMPRuntimeAuthorityPolicyVersion || authority.TrustedOwnerUID != 0 ||
 		authority.ArtifactFDPolicy != atomicOMPRuntimeArtifactFDPolicyParentRetainedCLOEXEC ||
+		authority.ProcessGroupPolicy != atomicOMPProcessGroupPolicySingleGroup || authority.LauncherMode != atomicOMPLauncherModeDirectPinned ||
+		authority.OMPArgvPolicy != atomicOMPArgvPolicyExactSudoRoute || authority.SandboxTargetPolicy != atomicOMPSandboxTargetPolicyExactPinned ||
+		authority.OutputTransport != atomicOMPOutputTransportSupervisorStdout || authority.TimeoutOwner != atomicOMPTimeoutOwnerSupervisor ||
 		sealed.AuthorityHash != authority.AuthorityHash || !protocolHashPattern.MatchString(authority.AuthorityHash) {
 		return nil, unsupportedAtomicRuntimeBoundary(AtomicRuntimeBoundaryExecutable, AtomicRuntimeBoundaryAuthorityBinding)
 	}
-	bootstrap, err := auditOMPBootstrap(entry.OMPExecutable.Path)
-	if err != nil || len(wrapper) == 0 || hashJournalBytes(bootstrap) != authority.BootstrapSHA256 ||
-		auditFramedOMPWrapperStreamSHA256(bootstrap, wrapper) != authority.FramedWrapperStreamSHA256 {
+	if len(wrapper) == 0 || hashJournalBytes(wrapper) != authority.WrapperCompatibilityOracleSHA256 ||
+		authority.WrapperCompatibilityOracleSHA256 != entry.Wrapper.SHA256 {
 		return nil, unsupportedAtomicRuntimeBoundary(AtomicRuntimeBoundaryExecutable, AtomicRuntimeBoundaryHashMismatch)
 	}
 	if !validAtomicNativeLayout(entry, authority) {

@@ -1,8 +1,10 @@
 package trustedsupervisor
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path"
@@ -17,7 +19,7 @@ import (
 )
 
 const (
-	auditEvidenceSchemaVersion    = "ananke.local-trusted-supervisor-readonly-audit-evidence.v5"
+	auditEvidenceSchemaVersion    = "ananke.local-trusted-supervisor-readonly-audit-evidence.v6"
 	auditModelReportSchemaVersion = "ananke.local-trusted-supervisor-model-audit-report.v1"
 	maxAuditOutputBytes           = 256 * 1024
 	maxAuditModelFindings         = 256
@@ -304,19 +306,22 @@ func expectedAuditFinalizingOwnedRootSpecs(runID string, attempt int, entry exec
 	if !executionTaskIDPattern.MatchString(runID) || attempt < 1 || attempt > 10 {
 		return nil, authenticationError("audit owned root inventory attempt")
 	}
-	specs := make([]auditOwnedRootSpec, 0, attempt*6+3)
+	specs := make([]auditOwnedRootSpec, 0, attempt*7+3)
 	for number := 1; number <= attempt; number++ {
 		attemptRunID := runID + "_attempt_" + strconv.Itoa(number)
 		prompt := filepath.Join(entry.PromptRoot, attemptRunID)
 		output := filepath.Join(entry.OutputRoot, attemptRunID)
 		temporary := filepath.Join(entry.TemporaryRoot, attemptRunID)
+		home := filepath.Join(temporary, "home")
+		homeState := filepath.Join(home, ".omp")
 		specs = append(specs,
 			auditOwnedRootSpec{role: "prompt", path: prompt, parentPath: entry.PromptRoot, cleanupRoot: true},
 			auditOwnedRootSpec{role: "output", path: output, parentPath: entry.OutputRoot, cleanupRoot: true},
 			auditOwnedRootSpec{role: "temporary", path: temporary, parentPath: entry.TemporaryRoot, cleanupRoot: true},
-			auditOwnedRootSpec{role: "wrapper_transport_state", path: filepath.Join(temporary, "wrapper-state"), parentPath: temporary},
-			auditOwnedRootSpec{role: "wrapper_transport_agent", path: filepath.Join(temporary, "omp-agent"), parentPath: temporary},
-			auditOwnedRootSpec{role: "wrapper_transport_home", path: filepath.Join(temporary, "home"), parentPath: temporary},
+			auditOwnedRootSpec{role: "direct_omp_agent", path: filepath.Join(temporary, "omp-agent"), parentPath: temporary},
+			auditOwnedRootSpec{role: "direct_omp_home", path: home, parentPath: temporary},
+			auditOwnedRootSpec{role: "direct_omp_home_state", path: homeState, parentPath: home},
+			auditOwnedRootSpec{role: "direct_omp_home_run", path: filepath.Join(homeState, "run"), parentPath: homeState},
 		)
 	}
 	work := filepath.Join(entry.WorkRoot, runID)
@@ -334,7 +339,7 @@ func expectedAuditFinalizingOwnedRootSpecs(runID string, attempt int, entry exec
 }
 
 func validateAuditOwnedRootSequence(identities []auditOwnedRootIdentity) error {
-	if len(identities) == 0 || len(identities) > 10*6+3 {
+	if len(identities) == 0 || len(identities) > 10*7+3 {
 		return authenticationError("audit owned root inventory size")
 	}
 	all := make(map[string]auditOwnedRootIdentity, len(identities))
@@ -452,7 +457,12 @@ func collectAuditEvidence(
 		return collectedAuditEvidence{}, authenticationError("successful audit evidence boundary")
 	}
 	if result.boundInvocation.NativeAddonPath != "" {
+		liveRoots := result.boundInvocation.OwnedRoots
+		if invocation.NativeAddonPath != "" {
+			liveRoots = invocation.OwnedRoots
+		}
 		invocation = result.boundInvocation
+		invocation.OwnedRoots = liveRoots
 	}
 	if err := policy.ValidateEffectBoundary(entry); err != nil {
 		return collectedAuditEvidence{}, err
@@ -542,18 +552,10 @@ func readAuditRegularFile(path string, limit int64) ([]byte, int64, error) {
 	return contents, information.Size(), nil
 }
 
-func auditBytesLeakAuthority(contents []byte, entry executionPolicyEntry, invocation auditInvocation) bool {
+func auditBytesLeakSecretAuthority(contents []byte) bool {
 	lower := bytes.ToLower(contents)
 	for _, marker := range [][]byte{[]byte("begin private key"), []byte("authorization: bearer"), []byte("api_key="), []byte("api-key=")} {
 		if bytes.Contains(lower, marker) {
-			return true
-		}
-	}
-	for _, value := range []string{
-		entry.Repository.Path, entry.Wrapper.Path, entry.PromptRoot, entry.OutputRoot, entry.SessionRoot, entry.WorkRoot,
-		invocation.PromptPath, invocation.OutputPath, invocation.SessionDir, invocation.WorkDir,
-	} {
-		if value != "" && bytes.Contains(contents, []byte(value)) {
 			return true
 		}
 	}
@@ -565,79 +567,396 @@ func auditBytesLeakAuthority(contents []byte, entry executionPolicyEntry, invoca
 	return false
 }
 
-const maxAuditTimeoutEvidenceBytes = 4096
+type auditAuthorityKind string
 
-type auditTimeoutEvidence struct {
-	TimeoutSource  string
-	SessionUUID    string
-	SessionPath    string
-	SynthesizeOnly bool
+const (
+	auditAuthorityKindSecret      auditAuthorityKind = "secret"
+	auditAuthorityKindRepository  auditAuthorityKind = "repository"
+	auditAuthorityKindWrapper     auditAuthorityKind = "wrapper"
+	auditAuthorityKindPromptRoot  auditAuthorityKind = "prompt_root"
+	auditAuthorityKindOutputRoot  auditAuthorityKind = "output_root"
+	auditAuthorityKindSessionRoot auditAuthorityKind = "session_root"
+	auditAuthorityKindWorkRoot    auditAuthorityKind = "work_root"
+	auditAuthorityKindPromptPath  auditAuthorityKind = "prompt_path"
+	auditAuthorityKindOutputPath  auditAuthorityKind = "output_path"
+	auditAuthorityKindSessionPath auditAuthorityKind = "session_path"
+	auditAuthorityKindWorkPath    auditAuthorityKind = "work_path"
+)
+
+func validAuditAuthorityKind(kind auditAuthorityKind) bool {
+	switch kind {
+	case auditAuthorityKindSecret, auditAuthorityKindRepository, auditAuthorityKindWrapper,
+		auditAuthorityKindPromptRoot, auditAuthorityKindOutputRoot, auditAuthorityKindSessionRoot,
+		auditAuthorityKindWorkRoot, auditAuthorityKindPromptPath, auditAuthorityKindOutputPath,
+		auditAuthorityKindSessionPath, auditAuthorityKindWorkPath:
+		return true
+	default:
+		return false
+	}
 }
 
-func parseAuditTimeoutEvidenceFile(entry executionPolicyEntry, invocation auditInvocation, result auditInvocationResult) (auditTimeoutEvidence, error) {
-	if result.ExitCode != 124 || !result.ProcessGroupGone || result.Cancelled {
-		return auditTimeoutEvidence{}, authenticationError("wrapper timeout process authority")
+func classifyAuditBytesLeakAuthority(contents []byte, entry executionPolicyEntry, invocation auditInvocation) (auditAuthorityKind, bool) {
+	if auditBytesLeakSecretAuthority(contents) {
+		return auditAuthorityKindSecret, true
 	}
-	contents, _, err := readAuditRegularFile(invocation.OutputPath, maxAuditOutputBytes)
+	for _, candidate := range []struct {
+		kind  auditAuthorityKind
+		value string
+	}{
+		{auditAuthorityKindRepository, entry.Repository.Path},
+		{auditAuthorityKindWrapper, entry.Wrapper.Path},
+		{auditAuthorityKindPromptRoot, entry.PromptRoot},
+		{auditAuthorityKindOutputRoot, entry.OutputRoot},
+		{auditAuthorityKindSessionRoot, entry.SessionRoot},
+		{auditAuthorityKindWorkRoot, entry.WorkRoot},
+		{auditAuthorityKindPromptPath, invocation.PromptPath},
+		{auditAuthorityKindOutputPath, invocation.OutputPath},
+		{auditAuthorityKindSessionPath, invocation.SessionDir},
+		{auditAuthorityKindWorkPath, invocation.WorkDir},
+	} {
+		if candidate.value != "" && bytes.Contains(contents, []byte(candidate.value)) {
+			return candidate.kind, true
+		}
+	}
+	return "", false
+}
+
+func auditBytesLeakAuthority(contents []byte, entry executionPolicyEntry, invocation auditInvocation) bool {
+	_, leaked := classifyAuditBytesLeakAuthority(contents, entry, invocation)
+	return leaked
+}
+
+const (
+	auditTimeoutObservationSchemaVersion     = "ananke.local-trusted-supervisor-timeout-observation.v1"
+	auditTimeoutSourceOMPInternalDeadline    = "omp_internal_deadline"
+	auditTimeoutSourceSupervisorHardDeadline = "supervisor_hard_deadline"
+	maxAuditTimeoutSessionHeaderBytes        = 1024 * 1024
+)
+
+type auditTimeoutEvidence struct {
+	SchemaVersion                 string `json:"schema_version"`
+	ObservationHash               string `json:"observation_hash"`
+	TimeoutSource                 string `json:"timeout_source"`
+	DeadlineObservation           string `json:"deadline_observation"`
+	InternalDeadlineSeconds       int    `json:"internal_deadline_seconds"`
+	SupervisorHardDeadlineSeconds int    `json:"supervisor_hard_deadline_seconds"`
+	RunID                         string `json:"run_id"`
+	SessionRunID                  string `json:"session_run_id"`
+	CommandDescriptorHash         string `json:"command_descriptor_hash"`
+	PromptSHA256                  string `json:"prompt_sha256"`
+	SandboxProfileSHA256          string `json:"sandbox_profile_sha256"`
+	ResumeSessionUUID             string `json:"resume_session_uuid"`
+	SessionRoot                   string `json:"session_root"`
+	SessionUUID                   string `json:"session_uuid"`
+	SessionPath                   string `json:"session_path"`
+	SynthesizeOnly                bool   `json:"synthesize_only"`
+	PID                           int    `json:"pid"`
+	PGID                          int    `json:"pgid"`
+	ProcessStartIdentity          string `json:"process_start_identity"`
+	ProcessStartedAt              string `json:"process_started_at"`
+	ProcessFinishedAt             string `json:"process_finished_at"`
+	ExitCode                      int    `json:"exit_code"`
+	StdoutSHA256                  string `json:"stdout_sha256"`
+	StderrSHA256                  string `json:"stderr_sha256"`
+	ProcessGroupExitConfirmed     bool   `json:"process_group_exit_confirmed"`
+}
+
+type auditSessionPathSnapshot map[string]struct{}
+
+func snapshotAuditSessionPaths(invocation auditInvocation) (auditSessionPathSnapshot, error) {
+	if invocation.Resume.SessionUUID != "" {
+		return auditSessionPathSnapshot{}, nil
+	}
+	rootIdentity, ok := auditOwnedRootIdentityForRole(invocation.OwnedRoots, "session")
+	if !ok || rootIdentity.Path != invocation.SessionDir {
+		return nil, authenticationError("timeout session root identity")
+	}
+	paths := make(auditSessionPathSnapshot)
+	files := 0
+	err := filepath.Walk(invocation.SessionDir, func(candidate string, information os.FileInfo, walkErr error) error {
+		if walkErr != nil || information == nil || information.Mode()&os.ModeSymlink != 0 {
+			return authenticationError("bounded timeout session snapshot")
+		}
+		if information.IsDir() {
+			return nil
+		}
+		files++
+		if files > maxAuditTreeScanFiles || !information.Mode().IsRegular() {
+			return ErrLimit
+		}
+		if filepath.Ext(candidate) == ".jsonl" {
+			resolved, err := filepath.EvalSymlinks(candidate)
+			if err != nil {
+				return authenticationError("physical timeout session path")
+			}
+			paths[resolved] = struct{}{}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return paths, nil
+}
+
+func captureContainsDeadlineExceeded(streams ...[]byte) bool {
+	for _, stream := range streams {
+		for _, line := range bytes.Split(stream, []byte{'\n'}) {
+			if bytes.Equal(line, []byte("Deadline exceeded")) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func buildAuditTimeoutEvidence(entry executionPolicyEntry, invocation auditInvocation, result auditInvocationResult, source string, before auditSessionPathSnapshot) (auditTimeoutEvidence, error) {
+	if !result.ProcessGroupGone || result.Cancelled || result.PID <= 0 || result.PGID != result.PID || result.ProcessStartIdentity == "" ||
+		!validServerJournalTimestamp(result.StartedAt) || !validServerJournalTimestamp(result.FinishedAt) ||
+		source == auditTimeoutSourceSupervisorHardDeadline && !result.TimedOut || source == auditTimeoutSourceOMPInternalDeadline && result.TimedOut {
+		return auditTimeoutEvidence{}, authenticationError("supervisor timeout process authority")
+	}
+	sessionUUID, sessionPath, err := resolveAuditTimeoutSession(invocation, before)
 	if err != nil {
 		return auditTimeoutEvidence{}, err
 	}
-	defer zeroBytes(contents)
-	marker := []byte("[OMP_TIMEOUT]")
-	if bytes.Count(contents, marker) != 1 {
-		return auditTimeoutEvidence{}, authenticationError("exact OMP timeout marker")
+	observation := auditTimeoutEvidence{
+		SchemaVersion: auditTimeoutObservationSchemaVersion, TimeoutSource: source,
+		DeadlineObservation: "standalone_deadline_exceeded_line", InternalDeadlineSeconds: entry.InternalDeadlineSeconds,
+		SupervisorHardDeadlineSeconds: entry.InternalDeadlineSeconds + entry.WrapperGraceSeconds,
+		RunID:                         invocation.RunID, SessionRunID: invocation.SessionRunID, CommandDescriptorHash: invocation.CommandDescriptorHash,
+		PromptSHA256: invocation.PromptSHA256, SandboxProfileSHA256: invocation.SandboxProfileHash,
+		ResumeSessionUUID: invocation.Resume.SessionUUID, SessionUUID: sessionUUID, SessionPath: sessionPath, SessionRoot: invocation.SessionDir,
+		SynthesizeOnly: true, PID: result.PID, PGID: result.PGID, ProcessStartIdentity: result.ProcessStartIdentity,
+		ProcessStartedAt: result.StartedAt, ProcessFinishedAt: result.FinishedAt, ExitCode: result.ExitCode,
+		StdoutSHA256: result.StdoutSHA256, StderrSHA256: result.StderrSHA256, ProcessGroupExitConfirmed: true,
 	}
-	start := bytes.LastIndex(contents, marker)
-	if start < 0 || start > 0 && contents[start-1] != '\n' {
-		return auditTimeoutEvidence{}, authenticationError("bounded OMP timeout suffix")
+	if source == auditTimeoutSourceSupervisorHardDeadline {
+		observation.DeadlineObservation = "supervisor_hard_deadline_timer_fired"
 	}
-	record := contents[start:]
-	if len(record) > maxAuditTimeoutEvidenceBytes || !bytes.HasSuffix(record, []byte("\n")) || bytes.IndexByte(record, 0) >= 0 {
-		return auditTimeoutEvidence{}, authenticationError("bounded OMP timeout suffix")
+	return sealAuditTimeoutEvidence(observation)
+}
+
+func sealAuditTimeoutEvidence(observation auditTimeoutEvidence) (auditTimeoutEvidence, error) {
+	observation.ObservationHash = ""
+	if observation.SchemaVersion != auditTimeoutObservationSchemaVersion ||
+		observation.TimeoutSource != auditTimeoutSourceOMPInternalDeadline && observation.TimeoutSource != auditTimeoutSourceSupervisorHardDeadline ||
+		observation.InternalDeadlineSeconds < 1 || observation.SupervisorHardDeadlineSeconds <= observation.InternalDeadlineSeconds ||
+		!executionTaskIDPattern.MatchString(observation.RunID) || !executionTaskIDPattern.MatchString(observation.SessionRunID) ||
+		!protocolHashPattern.MatchString(observation.CommandDescriptorHash) || !protocolHashPattern.MatchString(observation.PromptSHA256) ||
+		!protocolHashPattern.MatchString(observation.SandboxProfileSHA256) || !auditSessionUUIDPattern.MatchString(observation.SessionUUID) ||
+		observation.SessionRoot == "" || !filepath.IsAbs(observation.SessionRoot) || filepath.Clean(observation.SessionRoot) != observation.SessionRoot ||
+		observation.ResumeSessionUUID != "" && observation.ResumeSessionUUID != observation.SessionUUID || !observation.SynthesizeOnly ||
+		observation.PID <= 0 || observation.PGID != observation.PID || observation.ProcessStartIdentity == "" ||
+		!validServerJournalTimestamp(observation.ProcessStartedAt) || !validServerJournalTimestamp(observation.ProcessFinishedAt) ||
+		!protocolHashPattern.MatchString(observation.StdoutSHA256) || !protocolHashPattern.MatchString(observation.StderrSHA256) ||
+		!observation.ProcessGroupExitConfirmed ||
+		observation.TimeoutSource == auditTimeoutSourceOMPInternalDeadline && observation.DeadlineObservation != "standalone_deadline_exceeded_line" ||
+		observation.TimeoutSource == auditTimeoutSourceSupervisorHardDeadline && observation.DeadlineObservation != "supervisor_hard_deadline_timer_fired" {
+		return auditTimeoutEvidence{}, authenticationError("closed supervisor timeout observation")
 	}
-	lines := strings.Split(strings.TrimSuffix(string(record), "\n"), "\n")
-	if len(lines) != 8 || lines[0] != string(marker) ||
-		lines[2] != "internal_deadline_seconds="+strconv.Itoa(entry.InternalDeadlineSeconds) ||
-		lines[3] != "hard_deadline_seconds="+strconv.Itoa(entry.InternalDeadlineSeconds+entry.WrapperGraceSeconds) {
-		return auditTimeoutEvidence{}, authenticationError("exact OMP timeout record")
+	if observation.ResumeSessionUUID != "" && observation.SessionPath != "" ||
+		observation.ResumeSessionUUID == "" && !validFreshAuditTimeoutSessionPathStructure(observation.SessionPath, observation.SessionRoot) {
+		return auditTimeoutEvidence{}, authenticationError("supervisor timeout session observation")
 	}
-	timeoutSource := strings.TrimPrefix(lines[1], "timeout_source=")
-	if lines[1] != "timeout_source="+timeoutSource || timeoutSource != "internal" && timeoutSource != "external" {
-		return auditTimeoutEvidence{}, authenticationError("exact OMP timeout source")
+	hash, err := canonicalHash(observation)
+	if err != nil {
+		return auditTimeoutEvidence{}, err
+	}
+	observation.ObservationHash = hash
+	return observation, nil
+}
+
+func validAuditTimeoutEvidence(observation auditTimeoutEvidence) bool {
+	sealed, err := sealAuditTimeoutEvidence(observation)
+	return err == nil && sealed == observation && protocolHashPattern.MatchString(observation.ObservationHash)
+}
+
+func resolveAuditTimeoutSession(invocation auditInvocation, before auditSessionPathSnapshot) (string, string, error) {
+	if invocation.Resume.SessionUUID != "" {
+		if !auditSessionUUIDPattern.MatchString(invocation.Resume.SessionUUID) {
+			return "", "", authenticationError("exact timeout resume UUID")
+		}
+		return invocation.Resume.SessionUUID, "", nil
 	}
 	physicalWorkDir, err := filepath.EvalSymlinks(invocation.WorkDir)
-	if err != nil || lines[4] != "cwd="+physicalWorkDir {
-		return auditTimeoutEvidence{}, authenticationError("physical OMP timeout cwd")
+	if err != nil {
+		return "", "", authenticationError("physical timeout work directory")
 	}
-	sessionUUID := strings.TrimPrefix(lines[5], "session_id=")
-	if lines[5] != "session_id="+sessionUUID || !auditSessionUUIDPattern.MatchString(sessionUUID) {
-		return auditTimeoutEvidence{}, authenticationError("resolved OMP timeout session UUID")
+	prompt, err := os.ReadFile(invocation.PromptPath)
+	if err != nil || hashJournalBytes(prompt) != invocation.PromptSHA256 {
+		return "", "", authenticationError("exact timeout prompt")
 	}
-	reportedSessionPath := strings.TrimPrefix(lines[6], "session_path=")
-	if lines[6] != "session_path="+reportedSessionPath {
-		return auditTimeoutEvidence{}, authenticationError("exact OMP timeout session path")
+	defer zeroBytes(prompt)
+	rootIdentity, ok := auditOwnedRootIdentityForRole(invocation.OwnedRoots, "session")
+	if !ok || rootIdentity.Path != invocation.SessionDir {
+		return "", "", authenticationError("timeout session identity")
 	}
-	if invocation.Resume.SessionUUID != "" {
-		if sessionUUID != invocation.Resume.SessionUUID || reportedSessionPath != "provided by --resume" {
-			return auditTimeoutEvidence{}, authenticationError("exact resumed OMP timeout session")
+	type match struct{ uuid, path string }
+	matches := make([]match, 0, 1)
+	files := 0
+	err = filepath.Walk(invocation.SessionDir, func(candidate string, information os.FileInfo, walkErr error) error {
+		if walkErr != nil || information == nil || information.Mode()&os.ModeSymlink != 0 {
+			return authenticationError("bounded timeout session discovery")
 		}
-	} else if !validFreshAuditTimeoutSessionPath(reportedSessionPath, invocation.SessionDir) {
-		return auditTimeoutEvidence{}, authenticationError("exact fresh OMP timeout session path")
+		if information.IsDir() {
+			return nil
+		}
+		files++
+		if files > maxAuditTreeScanFiles || !information.Mode().IsRegular() {
+			return ErrLimit
+		}
+		if filepath.Ext(candidate) != ".jsonl" {
+			return nil
+		}
+		resolved, resolveErr := filepath.EvalSymlinks(candidate)
+		if resolveErr != nil {
+			return authenticationError("physical timeout session candidate")
+		}
+		if _, existed := before[resolved]; existed {
+			return nil
+		}
+		status, ok := information.Sys().(*syscall.Stat_t)
+		if !ok || status.Uid != rootIdentity.OwnerUID {
+			return authenticationError("timeout session candidate owner")
+		}
+		uuid, matched := parseAuditSessionHeader(candidate, physicalWorkDir, string(prompt))
+		if matched {
+			matches = append(matches, match{uuid: uuid, path: candidate})
+		}
+		return nil
+	})
+	if err != nil || len(matches) != 1 {
+		return "", "", authenticationError("unique exact timeout session")
 	}
-	recovery := "recovery_hint=resume exact session with --resume " + sessionUUID + " and instruct it to synthesize without more tool calls"
-	if lines[7] != recovery {
-		return auditTimeoutEvidence{}, authenticationError("exact OMP timeout recovery hint")
+	if !validFreshAuditTimeoutSessionPath(matches[0].path, invocation.SessionDir) {
+		return "", "", authenticationError("exact timeout session path")
 	}
-	return auditTimeoutEvidence{TimeoutSource: timeoutSource, SessionUUID: sessionUUID, SessionPath: reportedSessionPath, SynthesizeOnly: true}, nil
+	return matches[0].uuid, matches[0].path, nil
+}
+
+func parseAuditSessionHeader(path, expectedCWD, expectedPrompt string) (string, bool) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 4096), maxAuditTimeoutSessionHeaderBytes)
+	sessionUUID, sessionCWD := "", ""
+	var userPrompt *string
+	for line := 0; line < 50 && scanner.Scan(); line++ {
+		var record struct {
+			Type    string          `json:"type"`
+			ID      string          `json:"id"`
+			CWD     string          `json:"cwd"`
+			Message json.RawMessage `json:"message"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &record) != nil {
+			return "", false
+		}
+		if record.Type == "session" {
+			sessionUUID, sessionCWD = record.ID, record.CWD
+		}
+		if record.Type == "message" {
+			var message struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			}
+			if json.Unmarshal(record.Message, &message) == nil && message.Role == "user" {
+				var text string
+				if json.Unmarshal(message.Content, &text) == nil {
+					userPrompt = &text
+				} else {
+					var parts []struct{ Type, Text string }
+					if json.Unmarshal(message.Content, &parts) == nil {
+						var combined strings.Builder
+						for _, part := range parts {
+							if part.Type == "text" {
+								combined.WriteString(part.Text)
+							}
+						}
+						text = combined.String()
+						userPrompt = &text
+					}
+				}
+			}
+		}
+		if sessionUUID != "" && userPrompt != nil {
+			break
+		}
+	}
+	return sessionUUID, scanner.Err() == nil && auditSessionUUIDPattern.MatchString(sessionUUID) && sessionCWD == expectedCWD && userPrompt != nil && *userPrompt == expectedPrompt
+}
+
+func auditFreshSessionJSONLAllowsPaths(contents []byte, allowedPaths map[string]struct{}, protectedPaths []string) bool {
+	scanner := bufio.NewScanner(bytes.NewReader(contents))
+	scanner.Buffer(make([]byte, 4096), maxAuditTreeScanBytes)
+	records := 0
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		decoded, err := decodeJSONValue(line)
+		if err != nil {
+			return false
+		}
+		if _, ok := decoded.(map[string]any); !ok {
+			return false
+		}
+		decoder := json.NewDecoder(bytes.NewReader(line))
+		for {
+			token, err := decoder.Token()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return false
+			}
+			value, ok := token.(string)
+			if ok && !auditFreshSessionStringAllowsPaths(value, allowedPaths, protectedPaths) {
+				return false
+			}
+		}
+		records++
+	}
+	return records != 0 && scanner.Err() == nil
+}
+
+func auditFreshSessionStringAllowsPaths(value string, allowedPaths map[string]struct{}, protectedPaths []string) bool {
+	for _, protected := range protectedPaths {
+		if protected != "" && strings.Contains(value, protected) {
+			return false
+		}
+	}
+	if _, ok := allowedPaths[value]; ok {
+		return true
+	}
+	return !containsAuditAbsolutePathReference(value)
+}
+
+func containsAuditAbsolutePathReference(value string) bool {
+	for index := range len(value) {
+		if value[index] == '/' && (index == 0 || auditPathReferenceBoundary(value[index-1])) {
+			return true
+		}
+		if index+2 < len(value) && ((value[index] >= 'A' && value[index] <= 'Z') || (value[index] >= 'a' && value[index] <= 'z')) &&
+			value[index+1] == ':' && (value[index+2] == '/' || value[index+2] == '\\') && (index == 0 || auditPathReferenceBoundary(value[index-1])) {
+			return true
+		}
+	}
+	return false
+}
+
+func auditPathReferenceBoundary(value byte) bool {
+	return value < '0' || value > '9' && value < 'A' || value > 'Z' && value < 'a' || value > 'z'
 }
 
 func validFreshAuditTimeoutSessionPath(reported, sessionRoot string) bool {
-	if reported == "" || sessionRoot == "" || !filepath.IsAbs(reported) || filepath.Clean(reported) != reported {
+	if !validFreshAuditTimeoutSessionPathStructure(reported, sessionRoot) {
 		return false
 	}
 	physicalRoot, rootErr := filepath.EvalSymlinks(sessionRoot)
 	physicalPath, pathErr := filepath.EvalSymlinks(reported)
-	if rootErr != nil || pathErr != nil || physicalPath != reported {
+	if rootErr != nil || pathErr != nil {
 		return false
 	}
 	relative, err := filepath.Rel(physicalRoot, physicalPath)
@@ -645,11 +964,16 @@ func validFreshAuditTimeoutSessionPath(reported, sessionRoot string) bool {
 		return false
 	}
 	information, err := os.Lstat(reported)
-	if err != nil || information.Mode()&os.ModeSymlink != 0 || !information.Mode().IsRegular() {
+	return err == nil && information.Mode()&os.ModeSymlink == 0 && information.Mode().IsRegular()
+}
+
+func validFreshAuditTimeoutSessionPathStructure(reported, sessionRoot string) bool {
+	if reported == "" || sessionRoot == "" || !filepath.IsAbs(reported) || !filepath.IsAbs(sessionRoot) ||
+		filepath.Clean(reported) != reported || filepath.Clean(sessionRoot) != sessionRoot {
 		return false
 	}
-	status, ok := information.Sys().(*syscall.Stat_t)
-	return ok && status.Uid == uint32(os.Getuid())
+	relative, err := filepath.Rel(sessionRoot, reported)
+	return err == nil && relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func verifyAuditOutputUnchanged(path, expectedHash string, expectedSize int64) error {

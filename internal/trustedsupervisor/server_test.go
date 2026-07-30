@@ -544,7 +544,10 @@ func newServerTestMaterial(t *testing.T, now time.Time) serverTestMaterial {
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	t.Cleanup(func() {
+		makeAuditTestDirectoriesRemovable(directory)
+		_ = os.RemoveAll(directory)
+	})
 	fixture := newProcessSignedAuthorizationFixture(t, now, "production_server")
 	bundleBytes, err := marshalCanonical(fixture.bundle)
 	if err != nil {

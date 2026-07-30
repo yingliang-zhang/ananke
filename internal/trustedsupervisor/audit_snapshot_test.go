@@ -224,6 +224,7 @@ type gitArchivePolicyMaterial struct {
 func newGitArchivePolicyMaterial(t *testing.T) gitArchivePolicyMaterial {
 	t.Helper()
 	base := newExecutionPolicyTestMaterial(t)
+	restoreAuditSealedHomeModeForTest(t, base.directory)
 	repository := base.entry.Repository.Path
 	runGitForTest(t, repository, "init", "-q")
 	runGitForTest(t, repository, "config", "user.name", "Ananke Test")
@@ -264,7 +265,7 @@ func runGitForTest(t *testing.T, repository string, arguments ...string) string 
 
 func runGitBytesForTest(t *testing.T, repository string, arguments ...string) []byte {
 	t.Helper()
-	command := exec.Command("/usr/bin/git", append([]string{"-C", repository}, arguments...)...)
+	command := exec.Command(auditGitExecutable, append([]string{"-C", repository}, arguments...)...)
 	output, err := command.Output()
 	if err != nil {
 		if exit, ok := err.(*exec.ExitError); ok {

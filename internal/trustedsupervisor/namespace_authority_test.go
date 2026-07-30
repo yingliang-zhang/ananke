@@ -106,6 +106,113 @@ func TestNamespaceAuthorityDescriptorSurvivesControllingPathSwap(t *testing.T) {
 	}
 }
 
+func TestNamespaceAuthoritySealsAndRecapturesNestedOwnedDirectory(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "root")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	authority, err := openAuditNamespaceAuthority([]string{root}, testAuditNamespaceAuthorityOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer authority.Close()
+	lease, err := authority.Duplicate(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	if err := lease.Mkdir("attempt", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := lease.Capture("attempt", "temporary", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err := authority.mkdirAndCaptureOwnedChild(attempt, "home", "direct_omp_home", false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoreAuditSealedHomeModeForTest(t, home.Path)
+	state, err := authority.mkdirAndCaptureOwnedChild(home, ".omp", "direct_omp_home_state", false, false, attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = authority.mkdirAndCaptureOwnedChild(state, "run", "direct_omp_home_run", false, false, home, attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := authority.sealAndRecaptureOwnedDirectory(state, 0o500, home, attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := authority.captureOwnedChild(sealed, "run", "direct_omp_home_run", false, home, attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sealed.Device != state.Device || sealed.Inode != state.Inode || sealed.OwnerUID != state.OwnerUID || sealed.OwnerGID != state.OwnerGID || sealed.Mode&0o777 != 0o500 ||
+		run.ParentDevice != sealed.Device || run.ParentInode != sealed.Inode || run.ParentOwnerUID != sealed.OwnerUID || run.ParentOwnerGID != sealed.OwnerGID || run.ParentMode != sealed.Mode {
+		t.Fatalf("sealed/rebound identities = state %+v sealed %+v run %+v", state, sealed, run)
+	}
+}
+
+func TestNamespaceAuthoritySealingRejectsCapturedReplacementAndModeMutation(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		mutate func(*testing.T, string)
+	}{
+		{name: "replacement", mutate: func(t *testing.T, path string) {
+			if err := os.Rename(path, path+".original"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "mode mutation", mutate: func(t *testing.T, path string) {
+			if err := os.Chmod(path, 0o500); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "root")
+			if err := os.Mkdir(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			authority, err := openAuditNamespaceAuthority([]string{root}, testAuditNamespaceAuthorityOptions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer authority.Close()
+			lease, err := authority.Duplicate(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lease.Close()
+			if err := lease.Mkdir("attempt", 0o700); err != nil {
+				t.Fatal(err)
+			}
+			attempt, err := lease.Capture("attempt", "temporary", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			home, err := authority.mkdirAndCaptureOwnedChild(attempt, "home", "direct_omp_home", false, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			restoreAuditSealedHomeModeForTest(t, home.Path)
+			state, err := authority.mkdirAndCaptureOwnedChild(home, ".omp", "direct_omp_home_state", false, false, attempt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			testCase.mutate(t, state.Path)
+			if _, err := authority.sealAndRecaptureOwnedDirectory(state, 0o500, home, attempt); !errors.Is(err, ErrAuthentication) {
+				t.Fatalf("stale sealed directory error = %v, want %v", err, ErrAuthentication)
+			}
+		})
+	}
+}
+
 func TestAuthenticatedOwnedRootCleanupRejectsRenamedOriginalAndDecoy(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "root")
 	if err := os.Mkdir(root, 0o700); err != nil {

@@ -25,8 +25,10 @@ type auditExecutorHooks struct {
 	beforeCompletedPersist    func(auditInvocation)
 	afterCompletedPersist     func(auditInvocation)
 	cleanupRecovered          func(auditExecutionIntent, []auditExecutionEvent, executionPolicyEntry) error
+	afterInvocation           func(auditInvocationResult)
 	supervisorTestAfterStart  func(auditProcessIdentity)
 	supervisorTestHardTimeout <-chan time.Time
+	invocation                auditInvocationHooks
 }
 
 type auditExecutor struct {
@@ -43,6 +45,7 @@ type auditExecutor struct {
 	closing              bool
 	closed               bool
 	closeAttempt         *auditExecutorCloseAttempt
+	failure              error
 }
 
 type activeAuditExecution struct {
@@ -113,11 +116,15 @@ func (executor *auditExecutor) Close() error {
 	if executor == nil {
 		return nil
 	}
-	bound := executor.terminationBounds.TermGrace + executor.terminationBounds.KillGrace + 250*time.Millisecond
+	bound, boundsErr := auditTerminationControlBound(executor.terminationBounds)
+	if boundsErr != nil {
+		return boundsErr
+	}
 	executor.mu.Lock()
 	if executor.closed {
+		failure := executor.failure
 		executor.mu.Unlock()
-		return nil
+		return failure
 	}
 	if executor.closeAttempt != nil {
 		attempt := executor.closeAttempt
@@ -167,12 +174,24 @@ func (executor *auditExecutor) Close() error {
 	}
 	executor.mu.Lock()
 	if attempt.err == nil {
+		attempt.err = executor.failure
 		executor.closed = true
 	}
 	executor.closeAttempt = nil
 	close(attempt.done)
 	executor.mu.Unlock()
 	return attempt.err
+}
+
+func (executor *auditExecutor) recordFailure(err error) {
+	if executor == nil || err == nil {
+		return
+	}
+	executor.mu.Lock()
+	if executor.failure == nil {
+		executor.failure = err
+	}
+	executor.mu.Unlock()
 }
 
 func (executor *auditExecutor) Cancel(envelopeHash string, persist auditCancellationPersist) (auditCancellationRecord, error) {
@@ -228,7 +247,10 @@ func (executor *auditExecutor) Cancel(envelopeHash string, persist auditCancella
 		active.cancel()
 		active.effectMu.Unlock()
 	}
-	bound := executor.terminationBounds.TermGrace + executor.terminationBounds.KillGrace + 250*time.Millisecond
+	bound, boundsErr := auditTerminationControlBound(executor.terminationBounds)
+	if boundsErr != nil {
+		return auditCancellationRecord{}, boundsErr
+	}
 	deadline := time.NewTimer(bound)
 	defer deadline.Stop()
 	poll := time.NewTicker(executor.terminationBounds.PollInterval)
@@ -253,6 +275,23 @@ func (executor *auditExecutor) Cancel(envelopeHash string, persist auditCancella
 	}
 }
 
+func (executor *auditExecutor) finalizeCancellationOrStop(
+	intent auditExecutionIntent,
+	active *activeAuditExecution,
+	entry executionPolicyEntry,
+	invocation *auditInvocation,
+	result auditInvocationResult,
+	effectErr error,
+	cleanup func() error,
+) bool {
+	finalized, err := executor.finalizeRequestedCancellation(intent, active, entry, invocation, result, effectErr, cleanup)
+	if err != nil {
+		executor.recordFailure(err)
+		return true
+	}
+	return finalized
+}
+
 func (executor *auditExecutor) run(envelopeHash string, active *activeAuditExecution) {
 	defer func() {
 		executor.mu.Lock()
@@ -264,28 +303,31 @@ func (executor *auditExecutor) run(envelopeHash string, active *activeAuditExecu
 	}()
 	intent, events, err := executor.journal.loadAuditExecution(context.Background(), envelopeHash)
 	if err != nil {
+		executor.recordFailure(err)
 		return
 	}
 	resume := auditResume{}
 	entry, err := executor.resolveEntry(intent)
 	if err != nil {
-		executor.appendWaiting(intent, events, 1, resume, "execution_policy_drift", entry)
+		executor.recordFailure(executor.appendWaiting(intent, &events, 1, resume, "execution_policy_drift", entry))
 		return
 	}
 	recoveredCleanup := func() error { return executor.cleanupRecoveredExecution(intent, events, entry) }
-	if finalized, _ := executor.finalizeRequestedCancellation(intent, active, entry, nil, auditInvocationResult{}, nil, recoveredCleanup); finalized {
+	if executor.finalizeCancellationOrStop(intent, active, entry, nil, auditInvocationResult{}, nil, recoveredCleanup) {
 		return
 	}
 	if len(events) != 0 {
-		executor.recoverExisting(intent, events, active)
+		if err := executor.recoverExisting(intent, events, active); err != nil {
+			executor.recordFailure(err)
+		}
 		return
 	}
 	snapshot, err := materializeAuditSnapshot(active.ctx, executor.policy, entry, intent.RunID, auditSnapshotHooks{})
 	if err != nil {
-		if finalized, _ := executor.finalizeRequestedCancellation(intent, active, entry, nil, auditInvocationResult{}, err, recoveredCleanup); finalized {
+		if executor.finalizeCancellationOrStop(intent, active, entry, nil, auditInvocationResult{}, err, recoveredCleanup) {
 			return
 		}
-		executor.appendWaiting(intent, events, 1, resume, classifyAuditSnapshotFailure(err), entry)
+		executor.recordFailure(executor.appendWaiting(intent, &events, 1, resume, classifyAuditSnapshotFailure(err), entry))
 		return
 	}
 	ownedInvocations := make([]auditInvocation, 0, intent.AttemptCap)
@@ -299,47 +341,59 @@ func (executor *auditExecutor) run(envelopeHash string, active *activeAuditExecu
 		}
 	}()
 	for attempt := 1; attempt <= intent.AttemptCap; attempt++ {
-		if finalized, _ := executor.finalizeRequestedCancellation(intent, active, entry, nil, auditInvocationResult{}, nil, cleanupOwned); finalized {
+		if executor.finalizeCancellationOrStop(intent, active, entry, nil, auditInvocationResult{}, nil, cleanupOwned) {
 			return
 		}
 		attemptRunID := intent.RunID + "_attempt_" + strconv.Itoa(attempt)
 		invocation, err := prepareAuditInvocation(executor.policy, entry, snapshot, attemptRunID, intent.RunID, resume)
 		if err != nil {
-			if finalized, _ := executor.finalizeRequestedCancellation(intent, active, entry, nil, auditInvocationResult{}, err, cleanupOwned); finalized {
+			if executor.finalizeCancellationOrStop(intent, active, entry, nil, auditInvocationResult{}, err, cleanupOwned) {
 				return
 			}
-			executor.appendWaiting(intent, events, attempt, resume, "invocation_preparation_failed", entry)
+			executor.recordFailure(executor.appendWaiting(intent, &events, attempt, resume, "invocation_preparation_failed", entry))
 			return
 		}
 		ownedInvocations = append(ownedInvocations, invocation)
-		if finalized, _ := executor.finalizeRequestedCancellation(intent, active, entry, &invocation, auditInvocationResult{}, nil, cleanupOwned); finalized {
+		if executor.finalizeCancellationOrStop(intent, active, entry, &invocation, auditInvocationResult{}, nil, cleanupOwned) {
 			return
 		}
 		prepared := executor.newInvocationEvent(intent, events, auditStatePrepared, attempt, invocation)
 		prepared.WorkPath, prepared.OutputPath = invocation.WorkDir, invocation.OutputPath
 		prepared.SessionPath, prepared.PromptPath = invocation.SessionDir, invocation.PromptPath
 		prepared.TemporaryPath = invocation.TemporaryDir
-		if err := executor.appendEvent(&events, prepared); err != nil {
-			_, _ = executor.finalizeRequestedCancellation(intent, active, entry, &invocation, auditInvocationResult{}, err, cleanupOwned)
+		if appendErr := executor.appendEvent(&events, prepared); appendErr != nil {
+			if executor.finalizeCancellationOrStop(intent, active, entry, &invocation, auditInvocationResult{}, appendErr, cleanupOwned) {
+				return
+			}
+			failureClass := "prepared_event_persistence_failed"
+			if cleanupErr := cleanupOwned(); cleanupErr != nil {
+				failureClass = "artifact_cleanup_failed"
+			}
+			if waitingErr := executor.appendWaiting(intent, &events, attempt, resume, failureClass, entry); waitingErr != nil {
+				executor.recordFailure(errors.Join(appendErr, waitingErr))
+			}
 			return
 		}
-		result, runErr := runAuditInvocation(active.ctx, executor.policy, entry, invocation, auditInvocationHooks{
-			StartGate: func() (func(), error) {
-				return executor.startGate(envelopeHash, active)
-			},
-			AfterStart: func(identity auditProcessIdentity) error {
-				active.identity = identity
-				running := executor.newInvocationEvent(intent, events, auditStateRunning, attempt, invocation)
-				running.PID, running.PGID, running.ProcessStartIdentity = identity.PID, identity.PGID, identity.ProcessStartIdentity
-				running.WorkPath, running.OutputPath = invocation.WorkDir, invocation.OutputPath
-				running.SessionPath, running.PromptPath = invocation.SessionDir, invocation.PromptPath
-				running.ProcessStartedAt = identity.StartedAt
-				running.TemporaryPath = invocation.TemporaryDir
-				return executor.appendEvent(&events, running)
-			},
-			ProcessOperations: executor.processOperations,
-			TerminationBounds: executor.terminationBounds,
-		})
+		invocationHooks := executor.hooks.invocation
+		invocationHooks.StartGate = func() (func(), error) {
+			return executor.startGate(envelopeHash, active)
+		}
+		invocationHooks.AfterStart = func(identity auditProcessIdentity) error {
+			active.identity = identity
+			running := executor.newInvocationEvent(intent, events, auditStateRunning, attempt, invocation)
+			running.PID, running.PGID, running.ProcessStartIdentity = identity.PID, identity.PGID, identity.ProcessStartIdentity
+			running.WorkPath, running.OutputPath = invocation.WorkDir, invocation.OutputPath
+			running.SessionPath, running.PromptPath = invocation.SessionDir, invocation.PromptPath
+			running.ProcessStartedAt = identity.StartedAt
+			running.TemporaryPath = invocation.TemporaryDir
+			return executor.appendEvent(&events, running)
+		}
+		invocationHooks.ProcessOperations = executor.processOperations
+		invocationHooks.TerminationBounds = executor.terminationBounds
+		result, runErr := runAuditInvocation(active.ctx, executor.policy, entry, invocation, invocationHooks)
+		if executor.hooks.afterInvocation != nil {
+			executor.hooks.afterInvocation(result)
+		}
 		if result.boundInvocation.NativeAddonPath != "" {
 			invocation = result.boundInvocation
 			ownedInvocations[len(ownedInvocations)-1] = invocation
@@ -348,7 +402,7 @@ func (executor *auditExecutor) run(envelopeHash string, active *activeAuditExecu
 		if terminationUnconfirmed {
 			cleanupOnReturn = false
 		}
-		if finalized, _ := executor.finalizeRequestedCancellation(intent, active, entry, &invocation, result, runErr, cleanupOwned); finalized {
+		if executor.finalizeCancellationOrStop(intent, active, entry, &invocation, result, runErr, cleanupOwned) {
 			if terminationUnconfirmed {
 				executor.finishOrRetainUnconfirmedAuditProcess(active, result, cleanupOwned)
 			}
@@ -360,60 +414,84 @@ func (executor *auditExecutor) run(envelopeHash string, active *activeAuditExecu
 				cleanupOnReturn = false
 				waiting := executor.terminalEvent(intent, events, auditStateWaitingForHuman, attempt, invocation, result)
 				waiting.FailureClass = failureClass
-				_ = executor.appendEvent(&events, waiting)
+				if _, err := executor.appendRequiredTerminal(&events, waiting); err != nil {
+					executor.recordFailure(err)
+				}
 				executor.finishOrRetainUnconfirmedAuditProcess(active, result, cleanupOwned)
 				return
 			}
 			if cleanupErr := cleanupOwned(); cleanupErr != nil {
 				waiting := executor.terminalEvent(intent, events, auditStateWaitingForHuman, attempt, invocation, result)
 				waiting.FailureClass = "artifact_cleanup_failed"
-				_ = executor.appendEvent(&events, waiting)
+				if _, err := executor.appendRequiredTerminal(&events, waiting); err != nil {
+					executor.recordFailure(err)
+				}
 				return
 			}
-			failed := executor.terminalEvent(intent, events, auditStateFailed, attempt, invocation, result)
-			failed.FailureClass = failureClass
-			_ = executor.appendEvent(&events, failed)
+			state := auditStateFailed
+			if len(events) != 0 && events[len(events)-1].State == auditStatePrepared {
+				state = auditStateWaitingForHuman
+			}
+			terminal := executor.terminalEvent(intent, events, state, attempt, invocation, result)
+			terminal.FailureClass = failureClass
+			if _, err := executor.appendRequiredTerminal(&events, terminal); err != nil {
+				executor.recordFailure(err)
+			}
 			return
 		}
 		if result.Cancelled || errors.Is(active.ctx.Err(), context.Canceled) && executor.ctx.Err() != nil {
 			if cleanupErr := cleanupOwned(); cleanupErr != nil {
 				waiting := executor.terminalEvent(intent, events, auditStateWaitingForHuman, attempt, invocation, result)
 				waiting.FailureClass = "artifact_cleanup_failed"
-				_ = executor.appendEvent(&events, waiting)
+				if _, err := executor.appendRequiredTerminal(&events, waiting); err != nil {
+					executor.recordFailure(err)
+				}
 				return
 			}
 			cancelled := executor.terminalEvent(intent, events, auditStateCancelled, attempt, invocation, result)
 			cancelled.FailureClass = "operator_or_server_cancelled"
-			_ = executor.appendEvent(&events, cancelled)
+			if _, err := executor.appendRequiredTerminal(&events, cancelled); err != nil {
+				executor.recordFailure(err)
+			}
 			return
 		}
-		if result.ExitCode == 124 {
+		if result.TimeoutEvidence != (auditTimeoutEvidence{}) {
 			timeoutEvidence := result.TimeoutEvidence
-			if !result.ProcessGroupGone || !auditSessionUUIDPattern.MatchString(timeoutEvidence.SessionUUID) || !timeoutEvidence.SynthesizeOnly ||
-				timeoutEvidence.TimeoutSource != "internal" && timeoutEvidence.TimeoutSource != "external" {
+			if !result.ProcessGroupGone || !validAuditTimeoutEvidence(timeoutEvidence) {
 				if cleanupErr := cleanupOwned(); cleanupErr != nil {
 					waiting := executor.terminalEvent(intent, events, auditStateWaitingForHuman, attempt, invocation, result)
 					waiting.FailureClass = "artifact_cleanup_failed"
-					_ = executor.appendEvent(&events, waiting)
+					if _, err := executor.appendRequiredTerminal(&events, waiting); err != nil {
+						executor.recordFailure(err)
+					}
 					return
 				}
 				failed := executor.terminalEvent(intent, events, auditStateFailed, attempt, invocation, result)
 				failed.FailureClass = "malformed_timeout_evidence"
-				_ = executor.appendEvent(&events, failed)
+				if _, err := executor.appendRequiredTerminal(&events, failed); err != nil {
+					executor.recordFailure(err)
+				}
 				return
 			}
 			timedOut := executor.terminalEvent(intent, events, auditStateTimedOut, attempt, invocation, result)
-			timedOut.SessionUUID = timeoutEvidence.SessionUUID
-			if err := executor.appendEvent(&events, timedOut); err != nil {
-				_, _ = executor.finalizeRequestedCancellation(intent, active, entry, &invocation, result, err, cleanupOwned)
+			timedOut.SessionUUID, timedOut.TimeoutObservation = timeoutEvidence.SessionUUID, timeoutEvidence
+			persistedState, appendErr := executor.appendRequiredTerminal(&events, timedOut)
+			if appendErr != nil {
+				if executor.finalizeCancellationOrStop(intent, active, entry, &invocation, result, appendErr, cleanupOwned) {
+					return
+				}
+				executor.recordFailure(appendErr)
+				return
+			}
+			if persistedState != auditStateTimedOut {
 				return
 			}
 			if attempt == intent.AttemptCap {
 				if cleanupErr := cleanupOwned(); cleanupErr != nil {
-					executor.appendWaiting(intent, events, attempt, invocation.Resume, "artifact_cleanup_failed", entry)
+					executor.recordFailure(executor.appendWaiting(intent, &events, attempt, invocation.Resume, "artifact_cleanup_failed", entry))
 					return
 				}
-				executor.appendWaiting(intent, events, attempt, invocation.Resume, "attempt_cap_exhausted", entry)
+				executor.recordFailure(executor.appendWaiting(intent, &events, attempt, invocation.Resume, "attempt_cap_exhausted", entry))
 				return
 			}
 			resume = auditResume{SessionUUID: timeoutEvidence.SessionUUID, SynthesizeOnly: timeoutEvidence.SynthesizeOnly}
@@ -423,15 +501,19 @@ func (executor *auditExecutor) run(envelopeHash string, active *activeAuditExecu
 			if cleanupErr := cleanupOwned(); cleanupErr != nil {
 				waiting := executor.terminalEvent(intent, events, auditStateWaitingForHuman, attempt, invocation, result)
 				waiting.FailureClass = "artifact_cleanup_failed"
-				_ = executor.appendEvent(&events, waiting)
+				if _, err := executor.appendRequiredTerminal(&events, waiting); err != nil {
+					executor.recordFailure(err)
+				}
 				return
 			}
 			failed := executor.terminalEvent(intent, events, auditStateFailed, attempt, invocation, result)
-			failed.FailureClass = "wrapper_exit_nonzero"
-			_ = executor.appendEvent(&events, failed)
+			failed.FailureClass = "direct_omp_exit_nonzero"
+			if _, err := executor.appendRequiredTerminal(&events, failed); err != nil {
+				executor.recordFailure(err)
+			}
 			return
 		}
-		if finalized, _ := executor.finalizeRequestedCancellation(intent, active, entry, &invocation, result, nil, cleanupOwned); finalized {
+		if executor.finalizeCancellationOrStop(intent, active, entry, &invocation, result, nil, cleanupOwned) {
 			return
 		}
 		finalizing := executor.terminalEvent(intent, events, auditStateFinalizing, attempt, invocation, result)
@@ -452,7 +534,6 @@ func (executor *auditExecutor) run(envelopeHash string, active *activeAuditExecu
 		invocationRoots, rootErr := aggregateAuditInvocationOwnedRoots(ownedInvocations)
 		if rootErr == nil {
 			result.boundInvocation.OwnedRoots = invocationRoots
-			invocation.OwnedRoots = invocationRoots
 		}
 		var evidence collectedAuditEvidence
 		err = rootErr
@@ -463,7 +544,7 @@ func (executor *auditExecutor) run(envelopeHash string, active *activeAuditExecu
 			testResult, hasTestResult := auditProcessResultFromError(err)
 			var ownedFailure *auditOwnedProcessError
 			terminationUnconfirmed = errors.As(err, &ownedFailure)
-			if finalized, _ := executor.finalizeRequestedCancellation(intent, active, entry, &invocation, func() auditInvocationResult {
+			if executor.finalizeCancellationOrStop(intent, active, entry, &invocation, func() auditInvocationResult {
 				if hasTestResult {
 					return testResult
 				}
@@ -473,7 +554,7 @@ func (executor *auditExecutor) run(envelopeHash string, active *activeAuditExecu
 					return err
 				}
 				return nil
-			}(), cleanupOwned); finalized {
+			}(), cleanupOwned) {
 				if terminationUnconfirmed {
 					cleanupOnReturn = false
 					executor.finishOrRetainUnconfirmedAuditProcess(active, testResult, cleanupOwned)
@@ -484,22 +565,28 @@ func (executor *auditExecutor) run(envelopeHash string, active *activeAuditExecu
 				cleanupOnReturn = false
 				waiting := executor.terminalEvent(intent, events, auditStateWaitingForHuman, attempt, invocation, result)
 				waiting.FailureClass = cancellationFailureClass(err)
-				_ = executor.appendEvent(&events, waiting)
+				if _, appendErr := executor.appendRequiredTerminal(&events, waiting); appendErr != nil {
+					executor.recordFailure(appendErr)
+				}
 				executor.finishOrRetainUnconfirmedAuditProcess(active, testResult, cleanupOwned)
 				return
 			}
 			if cleanupErr := cleanupOwned(); cleanupErr != nil {
 				waiting := executor.terminalEvent(intent, events, auditStateWaitingForHuman, attempt, invocation, result)
 				waiting.FailureClass = "artifact_cleanup_failed"
-				_ = executor.appendEvent(&events, waiting)
+				if _, appendErr := executor.appendRequiredTerminal(&events, waiting); appendErr != nil {
+					executor.recordFailure(appendErr)
+				}
 				return
 			}
 			failed := executor.terminalEvent(intent, events, auditStateFailed, attempt, invocation, result)
 			failed.FailureClass = "evidence_verification_failed"
-			_ = executor.appendEvent(&events, failed)
+			if _, appendErr := executor.appendRequiredTerminal(&events, failed); appendErr != nil {
+				executor.recordFailure(appendErr)
+			}
 			return
 		}
-		if finalized, _ := executor.finalizeRequestedCancellation(intent, active, entry, &invocation, result, nil, cleanupOwned); finalized {
+		if executor.finalizeCancellationOrStop(intent, active, entry, &invocation, result, nil, cleanupOwned) {
 			return
 		}
 		finalizing.OutputSHA256, finalizing.OutputSize = evidence.OutputSHA256, evidence.OutputSize
@@ -511,23 +598,36 @@ func (executor *auditExecutor) run(envelopeHash string, active *activeAuditExecu
 			if cleanupErr := cleanupOwned(); cleanupErr != nil {
 				waiting := executor.terminalEvent(intent, events, auditStateWaitingForHuman, attempt, invocation, result)
 				waiting.FailureClass = "artifact_cleanup_failed"
-				_ = executor.appendEvent(&events, waiting)
+				if _, appendErr := executor.appendRequiredTerminal(&events, waiting); appendErr != nil {
+					executor.recordFailure(appendErr)
+				}
 				return
 			}
 			failed := executor.terminalEvent(intent, events, auditStateFailed, attempt, invocation, result)
 			failed.FailureClass = "evidence_verification_failed"
-			_ = executor.appendEvent(&events, failed)
+			if _, appendErr := executor.appendRequiredTerminal(&events, failed); appendErr != nil {
+				executor.recordFailure(appendErr)
+			}
 			return
 		}
-		if err := executor.appendEvent(&events, finalizing); err != nil {
-			_, _ = executor.finalizeRequestedCancellation(intent, active, entry, &invocation, result, err, cleanupOwned)
+		persistedState, appendErr := executor.appendRequiredTerminal(&events, finalizing)
+		if appendErr != nil {
+			if executor.finalizeCancellationOrStop(intent, active, entry, &invocation, result, appendErr, cleanupOwned) {
+				return
+			}
+			executor.recordFailure(appendErr)
+			return
+		}
+		if persistedState != auditStateFinalizing {
 			return
 		}
 		cleanupOnReturn = false
 		if executor.hooks.afterFinalizingPersist != nil {
 			executor.hooks.afterFinalizingPersist(invocation)
 		}
-		_ = executor.resumeFinalizing(intent, &events, entry, invocation)
+		if err := executor.resumeFinalizing(intent, &events, entry, invocation); err != nil {
+			executor.recordFailure(err)
+		}
 		return
 	}
 }
@@ -536,8 +636,8 @@ func aggregateAuditInvocationOwnedRoots(invocations []auditInvocation) ([]auditO
 	if len(invocations) == 0 || len(invocations) > 10 {
 		return nil, authenticationError("audit invocation owned root aggregation")
 	}
-	ordered := make([]auditOwnedRootIdentity, 0, len(invocations)*6+1)
-	byPath := make(map[string]auditOwnedRootIdentity, len(invocations)*6+1)
+	ordered := make([]auditOwnedRootIdentity, 0, len(invocations)*8+1)
+	byPath := make(map[string]auditOwnedRootIdentity, len(invocations)*8+1)
 	for _, invocation := range invocations {
 		current, err := currentAuditInvocationOwnedRoots(invocation)
 		if err != nil {
@@ -719,10 +819,14 @@ func classifyAuditRunFailure(runErr error, result auditInvocationResult) (string
 	if result.processWaiter != nil {
 		return "process_identity_unavailable", true
 	}
+	var stage *auditInvocationStageError
+	if errors.As(runErr, &stage) && protocolIdentifierPattern.MatchString(stage.failureClass) {
+		return stage.failureClass, false
+	}
 	if errors.Is(runErr, errAuditMalformedTimeoutEvidence) {
 		return "malformed_timeout_evidence", false
 	}
-	return "wrapper_or_capture_verification_failed", false
+	return "direct_omp_or_capture_verification_failed", false
 }
 
 func joinUnconfirmedAuditInvocation(
@@ -731,7 +835,7 @@ func joinUnconfirmedAuditInvocation(
 	operations auditProcessOperations,
 	bounds auditTerminationBounds,
 ) auditTerminationResult {
-	if ctx == nil || operations == nil || result.processWaiter == nil || bounds.KillGrace <= 0 {
+	if ctx == nil || operations == nil || result.processWaiter == nil || !validAuditTerminationBounds(bounds) {
 		return auditTerminationResult{Outcome: auditTerminationFailure, Failure: ErrProtocol}
 	}
 	identity := auditProcessIdentity{
@@ -741,16 +845,17 @@ func joinUnconfirmedAuditInvocation(
 		if err := result.processWaiter.await(ctx, bounds.KillGrace); err != nil {
 			return auditTerminationResult{Outcome: auditTerminationFailure, Failure: err}
 		}
-		groupExists, err := operations.GroupExists(identity.PGID)
-		if err != nil {
-			return failedAuditTermination("group_inspection_failed", err)
+		observation := observeNaturalAuditProcessGroupExit(ctx, identity.PGID, operations, bounds)
+		if observation.Outcome == auditTerminationConfirmedExit {
+			return observation
 		}
-		if groupExists {
-			return failedAuditTermination("process_identity_unavailable", ErrAuthentication)
+		var termination *auditTerminationError
+		if errors.As(observation.Failure, &termination) && termination.FailureClass == "group_inspection_failed" {
+			return observation
 		}
-		return confirmedAuditTermination()
+		return failedAuditTermination("process_identity_unavailable", ErrAuthentication)
 	}
-	return confirmAuditProcessExit(ctx, identity, result.processWaiter, operations, bounds.KillGrace)
+	return confirmAuditProcessExit(ctx, identity, result.processWaiter, operations, bounds)
 }
 
 func (executor *auditExecutor) finishOrRetainUnconfirmedAuditProcess(
@@ -766,6 +871,7 @@ func (executor *auditExecutor) finishOrRetainUnconfirmedAuditProcess(
 	active.pending = &pendingAuditProcess{result: result, cleanup: cleanup, joined: joined}
 	executor.mu.Unlock()
 }
+
 func closeAuditRuntimeAuthorityLease(result *auditInvocationResult) error {
 	if result == nil || result.runtimeAuthorityLease == nil {
 		return nil
@@ -912,15 +1018,44 @@ func (executor *auditExecutor) appendEvent(events *[]auditExecutionEvent, event 
 	return nil
 }
 
-func (executor *auditExecutor) appendWaiting(intent auditExecutionIntent, events []auditExecutionEvent, attempt int, resume auditResume, failure string, entry executionPolicyEntry) {
-	event := executor.newEvent(intent, events, auditStateWaitingForHuman, attempt)
+func (executor *auditExecutor) appendRequiredTerminal(events *[]auditExecutionEvent, event auditExecutionEvent) (string, error) {
+	requestedState := event.State
+	if err := executor.appendEvent(events, event); err == nil {
+		return requestedState, nil
+	} else if requestedState == auditStateWaitingForHuman || events == nil ||
+		len(*events) != 0 && (*events)[len(*events)-1].State != auditStatePrepared &&
+			(*events)[len(*events)-1].State != auditStateRunning && (*events)[len(*events)-1].State != auditStateTimedOut {
+		return "", err
+	} else {
+		fallback := event
+		fallback.EventHash = ""
+		fallback.Authentication = auditExecutionEventAuthentication{}
+		fallback.State = auditStateWaitingForHuman
+		fallback.FailureClass = "terminal_event_persistence_failed"
+		fallback.OutputSHA256 = ""
+		fallback.OutputSize = 0
+		fallback.EvidenceJSON = ""
+		fallback.EvidenceHash = ""
+		fallback.FinalizingEventHash = ""
+		if fallbackErr := executor.appendEvent(events, fallback); fallbackErr != nil {
+			return "", errors.Join(err, fallbackErr)
+		}
+		return auditStateWaitingForHuman, nil
+	}
+}
+
+func (executor *auditExecutor) appendWaiting(intent auditExecutionIntent, events *[]auditExecutionEvent, attempt int, resume auditResume, failure string, entry executionPolicyEntry) error {
+	if events == nil {
+		return ErrProtocol
+	}
+	event := executor.newEvent(intent, *events, auditStateWaitingForHuman, attempt)
 	if err := bindAuditEventDescriptor(&event, entry, intent, resume); err != nil {
-		return
+		return err
 	}
 	event.FailureClass = failure
 	event.WorkPath, event.OutputPath, event.SessionPath, event.PromptPath, event.TemporaryPath = auditAttemptPaths(intent, entry, attempt)
-	if len(events) != 0 && events[len(events)-1].Attempt == attempt {
-		last := events[len(events)-1]
+	if len(*events) != 0 && (*events)[len(*events)-1].Attempt == attempt {
+		last := (*events)[len(*events)-1]
 		event.CommandDescriptorHash, event.PromptSHA256, event.SessionRunID = last.CommandDescriptorHash, last.PromptSHA256, last.SessionRunID
 		event.ResumeSessionUUID, event.SynthesizeOnly = last.ResumeSessionUUID, last.SynthesizeOnly
 		event.PID, event.PGID, event.ProcessStartIdentity = last.PID, last.PGID, last.ProcessStartIdentity
@@ -928,7 +1063,7 @@ func (executor *auditExecutor) appendWaiting(intent auditExecutionIntent, events
 		event.ExitCode, event.StdoutSHA256, event.StderrSHA256 = last.ExitCode, last.StdoutSHA256, last.StderrSHA256
 		event.SessionUUID = last.SessionUUID
 	}
-	_ = executor.appendEvent(&events, event)
+	return executor.appendEvent(events, event)
 }
 
 func auditAttemptPaths(intent auditExecutionIntent, entry executionPolicyEntry, attempt int) (string, string, string, string, string) {
@@ -963,6 +1098,7 @@ func deriveRecoveredAuditInvocations(
 			PromptDir: filepath.Dir(promptPath), PromptPath: promptPath,
 			OutputDir: filepath.Dir(outputPath), OutputPath: outputPath,
 			SessionDir: sessionPath, TemporaryDir: temporaryPath, WorkDir: workPath,
+			OMPExecutablePath: entry.OMPExecutable.Path,
 		})
 	}
 	return invocations, nil
@@ -1077,29 +1213,33 @@ func (executor *auditExecutor) recover() error {
 	return nil
 }
 
-func (executor *auditExecutor) recoverExisting(intent auditExecutionIntent, events []auditExecutionEvent, active *activeAuditExecution) {
+func (executor *auditExecutor) recoverExisting(intent auditExecutionIntent, events []auditExecutionEvent, active *activeAuditExecution) error {
+	if len(events) == 0 || active == nil {
+		return ErrProtocol
+	}
 	last := events[len(events)-1]
 	entry, err := executor.resolveEntry(intent)
 	if err != nil {
-		return
+		return err
 	}
 	derived, err := deriveRecoveredAuditInvocations(intent, events, entry)
-	if err != nil || last.Attempt < 1 || last.Attempt > len(derived) {
-		return
+	if err != nil {
+		return err
+	}
+	if last.Attempt < 1 || last.Attempt > len(derived) {
+		return authenticationError("audit recovery attempt")
 	}
 	cleanup := func() error { return executor.cleanupRecoveredExecution(intent, events, entry) }
 	paths := derived[last.Attempt-1]
 	if last.State == auditStateFinalizing {
-		_ = executor.resumeFinalizing(intent, &events, entry, paths)
-		return
+		return executor.resumeFinalizing(intent, &events, entry, paths)
 	}
 	if last.State == auditStatePrepared {
 		failureClass := "restart_after_prepared_unknown"
 		if cleanupErr := cleanup(); cleanupErr != nil {
 			failureClass = "artifact_cleanup_failed"
 		}
-		executor.appendWaiting(intent, events, last.Attempt, auditResume{SessionUUID: last.ResumeSessionUUID, SynthesizeOnly: last.SynthesizeOnly}, failureClass, entry)
-		return
+		return executor.appendWaiting(intent, &events, last.Attempt, auditResume{SessionUUID: last.ResumeSessionUUID, SynthesizeOnly: last.SynthesizeOnly}, failureClass, entry)
 	}
 	if last.State == auditStateWaitingForHuman && isAuditTerminationFailureClass(last.FailureClass) && last.PID > 0 {
 		expected := auditProcessIdentity{
@@ -1114,13 +1254,12 @@ func (executor *auditExecutor) recoverExisting(intent auditExecutionIntent, even
 				StartedAt: expected.StartedAt, ExitCode: -1,
 			}, cleanup: cleanup}
 			executor.mu.Unlock()
-			return
+			return nil
 		}
-		_ = cleanup()
-		return
+		return cleanup()
 	}
 	if last.State != auditStateRunning {
-		return
+		return nil
 	}
 	expected := auditProcessIdentity{PID: last.PID, PGID: last.PGID, ProcessStartIdentity: last.ProcessStartIdentity, StartedAt: last.ProcessStartedAt}
 	active.identity = expected
@@ -1152,7 +1291,8 @@ func (executor *auditExecutor) recoverExisting(intent auditExecutionIntent, even
 	waiting.PID, waiting.PGID, waiting.ProcessStartIdentity = expected.PID, expected.PGID, expected.ProcessStartIdentity
 	waiting.ProcessStartedAt, waiting.ProcessFinishedAt = last.ProcessStartedAt, finishedAt
 	waiting.ExitCode = -1
-	_ = executor.appendEvent(&events, waiting)
+	_, err = executor.appendRequiredTerminal(&events, waiting)
+	return err
 }
 
 func inspectAuditProcess(pid int) (auditProcessIdentity, error) {
