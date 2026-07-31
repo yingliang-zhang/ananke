@@ -78,18 +78,34 @@ lens for redundant defense-in-depth. Both modes can coexist.
 See [ADR-0005](docs/adr/0005-multi-model-review-audit-moa.md) for the
 full design.
 
-### 4. Memory is layered and durable
+### 4. Memory: authority vs context boundary
 
 Models forget. Context windows are finite. Ananke treats memory as a
-first-class architectural concern, not an afterthought:
+first-class architectural concern, not an afterthought.
 
-- **Session memory**: conversation history and tool output — finite,
-  compressed, eventually lost.
-- **Project memory**: experiment ledger, planning files, normative
-  documents — durable artifacts in the repository that survive across
-  sessions.
-- **Operational memory**: skills, ADRs, configuration — procedural
-  knowledge that encodes how to do things, not what was done.
+The fundamental question is: **who has final authority over what?**
+
+Ananke uses a strict authority/context boundary:
+
+| Layer | Authority | Stores | Does not store |
+|---|---|---|---|
+| **Ananke SQLite** | Ananke (authority) | task proposal, approval, claim, run event, evidence, attestation | user preferences, agent knowledge, conversation history |
+| **Session DB** | Hermes (context) | conversation history, tool output, compressed summaries | task state, evidence |
+| **MEMORY/USER** | Hermes (context) | operational facts, user preferences (injected every turn) | task state, evidence |
+| **Hindsight** | Hermes (context) | episodic recall, delta-based retain/recall | task state, evidence |
+| **Basic Memory** | Hermes (context) | structured markdown notes, FTS5 + vector search | task state, evidence |
+
+Key principles:
+
+- **Single authority**: Ananke SQLite is the sole canonical authority for
+  task/run/evidence. Hermes memory never becomes Ananke's task authority.
+- **No write-back**: Ananke never writes to Hermes memory.
+- **Optional bridge**: if Ananke needs context from Hermes memory, the
+  bridge is opt-in, scoped, read-only, provenance-bearing, and fails
+  closed (no context is better than stale or wrong context).
+- **Reproducibility**: a task contract must be self-contained. If its
+  context depends on a global memory bank it doesn't control, the same
+  proposal may behave differently on re-run.
 
 The first artifact to read when resuming work on any project is the
 [experiment ledger](docs/experiment-ledger.md) — before progress notes,
@@ -97,6 +113,10 @@ before session history, before code. It records what was tried, what
 worked, what was decided, and why. If a fact will be stale in a week,
 it does not belong in memory; if a procedure will be needed again, it
 belongs in a skill.
+
+See [memory-boundary-design](https://github.com/yingliang-zhang/ananke)
+and [ADR-0001](docs/adr/0001-use-go-for-core-and-bootstrap.md) for the
+full boundary definition and the rejection of external memory engines.
 
 ### 5. Machine-verifiable contracts before runtime
 
@@ -120,3 +140,53 @@ deliberate trade-off: automatic resume requires exactly-once machinery
 (deduplication, idempotent replay, distributed consensus) that adds
 complexity without clear benefit for a single-researcher workflow. If
 the MVP demonstrates a real need, it can be added later.
+
+## Architecture decisions
+
+| Number | Title | Status |
+|---|---|---|
+| 0001 | Use Go for core and bootstrap | Accepted |
+| 0002 | Supervisor lifecycle identity model | Draft |
+| 0003 | Cleanup state machine and finalization outbox | Draft |
+| 0004 | Select JSON Schema and Quicktype for P0a codegen | Accepted (P0a experiment only) |
+| 0005 | Multi-model review/audit (MoA) for controlled repair | Draft |
+
+See [ADR index](docs/adr/README.md) for details.
+
+## Repository and session design
+
+### Why Go + SQLite
+
+A single researcher depends on AI coding agents for all implementation.
+Go was selected over Rust (ADR-0001) because: smaller agent-edit surface
+(3,592 vs 4,204 LOC), faster build feedback (8.4s vs 15.2s), built-in
+race detector, fewer dependencies (2 vs 6), and all six mutation gates
+passed. SQLite provides local-first, zero-configuration, crash-durable
+storage with FULL/fullfsync journal mode — no external database server.
+
+### Why repository-rooted, not global
+
+Task contracts must be self-contained and reproducible. If a contract's
+context depends on a global memory bank it doesn't control, the same
+proposal may behave differently on re-run. The repository root is the
+authority boundary: `docs/experiment-ledger.md`, `docs/adr/`, contract
+files, and test fixtures are all in-repo. Session history and agent
+operational memory are context, not authority.
+
+### Why session isolation
+
+Different tasks and worktrees must not pollute each other's state. Each
+AI coding agent session gets its own working directory, session state,
+and process group. The supervisor enforces this at the OS level with
+dedicated runtime UID leases, sandbox profiles, and disposable test
+roots. No session can read another session's repair state, credentials,
+or journal.
+
+### Why at-most-once
+
+Automatic crash recovery requires exactly-once machinery (deduplication,
+idempotent replay, distributed consensus). For a single-researcher
+desktop workflow, the complexity exceeds the value. Instead, any crash
+after a phase claim produces signed `waiting_for_human` — the human
+decides whether to retry, and a retry is a new authorization chain, not
+a resume.
