@@ -17,6 +17,7 @@ var canonicalSchemaCutoverVectorIDs = []string{
 	"opaque_snapshot_deep_copy",
 	"opaque_snapshot_mutation_isolation",
 	"wrong_state_rejects",
+	"wrong_cutover_id_rejects",
 	"wrong_store_schema_version_rejects",
 	"wrong_release_pins_rejects",
 	"wrong_trust_bundle_rejects",
@@ -84,6 +85,23 @@ func schemaCutoverVectors() []schemaCutoverVector {
 				fixture := canonicalSchemaCutoverFixtureForTest(t)
 				clone := cloneSchemaCutoverSnapshotForTest(t, fixture.snapshot)
 				clone.record.State = SchemaCutoverState("invalid_state")
+				clone.record.CutoverHash, _ = hashRecord(clone.record, "cutover_hash")
+				clone.canonical = canonicalTestArtifact(t, clone.record)
+				clone.canonicalHash = sha256Digest(clone.canonical)
+				clone.integrityHash = verifiedSchemaCutoverRecordIntegrityHash(clone)
+				_, _, err := EvaluateSchemaCutover(
+					clone, fixture.pins, fixture.bundle, fixture.now, SchemaCutoverAdmitCutover,
+				)
+				return err
+			},
+			wantErr: ErrInvalidSchemaCutover,
+		},
+		{
+			id: "wrong_cutover_id_rejects",
+			run: func(t *testing.T) error {
+				fixture := canonicalSchemaCutoverFixtureForTest(t)
+				clone := cloneSchemaCutoverSnapshotForTest(t, fixture.snapshot)
+				clone.record.CutoverID = "wrong_cutover_id"
 				clone.record.CutoverHash, _ = hashRecord(clone.record, "cutover_hash")
 				clone.canonical = canonicalTestArtifact(t, clone.record)
 				clone.canonicalHash = sha256Digest(clone.canonical)

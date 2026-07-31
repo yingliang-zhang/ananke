@@ -179,6 +179,22 @@ func TestP6Slice9WrongStateRejects(t *testing.T) {
 	}
 }
 
+func TestP6Slice9WrongCutoverIDRejects(t *testing.T) {
+	fixture := canonicalSchemaCutoverFixtureForTest(t)
+	clone := cloneSchemaCutoverSnapshotForTest(t, fixture.snapshot)
+	clone.record.CutoverID = "wrong_cutover_id"
+	clone.record.CutoverHash, _ = hashRecord(clone.record, "cutover_hash")
+	clone.canonical = canonicalTestArtifact(t, clone.record)
+	clone.canonicalHash = sha256Digest(clone.canonical)
+	clone.integrityHash = verifiedSchemaCutoverRecordIntegrityHash(clone)
+	_, _, err := EvaluateSchemaCutover(
+		clone, fixture.pins, fixture.bundle, fixture.now, SchemaCutoverAdmitCutover,
+	)
+	if !errors.Is(err, ErrInvalidSchemaCutover) {
+		t.Fatalf("wrong cutover ID should reject, got err=%v", err)
+	}
+}
+
 func TestP6Slice9WrongStoreSchemaVersionRejects(t *testing.T) {
 	fixture := canonicalSchemaCutoverFixtureForTest(t)
 	clone := cloneSchemaCutoverSnapshotForTest(t, fixture.snapshot)

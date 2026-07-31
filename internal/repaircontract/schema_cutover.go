@@ -710,7 +710,8 @@ func EvaluateSchemaCutover(
 
 	// Cross-bind the record's values to the frozen authority and release pins.
 	record := snapshot.record
-	if record.AcceptedStoreSchemaVersion != authority.AcceptedStoreSchemaVersion ||
+	if record.CutoverID != authority.CutoverID ||
+		record.AcceptedStoreSchemaVersion != authority.AcceptedStoreSchemaVersion ||
 		record.StoreSchemaVersionHash != storeSchemaVersionHash(authority.AcceptedStoreSchemaVersion) ||
 		record.AcceptedContractSchemasHash != canonicalStringArrayHash(authority.AcceptedContractSchemas) ||
 		!reflect.DeepEqual(record.AcceptedContractSchemas, authority.AcceptedContractSchemas) ||

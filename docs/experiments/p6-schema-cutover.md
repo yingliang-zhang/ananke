@@ -106,7 +106,7 @@ with `EffectAllowed == false`.
   "prior_slice_6_vector_count": 46,
   "prior_slice_7_vector_count": 24,
   "prior_slice_8_vector_count": 22,
-  "slice_9_vector_count": 26,
+  "slice_9_vector_count": 27,
   "effect_allowed_values": [
     false
   ],
@@ -201,6 +201,7 @@ with `EffectAllowed == false`.
     "opaque_snapshot_deep_copy",
     "opaque_snapshot_mutation_isolation",
     "wrong_state_rejects",
+    "wrong_cutover_id_rejects",
     "wrong_store_schema_version_rejects",
     "wrong_release_pins_rejects",
     "wrong_trust_bundle_rejects",
