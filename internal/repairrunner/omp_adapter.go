@@ -116,6 +116,12 @@ func validateOMPConfig(config OMPAdapterConfig) error {
 	if config.Provider == "" || config.Model == "" {
 		return fmt.Errorf("provider or model is empty")
 	}
+	if config.Role == "" {
+		return fmt.Errorf("role is empty")
+	}
+	if config.RunID == "" {
+		return fmt.Errorf("run-id is empty")
+	}
 	if config.PromptPath == "" || config.OutputPath == "" {
 		return fmt.Errorf("prompt or output path is empty")
 	}

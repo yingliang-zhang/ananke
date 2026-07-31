@@ -147,6 +147,9 @@ Write the function in main.go.
 		t.Fatalf("ComputeDiffClosure: %v", err)
 	}
 	worktree.Diff = diff
+	if diff.StatusHash == hashString("") {
+		t.Error("diff closure status hash should reflect adapter changes, not be empty")
+	}
 	t.Logf("diff status: %s", diff.StatusHash[:min(20, len(diff.StatusHash))])
 
 	// --- Step 7: Run Go test profile (if go.mod exists) ---
@@ -246,10 +249,12 @@ func TestOMPAdapterConfigValidation(t *testing.T) {
 		{"empty wrapper", OMPAdapterConfig{Workflow: "w", Provider: "p", Model: "m", PromptPath: "/p", OutputPath: "/o", Timeout: 60}, true},
 		{"empty workflow", OMPAdapterConfig{WrapperPath: "/w", Provider: "p", Model: "m", PromptPath: "/p", OutputPath: "/o", Timeout: 60}, true},
 		{"empty provider", OMPAdapterConfig{WrapperPath: "/w", Workflow: "w", Model: "m", PromptPath: "/p", OutputPath: "/o", Timeout: 60}, true},
-		{"empty model", OMPAdapterConfig{WrapperPath: "/w", Workflow: "w", Provider: "p", PromptPath: "/p", OutputPath: "/o", Timeout: 60}, true},
-		{"empty prompt", OMPAdapterConfig{WrapperPath: "/w", Workflow: "w", Provider: "p", Model: "m", OutputPath: "/o", Timeout: 60}, true},
-		{"zero timeout", OMPAdapterConfig{WrapperPath: "/w", Workflow: "w", Provider: "p", Model: "m", PromptPath: "/p", OutputPath: "/o"}, true},
-		{"valid", OMPAdapterConfig{WrapperPath: "/w", Workflow: "w", Provider: "p", Model: "m", PromptPath: "/p", OutputPath: "/o", Timeout: 60}, false},
+		{"empty model", OMPAdapterConfig{WrapperPath: "/w", Workflow: "w", Provider: "p", PromptPath: "/p", OutputPath: "/o", Timeout: 60, Role: "r", RunID: "id"}, true},
+		{"empty role", OMPAdapterConfig{WrapperPath: "/w", Workflow: "w", Provider: "p", Model: "m", PromptPath: "/p", OutputPath: "/o", Timeout: 60, RunID: "id"}, true},
+		{"empty run-id", OMPAdapterConfig{WrapperPath: "/w", Workflow: "w", Provider: "p", Model: "m", PromptPath: "/p", OutputPath: "/o", Timeout: 60, Role: "r"}, true},
+		{"empty prompt", OMPAdapterConfig{WrapperPath: "/w", Workflow: "w", Provider: "p", Model: "m", OutputPath: "/o", Timeout: 60, Role: "r", RunID: "id"}, true},
+		{"zero timeout", OMPAdapterConfig{WrapperPath: "/w", Workflow: "w", Provider: "p", Model: "m", PromptPath: "/p", OutputPath: "/o", Role: "r", RunID: "id"}, true},
+		{"valid", OMPAdapterConfig{WrapperPath: "/w", Workflow: "w", Provider: "p", Model: "m", PromptPath: "/p", OutputPath: "/o", Timeout: 60, Role: "r", RunID: "id"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

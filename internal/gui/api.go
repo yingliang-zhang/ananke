@@ -235,11 +235,16 @@ func (a *API) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // handleWeb serves the embedded frontend HTML.
 func (a *API) handleWeb(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(webIndexHTML)
 }
@@ -340,6 +345,9 @@ async function api(path, opts) {
     return data;
   } catch (e) { showToast(e.message, true); throw e; }
 }
+function escapeHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
 async function submitRepair() {
   const body = { project_path: document.getElementById('projectPath').value, request_text: document.getElementById('requestText').value, operator_name: document.getElementById('operatorName').value };
   try { await api('/api/repair/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); showToast('Repair submitted'); document.getElementById('requestText').value = ''; } catch {}
@@ -350,7 +358,7 @@ async function checkStatus() {
   try {
     const data = await api('/api/repair/status?hash=' + encodeURIComponent(hash));
     const sc = data.outbox_delivered === 1 ? 'delivered' : data.state || 'pending';
-    document.getElementById('statusResult').innerHTML = '<table><tr><th>Hash</th><td>' + data.attestation_hash + '</td></tr><tr><th>State</th><td><span class="status ' + sc + '">' + data.state + '</span></td></tr><tr><th>Attempt</th><td>' + data.attempt_number + '</td></tr><tr><th>Outbox</th><td>' + (data.outbox_delivered === 1 ? 'Delivered' : 'Pending') + '</td></tr><tr><th>Issued</th><td>' + data.issued_at + '</td></tr><tr><th>Created</th><td>' + data.created_at + '</td></tr></table>';
+    document.getElementById('statusResult').innerHTML = '<table><tr><th>Hash</th><td>' + escapeHtml(data.attestation_hash) + '</td></tr><tr><th>State</th><td><span class="status ' + escapeHtml(sc) + '">' + escapeHtml(data.state) + '</span></td></tr><tr><th>Attempt</th><td>' + escapeHtml(data.attempt_number) + '</td></tr><tr><th>Outbox</th><td>' + (data.outbox_delivered === 1 ? 'Delivered' : 'Pending') + '</td></tr><tr><th>Issued</th><td>' + escapeHtml(data.issued_at) + '</td></tr><tr><th>Created</th><td>' + escapeHtml(data.created_at) + '</td></tr></table>';
   } catch {}
 }
 async function checkEvidence() {
@@ -360,7 +368,7 @@ async function checkEvidence() {
     const data = await api('/api/repair/evidence?hash=' + encodeURIComponent(hash));
     let p = data.attestation_json;
     try { p = JSON.stringify(JSON.parse(data.attestation_json), null, 2); } catch {}
-    document.getElementById('evidenceResult').innerHTML = '<table><tr><th>Hash</th><td>' + data.attestation_hash + '</td></tr><tr><th>Signature</th><td>' + data.signature + '</td></tr><tr><th>Authorization</th><td>' + data.authorization_hash + '</td></tr><tr><th>Attempt</th><td>' + data.attempt_hash + '</td></tr></table><div style="margin-top:10px"><label>Attestation JSON</label><div class="evidence">' + p.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div></div>';
+    document.getElementById('evidenceResult').innerHTML = '<table><tr><th>Hash</th><td>' + escapeHtml(data.attestation_hash) + '</td></tr><tr><th>Signature</th><td>' + escapeHtml(data.signature) + '</td></tr><tr><th>Authorization</th><td>' + escapeHtml(data.authorization_hash) + '</td></tr><tr><th>Attempt</th><td>' + escapeHtml(data.attempt_hash) + '</td></tr></table><div style="margin-top:10px"><label>Attestation JSON</label><div class="evidence">' + escapeHtml(p) + '</div></div>';
   } catch {}
 }
 async function reviewAction(action) {
@@ -369,7 +377,7 @@ async function reviewAction(action) {
   const body = { attestation_hash: hash, action: action, reviewer_name: document.getElementById('reviewerName').value, review_comment: document.getElementById('reviewComment').value };
   try {
     const data = await api('/api/repair/review', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    showToast(data.message);
+    showToast(escapeHtml(data.message));
     document.getElementById('reviewResult').innerHTML = '<span class="status ' + (data.accepted ? 'delivered' : 'abandoned') + '">' + (data.accepted ? 'Accepted' : 'Rejected') + '</span>';
   } catch {}
 }
