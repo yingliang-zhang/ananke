@@ -8,6 +8,7 @@ Architecture Decision Records for Ananke.
 | 0002 | Supervisor lifecycle identity model | Draft |
 | 0003 | Cleanup state machine and finalization outbox | Draft |
 | 0004 | Select JSON Schema and Quicktype for P0a codegen | Accepted (P0a experiment only) |
+| 0005 | Multi-model review/audit (MoA) for controlled repair | Draft |
 
 ## Format
 
