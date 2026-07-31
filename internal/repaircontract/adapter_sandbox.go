@@ -989,6 +989,14 @@ func verifiedAdapterSandboxSnapshotIntact(value *VerifiedAdapterSandboxSnapshot,
 
 func adapterSandboxSnapshotMatchesAuthority(value *VerifiedAdapterSandboxSnapshot, expected SupervisorIntentAuthority, authorization *VerifiedAuthorization, claim *VerifiedSupervisorIntentClaim, worktree *VerifiedRepositoryWorktree) bool {
 	observation := value.observation
+	// Decode the Slice 4 worktree observation from the capability's canonical
+	// bytes to anchor WorktreeSlotPathHash and InstalledWorktreeRootIdentityHash
+	// to their true Slice 4 values, not to writablePathSetHash or
+	// candidateRootIdentityHash which are semantically unrelated quantities.
+	worktreeObservation, err := DecodeRepositoryWorktreeObservation(worktree.canonical)
+	if err != nil {
+		return false
+	}
 	return observation.AuthorizationHash == authorization.authorization.AuthorizationHash &&
 		observation.ApprovalHash == authorization.authorization.ApprovalHash &&
 		observation.RequestHash == expected.AcceptedDispatch.Request.RequestHash &&
@@ -1000,9 +1008,9 @@ func adapterSandboxSnapshotMatchesAuthority(value *VerifiedAdapterSandboxSnapsho
 		observation.RepositoryIdentityHash == expected.Repository.RepositoryIdentityHash &&
 		observation.BootEpochID == expected.BootEpochID && observation.BootEpochHash == expected.BootEpochHash &&
 		observation.WorktreeSlotID == worktree.worktreeSlotID &&
-		observation.WorktreeSlotPathHash == worktree.writablePathSetHash &&
+		observation.WorktreeSlotPathHash == worktreeObservation.WorktreeSlotPathHash &&
 		observation.WorktreeCapabilityHash == worktree.snapshotIntegrityHash &&
-		observation.InstalledWorktreeRootIdentityHash == worktree.candidateRootIdentityHash
+		observation.InstalledWorktreeRootIdentityHash == worktreeObservation.InstalledWorktreeRootIdentityHash
 }
 
 // --- Capability integrity ---

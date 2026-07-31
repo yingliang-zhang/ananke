@@ -302,9 +302,9 @@ The focused package tests prove only these pure Slice 5 records, canonical bytes
   },
   "uid_lease_grammar": "attempt_<attempt_number>_adapter_uid_lease_001",
   "canonical_fixture": {
-    "observation_hash": "sha256:7bf86db92a2712e44d1f7a7aa62fcfaa6a0087e9bd46f6153bb3e6bbf250599e",
-    "canonical_sha256": "sha256:ed2272178bc29e8199ab6558b9b22edef022ee8f721febc1c30cae84bdad3d4a",
-    "snapshot_integrity_hash": "sha256:7dd06b6e654776c2d52824aec0cc52e39a2a473465c8be754a9becc656641dca",
+    "observation_hash": "sha256:3fbf122ec5addde77e9441f35a6ca856312121a07268078e745715142b0195eb",
+    "canonical_sha256": "sha256:c926e9c54f31f3e7a9dd3894fee6e35a66863ee8392b0e56318495ef0bcbb572",
+    "snapshot_integrity_hash": "sha256:9653538f232d30baee7b49b6cf3ad9df303dd6b57767278564cb2c31670fb725",
     "authorization_hash": "sha256:a4ebf38cc021a2c93f7ac2dc693744e2a7e3c6928f8a26d80a9ba501d00b2a11",
     "claim_hash": "sha256:9fc9223dbe7dc06cbfc9c6bbdb5642c4ad5a6c40c9a36d0a61f29e49ba5259cc",
     "predecessor_claim_hash": "sha256:45ff41731f981cce4d5c38397b588c4c4f42f2f01c01cc315f0410dc1768bc27",
@@ -358,6 +358,5 @@ The focused package tests prove only these pure Slice 5 records, canonical bytes
     "observation_hash_mismatch_rejects"
   ]
 }
-
 ```
 <!-- END P6 SLICE 5 MACHINE CONTRACT -->
