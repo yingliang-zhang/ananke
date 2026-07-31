@@ -41,11 +41,11 @@ func TestTrustedSupervisorCommandDispatchesSubmitRecoverAndCancelExactly(t *test
 }
 
 type recordingCommandRuntime struct {
-	submitEnvelope      store.ExternalSupervisorEnvelope
-	submitFence         store.LaunchFence
-	recoverHandoffID    string
-	cancelCancellation  store.ExternalSupervisorCancellation
-	cancelFence          store.LaunchFence
+	submitEnvelope     store.ExternalSupervisorEnvelope
+	submitFence        store.LaunchFence
+	recoverHandoffID   string
+	cancelCancellation store.ExternalSupervisorCancellation
+	cancelFence        store.LaunchFence
 }
 
 func (runtime *recordingCommandRuntime) Submit(_ context.Context, envelope store.ExternalSupervisorEnvelope, fence store.LaunchFence) lifecycle.ExternalSupervisorPublicOutput {
