@@ -1,11 +1,11 @@
 package repairverifier
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/yingliang-zhang/ananke/internal/repaircontract"
@@ -59,13 +59,13 @@ func LoadRepairSigningMaterial(privateKeyPath string, ownerUserID uint32, now ti
 	// and gives us access to the pinned SPKI hash.
 	verifier, err := NewRepairVerifier(now)
 	if err != nil {
-		return nil, fmt.Errorf("%w: verifier: %v", ErrKeyProvisioning, err)
+		return nil, fmt.Errorf("%w: verifier: %w", ErrKeyProvisioning, err)
 	}
 
 	// Read the private key file with strict security checks.
 	privateKeyBytes, err := transportprimitives.ReadOwnerOnlyRegularFile(privateKeyPath, ownerUserID, maxPrivateKeyBundleBytes)
 	if err != nil {
-		return nil, fmt.Errorf("%w: read private key: %v", ErrKeyProvisioning, err)
+		return nil, fmt.Errorf("%w: read private key: %w", ErrKeyProvisioning, err)
 	}
 	defer transportprimitives.ZeroBytes(privateKeyBytes)
 
@@ -91,10 +91,20 @@ func LoadRepairSigningMaterial(privateKeyPath string, ownerUserID uint32, now ti
 	// Verify the public key's SPKI matches the pinned value.
 	spki, err := transportprimitives.SPKIHash(publicKey)
 	if err != nil {
-		return nil, fmt.Errorf("%w: SPKI hash: %v", ErrKeyProvisioning, err)
+		return nil, fmt.Errorf("%w: SPKI hash: %w", ErrKeyProvisioning, err)
 	}
 	if spki != verifier.ExpectedAttestorSPKI() {
 		return nil, fmt.Errorf("%w: key SPKI mismatch (expected %s, got %s)", ErrKeyProvisioning, verifier.ExpectedAttestorSPKI(), spki)
+	}
+
+	// Seed/pub consistency self-check: verify the private key's seed half
+	// regenerates the same public key. This catches a corrupted key file
+	// where only the seed or only the public half is damaged — the SPKI
+	// check would pass but signing would produce unverifiable signatures.
+	seed := ed25519.NewKeyFromSeed(privateKey[:ed25519.SeedSize])
+	seedPub := seed.Public()
+	if !bytes.Equal(seedPub.(ed25519.PublicKey), publicKey) {
+		return nil, fmt.Errorf("%w: seed/pub consistency check failed", ErrKeyProvisioning)
 	}
 
 	// Provision the verifier with the public key for signature verification.
@@ -163,22 +173,35 @@ func (m *RepairSigningMaterial) Close() {
 
 // parsePrivateKey parses an Ed25519 private key from the file contents.
 // The expected format is "ed25519-private:" + hex-encoded 64-byte private key.
+//
+// This function operates entirely on byte slices (not Go strings) to ensure
+// all intermediate private-key material can be explicitly zeroized. This
+// mirrors the P5 trustedsupervisor pattern (server_keys.go:128-216) which
+// hex-decodes directly from the byte buffer into the key slice.
 func parsePrivateKey(data []byte) (ed25519.PrivateKey, error) {
-	trimmed := strings.TrimSpace(string(data))
-	if !strings.HasPrefix(trimmed, privateSigningKeyPrefix) {
+	// Trim whitespace at byte level (avoid string conversion)
+	trimmed := bytes.TrimSpace(data)
+	prefixBytes := []byte(privateSigningKeyPrefix)
+	if !bytes.HasPrefix(trimmed, prefixBytes) {
+		transportprimitives.ZeroBytes(trimmed)
 		return nil, fmt.Errorf("missing prefix %q", privateSigningKeyPrefix)
 	}
-	hexStr := strings.TrimPrefix(trimmed, privateSigningKeyPrefix)
-	decoded, err := hex.DecodeString(hexStr)
+	hexPart := trimmed[len(prefixBytes):]
+	// Pre-allocate the key slice and decode directly into it
+	key := make(ed25519.PrivateKey, ed25519.PrivateKeySize)
+	n, err := hex.Decode(key, hexPart)
 	if err != nil {
+		transportprimitives.ZeroBytes(key)
+		transportprimitives.ZeroBytes(trimmed)
 		return nil, fmt.Errorf("hex decode: %v", err)
 	}
-	if len(decoded) != ed25519.PrivateKeySize {
-		return nil, fmt.Errorf("expected %d bytes, got %d", ed25519.PrivateKeySize, len(decoded))
+	if n != ed25519.PrivateKeySize || len(hexPart) != ed25519.PrivateKeySize*2 {
+		transportprimitives.ZeroBytes(key)
+		transportprimitives.ZeroBytes(trimmed)
+		return nil, fmt.Errorf("expected %d hex chars, got %d", ed25519.PrivateKeySize*2, len(hexPart))
 	}
-	key := make(ed25519.PrivateKey, ed25519.PrivateKeySize)
-	copy(key, decoded)
-	transportprimitives.ZeroBytes(decoded)
+	// Zeroize the trimmed buffer (which still contains the hex-encoded key)
+	transportprimitives.ZeroBytes(trimmed)
 	return key, nil
 }
 

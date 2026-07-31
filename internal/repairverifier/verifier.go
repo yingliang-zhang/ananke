@@ -49,7 +49,7 @@ func NewRepairVerifier(now time.Time) (*RepairVerifier, error) {
 	bundle := repaircontract.FrozenTrustBundle()
 	rotation := repaircontract.FrozenTrustRotation()
 	if err := repaircontract.VerifyReleaseTrust(pins, bundle, rotation, now); err != nil {
-		return nil, fmt.Errorf("%w: release trust: %v", ErrVerification, err)
+		return nil, fmt.Errorf("%w: release trust: %w", ErrVerification, err)
 	}
 	attestor := bundle.RepairAttestor
 	if attestor.Role != repaircontract.RepairAttestorRole {
@@ -190,10 +190,4 @@ func hexDecode(hexStr string, expectedSize int) ([]byte, error) {
 		return nil, fmt.Errorf("expected %d bytes, got %d", expectedSize, len(decoded))
 	}
 	return decoded, nil
-}
-
-// FrozenTrustRotation is a convenience accessor that delegates to the
-// contract package's frozen rotation value.
-func FrozenTrustRotation() repaircontract.TrustRotation {
-	return repaircontract.FrozenTrustRotation()
 }

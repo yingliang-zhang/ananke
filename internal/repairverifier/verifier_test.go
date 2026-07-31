@@ -2,6 +2,7 @@ package repairverifier
 
 import (
 	"crypto/ed25519"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -228,7 +229,7 @@ func TestVerifyAttestationSignatureRejectsForgedSignature(t *testing.T) {
 	}
 	signedBytes, _ := repaircontract.AttestationSignatureCanonicalBytes(record)
 	forgedSig := ed25519.Sign(forgedPriv, signedBytes)
-	record.Signature = "ed25519:" + encodeHex(forgedSig)
+	record.Signature = "ed25519:" + hex.EncodeToString(forgedSig)
 
 	if err := material.VerifyAttestationSignature(record); err == nil {
 		t.Fatal("should reject forged signature from different key")
@@ -243,7 +244,7 @@ func TestLoadRepairSigningMaterial(t *testing.T) {
 	// Write private key file
 	tmpDir := t.TempDir()
 	keyPath := filepath.Join(tmpDir, "repair_attestor_private.key")
-	keyContent := privateSigningKeyPrefix + encodeHex(priv)
+	keyContent := privateSigningKeyPrefix + hex.EncodeToString(priv)
 	if err := os.WriteFile(keyPath, []byte(keyContent), 0o600); err != nil {
 		t.Fatalf("WriteFile error: %v", err)
 	}
@@ -344,21 +345,4 @@ func TestRepairSigningMaterialRootID(t *testing.T) {
 	if material.RootID() == "" {
 		t.Error("RootID is empty")
 	}
-}
-
-func TestFrozenTrustRotation(t *testing.T) {
-	rotation := FrozenTrustRotation()
-	if rotation.RotationHash == "" {
-		t.Error("FrozenTrustRotation().RotationHash is empty")
-	}
-}
-
-func encodeHex(data []byte) string {
-	const hexChars = "0123456789abcdef"
-	result := make([]byte, len(data)*2)
-	for i, b := range data {
-		result[i*2] = hexChars[b>>4]
-		result[i*2+1] = hexChars[b&0x0f]
-	}
-	return string(result)
 }
