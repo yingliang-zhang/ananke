@@ -404,11 +404,6 @@ func gitRevParse(repo string, ref string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func fatalf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "ananke-repair: "+format+"\n", args...)
-	os.Exit(1)
-}
-
 func min(a, b int) int {
 	if a < b {
 		return a

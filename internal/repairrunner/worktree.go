@@ -109,9 +109,11 @@ func MaterializeWorktree(desc WorktreeDescriptor) (*WorktreeResult, error) {
 		WorktreeSlotPathHash:              slotPathHash,
 		InstalledWorktreeRootIdentityHash: rootIdentityHash,
 		Diff:                              diff,
-		// PatchHash/PatchSize are computed by ComputeDiffClosure after
-		// the adapter has made changes. They are empty here because no
-		// patch exists yet at materialization time.
+		// PatchHash/PatchSize are intentionally constant in the MVP:
+		// they represent the materialized (pre-adapter) patch state.
+		// ComputeDiffClosure produces DiffClosure hashes (not PatchHash)
+		// after the adapter runs. A future phase will compute a real
+		// patch hash from the git diff output.
 		PatchHash: hashString(""),
 		PatchSize: 0,
 	}, nil

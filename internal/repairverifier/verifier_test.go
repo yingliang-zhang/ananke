@@ -227,7 +227,7 @@ func TestVerifyAttestationSignatureRejectsForgedSignature(t *testing.T) {
 		ReleasePinsHash:               pins.ReleasePinsHash,
 		TrustBundleHash:               bundle.TrustBundleHash,
 	}
-	signedBytes, _ := repaircontract.AttestationSignatureCanonicalBytes(record)
+	signedBytes, _ := repaircontract.RuntimeSignatureCanonicalBytes(record)
 	forgedSig := ed25519.Sign(forgedPriv, signedBytes)
 	record.Signature = "ed25519:" + hex.EncodeToString(forgedSig)
 
