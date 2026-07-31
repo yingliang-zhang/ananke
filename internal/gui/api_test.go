@@ -21,7 +21,12 @@ func newTestAPI(t *testing.T) (*API, *store.Store) {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	return NewAPI(s, "127.0.0.1:0"), s
+	return NewAPI(s, "127.0.0.1:0", RepairConfig{
+		WrapperPath: "/tmp/fake-wrapper.sh",
+		Provider:    "custom:sudo",
+		Model:       "glm-5.2",
+		Timeout:     60,
+	}), s
 }
 
 func TestAPIHealth(t *testing.T) {

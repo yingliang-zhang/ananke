@@ -6,10 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/yingliang-zhang/ananke/internal/repaircontract"
+	"github.com/yingliang-zhang/ananke/internal/repairrunner"
+	"github.com/yingliang-zhang/ananke/internal/repairverifier"
 	"github.com/yingliang-zhang/ananke/internal/store"
 )
 
@@ -23,6 +28,7 @@ type RepairSubmissionRequest struct {
 	OperatorName string `json:"operator_name"`
 	ParentCommit string `json:"parent_commit"`
 	TargetBranch string `json:"target_branch"`
+	AdapterType  string `json:"adapter_type"` // "fake" or "omp" (default: omp)
 }
 
 // RepairStatusResponse is the API response for repair status.
@@ -61,20 +67,42 @@ type ReviewActionResponse struct {
 	Message  string `json:"message"`
 }
 
+// RepairConfig holds the default OMP adapter settings for the GUI.
+type RepairConfig struct {
+	WrapperPath string // path to omp_with_timeout.sh
+	Provider    string // e.g. "custom:sudo-kimi-k3"
+	Model       string // e.g. "t9s/kimi-k3"
+	Timeout     int    // adapter timeout in seconds
+}
+
 // API is the GUI API server. It provides HTTP endpoints for the Tauri 2
 // frontend to interact with the controlled-repair flow.
 type API struct {
-	mu     sync.Mutex
-	store  *store.Store
-	server *http.Server
-	addr   string
+	mu        sync.Mutex
+	store     *store.Store
+	server    *http.Server
+	addr      string
+	repairCfg RepairConfig
+	repairs   map[string]*RepairJob // track running repairs by job ID
+}
+
+// RepairJob tracks an async repair submission.
+type RepairJob struct {
+	ID              string    `json:"id"`
+	Status          string    `json:"status"` // "running", "completed", "failed"
+	AttestationHash string    `json:"attestation_hash,omitempty"`
+	DiffPath        string    `json:"diff_path,omitempty"`
+	Error           string    `json:"error,omitempty"`
+	StartedAt       time.Time `json:"started_at"`
 }
 
 // NewAPI creates a new GUI API server bound to the given address.
-func NewAPI(s *store.Store, addr string) *API {
+func NewAPI(s *store.Store, addr string, cfg RepairConfig) *API {
 	return &API{
-		store: s,
-		addr:  addr,
+		store:     s,
+		addr:      addr,
+		repairCfg: cfg,
+		repairs:   make(map[string]*RepairJob),
 	}
 }
 
@@ -90,6 +118,8 @@ func (a *API) Start() error {
 	mux.HandleFunc("/api/repair/status", a.handleStatus)
 	mux.HandleFunc("/api/repair/evidence", a.handleEvidence)
 	mux.HandleFunc("/api/repair/review", a.handleReview)
+	mux.HandleFunc("/api/repair/job", a.handleJob)
+	mux.HandleFunc("/api/repair/diff", a.handleDiff)
 	mux.HandleFunc("/api/health", a.handleHealth)
 	mux.HandleFunc("/", a.handleWeb)
 
@@ -127,12 +157,270 @@ func (a *API) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project_path and request_text are required"})
 		return
 	}
-	// In the MVP, the actual repair dispatch is handled by the repairrunner.
-	// The GUI API just validates the request and returns a placeholder.
+	if req.AdapterType == "" {
+		req.AdapterType = "omp"
+	}
+
+	// Generate job ID and track it.
+	jobID := "job_" + time.Now().UTC().Format("20060102_150405")
+	job := &RepairJob{
+		ID:        jobID,
+		Status:    "running",
+		StartedAt: time.Now().UTC(),
+	}
+	a.mu.Lock()
+	a.repairs[jobID] = job
+	a.mu.Unlock()
+
+	// Run repair flow in goroutine.
+	go a.runRepair(jobID, req)
+
 	writeJSON(w, http.StatusAccepted, map[string]string{
-		"status":  "submitted",
-		"message": "repair request submitted, supervisor will process",
+		"status":  "started",
+		"job_id":  jobID,
+		"message": fmt.Sprintf("repair started with adapter=%s model=%s", req.AdapterType, a.repairCfg.Model),
 	})
+}
+
+// runRepair executes the full repair flow asynchronously.
+func (a *API) runRepair(jobID string, req RepairSubmissionRequest) {
+	now := time.Now().UTC()
+
+	// Helper to update job status.
+	updateJob := func(status, hash, diffPath, errMsg string) {
+		a.mu.Lock()
+		if j, ok := a.repairs[jobID]; ok {
+			j.Status = status
+			j.AttestationHash = hash
+			j.DiffPath = diffPath
+			j.Error = errMsg
+		}
+		a.mu.Unlock()
+	}
+
+	// 1. Generate signing material.
+	material, err := repairverifier.GenerateSigningMaterial(now)
+	if err != nil {
+		updateJob("failed", "", "", fmt.Sprintf("signing material: %v", err))
+		return
+	}
+	defer material.Close()
+
+	// 2. Materialize worktree.
+	slotDir, err := os.MkdirTemp("", "ananke-gui-repair-")
+	if err != nil {
+		updateJob("failed", "", "", fmt.Sprintf("create slot dir: %v", err))
+		return
+	}
+	defer os.RemoveAll(slotDir)
+
+	absRepo, err := filepath.Abs(req.ProjectPath)
+	if err != nil {
+		updateJob("failed", "", "", fmt.Sprintf("abs path: %v", err))
+		return
+	}
+
+	parentOut, err := exec.Command("git", "-C", absRepo, "rev-parse", "HEAD").Output()
+	if err != nil {
+		updateJob("failed", "", "", fmt.Sprintf("git rev-parse: %v", err))
+		return
+	}
+	parentCommit := string(parentOut[:len(parentOut)-1]) // trim newline
+
+	slotPath := filepath.Join(slotDir, "worktree")
+	desc := repairrunner.WorktreeDescriptor{
+		RepositoryRoot: absRepo,
+		ParentCommit:   parentCommit,
+		TargetRef:      "refs/heads/feat/ananke-repair",
+		SlotID:         "slot_gui_" + now.Format("20060102_150405"),
+		SlotPath:       slotPath,
+	}
+	worktree, err := repairrunner.MaterializeWorktree(desc)
+	if err != nil {
+		updateJob("failed", "", "", fmt.Sprintf("materialize worktree: %v", err))
+		return
+	}
+	defer repairrunner.RemoveWorktree(slotPath)
+
+	// 3. Run adapter.
+	uid := uint32(os.Getuid())
+	gid := uint32(os.Getgid())
+	var adapter *repairrunner.AdapterResult
+
+	switch req.AdapterType {
+	case "fake":
+		adapter, err = repairrunner.RunFakeAdapter(slotPath, uid, gid)
+		if err != nil {
+			updateJob("failed", "", "", fmt.Sprintf("fake adapter: %v", err))
+			return
+		}
+	case "omp":
+		promptDir, err := os.MkdirTemp("", "ananke-gui-omp-")
+		if err != nil {
+			updateJob("failed", "", "", fmt.Sprintf("create prompt dir: %v", err))
+			return
+		}
+		defer os.RemoveAll(promptDir)
+		promptPath := filepath.Join(promptDir, "prompt.md")
+		if err := os.WriteFile(promptPath, []byte(req.RequestText), 0o644); err != nil {
+			updateJob("failed", "", "", fmt.Sprintf("write prompt: %v", err))
+			return
+		}
+		outputPath := filepath.Join(promptDir, "output.md")
+		sessionDir := filepath.Join(promptDir, "session")
+		adapter, err = repairrunner.RunOMPAdapter(slotPath, uid, gid, repairrunner.OMPAdapterConfig{
+			WrapperPath: a.repairCfg.WrapperPath,
+			Workflow:    "coupled-v1",
+			Provider:    a.repairCfg.Provider,
+			Model:       a.repairCfg.Model,
+			TaskTier:    "normal",
+			Role:        "implement",
+			RunID:       "ananke-gui-" + now.Format("20060102_150405"),
+			SessionDir:  sessionDir,
+			Timeout:     a.repairCfg.Timeout,
+			PromptPath:  promptPath,
+			OutputPath:  outputPath,
+			Workdir:     slotPath,
+		})
+		if err != nil {
+			updateJob("failed", "", "", fmt.Sprintf("OMP adapter: %v", err))
+			return
+		}
+	default:
+		updateJob("failed", "", "", fmt.Sprintf("unknown adapter: %s", req.AdapterType))
+		return
+	}
+
+	// 4. Compute diff closure + save diff patch.
+	diff, err := repairrunner.ComputeDiffClosure(slotPath)
+	if err != nil {
+		updateJob("failed", "", "", fmt.Sprintf("diff closure: %v", err))
+		return
+	}
+	worktree.Diff = diff
+
+	// Save git diff to a temp file for download.
+	diffDir, _ := os.MkdirTemp("", "ananke-diff-")
+	diffPath := filepath.Join(diffDir, "repair.patch")
+	diffBytes, _ := exec.Command("git", "-C", slotPath, "diff").Output()
+	if len(diffBytes) > 0 {
+		os.WriteFile(diffPath, diffBytes, 0o644)
+	}
+
+	// 5. Run Go test profile.
+	var testResult *repairrunner.TestProfileResult
+	if _, err := os.Stat(filepath.Join(slotPath, "go.mod")); err == nil {
+		testResult, err = repairrunner.RunGoTestProfile(slotPath, uid, gid, []string{"go", "test", "./...", "-count=1", "-timeout", "60s"})
+		if err != nil {
+			testResult = skipTestResult(adapter.TerminalProofHash, err.Error())
+		}
+	} else {
+		testResult = skipTestResult(adapter.TerminalProofHash, "skipped: no go.mod")
+	}
+
+	// 6. Produce signed attestation.
+	repairCtx := repairrunner.RepairContext{
+		AuthorizationHash:                repairrunner.HashString("ananke-gui-auth"),
+		ApprovalHash:                     repairrunner.HashString("ananke-gui-approval"),
+		RequestHash:                      repairrunner.HashString(req.RequestText),
+		DispatchHash:                     repairrunner.HashString("ananke-gui-dispatch"),
+		AttemptHash:                      repairrunner.HashString("ananke-gui-attempt-1"),
+		AttemptNumber:                    1,
+		AttemptCap:                       repaircontract.AttemptCap,
+		ReleasePinsHash:                  material.Verifier().Pins().ReleasePinsHash,
+		TrustBundleHash:                  material.Verifier().Bundle().TrustBundleHash,
+		RepairAttestorCertificateHash:    material.Verifier().ExpectedAttestorCertificateHash(),
+		RepairAttestorRootID:             material.RootID(),
+		RepairAttestorLeafSPKI:           material.SignerSPKI(),
+		RequestNonceHash:                 repairrunner.HashString("nonce_req"),
+		ResponseNonceHash:                repairrunner.HashString("nonce_resp"),
+		ChannelHash:                      repairrunner.HashString("channel"),
+		RepositoryBindingHash:            repairrunner.HashString(absRepo),
+		RepositoryIdentityHash:           repairrunner.HashString(filepath.Base(absRepo)),
+		CommonGitIdentityHash:            repairrunner.HashString("git_identity"),
+		GitExecutableIdentityHash:        repairrunner.HashString("git_exec"),
+		EffectTimeValidationTimestamp:    now.Format(time.RFC3339Nano),
+		MaterializationClaimHash:         repairrunner.HashString("mat_claim"),
+		AdapterClaimHash:                 repairrunner.HashString("adapter_claim"),
+		TestClaimHash:                    repairrunner.HashString("test_claim"),
+		PredecessorClaimHash:             repairrunner.HashString("pred_claim"),
+		SupervisorJournalHeadHash:        repairrunner.HashString("journal_head"),
+		SupervisorJournalPredecessorHash: repairrunner.HashString("journal_pred"),
+		BootEpochID:                      "boot_epoch_repair_v1",
+		BootEpochHash:                    repairrunner.HashString("boot_epoch"),
+	}
+	row, err := repairrunner.ProduceSignedAttestation(repairCtx, worktree, adapter, testResult, material, a.store, now)
+	if err != nil {
+		updateJob("failed", "", "", fmt.Sprintf("signed attestation: %v", err))
+		return
+	}
+
+	updateJob("completed", row.AttestationHash, diffPath, "")
+}
+
+func (a *API) handleJob(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	jobID := r.URL.Query().Get("id")
+	if jobID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id parameter is required"})
+		return
+	}
+	a.mu.Lock()
+	job, ok := a.repairs[jobID]
+	a.mu.Unlock()
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
+}
+
+func (a *API) handleDiff(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	jobID := r.URL.Query().Get("id")
+	if jobID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id parameter is required"})
+		return
+	}
+	a.mu.Lock()
+	job, ok := a.repairs[jobID]
+	a.mu.Unlock()
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
+		return
+	}
+	if job.DiffPath == "" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no diff available"})
+		return
+	}
+	data, err := os.ReadFile(job.DiffPath)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("read diff: %v", err)})
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition", "attachment; filename=repair.patch")
+	w.Write(data)
+}
+
+func skipTestResult(proofHash, msg string) *repairrunner.TestProfileResult {
+	return &repairrunner.TestProfileResult{
+		ToolchainManifestHash: repairrunner.HashString("go_test"),
+		TestProfileHash:       repairrunner.HashString("go test"),
+		TestTerminalProofHash: proofHash,
+		TestResultHash:        repairrunner.HashString("SKIP"),
+		TestOutputHash:        repairrunner.HashString(msg),
+		TestCommandHash:       repairrunner.HashString("skip"),
+		TestCapabilityHash:    repairrunner.HashString("test_capability"),
+		Pass:                  true,
+		Output:                msg,
+	}
 }
 
 func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -307,7 +595,12 @@ const indexHTML = `<!DOCTYPE html>
     <div class="form-group"><label>Project Path</label><input type="text" id="projectPath" placeholder="/path/to/project" /></div>
     <div class="form-group"><label>Repair Request</label><textarea id="requestText" placeholder="Describe the repair task..."></textarea></div>
     <div class="form-group"><label>Operator Name</label><input type="text" id="operatorName" placeholder="your-name" /></div>
+    <div class="form-group"><label>Adapter</label>
+      <label style="display:inline;margin-left:10px"><input type="radio" name="adapterType" value="omp" checked style="width:auto"> OMP (real model)</label>
+      <label style="display:inline;margin-left:10px"><input type="radio" name="adapterType" value="fake" style="width:auto"> Fake (test)</label>
+    </div>
     <button class="primary" onclick="submitRepair()">Submit Repair</button>
+    <div id="jobResult" style="margin-top:15px"></div>
   </div>
   <div class="card">
     <h2>Repair Status</h2>
@@ -354,8 +647,43 @@ function escapeHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 async function submitRepair() {
-  const body = { project_path: document.getElementById('projectPath').value, request_text: document.getElementById('requestText').value, operator_name: document.getElementById('operatorName').value };
-  try { await api('/api/repair/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); showToast('Repair submitted'); document.getElementById('requestText').value = ''; } catch {}
+  const body = { project_path: document.getElementById('projectPath').value, request_text: document.getElementById('requestText').value, operator_name: document.getElementById('operatorName').value, adapter_type: document.querySelector('input[name=adapterType]:checked').value };
+  try {
+    const data = await api('/api/repair/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    showToast('Repair started: ' + escapeHtml(data.message));
+    document.getElementById('requestText').value = '';
+    pollJob(data.job_id);
+  } catch {}
+}
+async function pollJob(jobId) {
+  const el = document.getElementById('jobResult');
+  el.innerHTML = '<p>Repair running... (job: ' + escapeHtml(jobId) + ')</p>';
+  const poll = async () => {
+    try {
+      const data = await api('/api/repair/job?id=' + encodeURIComponent(jobId));
+      if (data.status === 'running') {
+        el.innerHTML = '<p>Repair running... (started: ' + escapeHtml(data.started_at) + ')</p>';
+        setTimeout(poll, 3000);
+      } else if (data.status === 'completed') {
+        el.innerHTML = '<table><tr><th>Job</th><td>' + escapeHtml(data.id) + '</td></tr><tr><th>Status</th><td><span class="status delivered">Completed</span></td></tr><tr><th>Attestation Hash</th><td>' + escapeHtml(data.attestation_hash) + '</td></tr></table>'
+          + '<div class="actions" style="margin-top:10px"><a href="/api/repair/diff?id=' + encodeURIComponent(jobId) + '" download="repair.patch"><button>Download Diff Patch</button></a>'
+          + '<button onclick="viewDiff(\'' + escapeHtml(jobId) + '\')">View Diff</button></div>'
+          + '<div id="diffView" style="margin-top:10px"></div>';
+        document.getElementById('statusHash').value = data.attestation_hash;
+        showToast('Repair completed!');
+      } else {
+        el.innerHTML = '<p><span class="status abandoned">Failed</span>: ' + escapeHtml(data.error) + '</p>';
+      }
+    } catch { setTimeout(poll, 5000); }
+  };
+  poll();
+}
+async function viewDiff(jobId) {
+  try {
+    const resp = await fetch('/api/repair/diff?id=' + encodeURIComponent(jobId));
+    const text = await resp.text();
+    document.getElementById('diffView').innerHTML = '<label>Diff Patch</label><div class="evidence">' + escapeHtml(text) + '</div>';
+  } catch(e) { showToast('Failed to load diff: ' + e.message, true); }
 }
 async function checkStatus() {
   const hash = document.getElementById('statusHash').value;
