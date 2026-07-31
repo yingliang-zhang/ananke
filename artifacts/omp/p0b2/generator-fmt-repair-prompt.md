@@ -1,0 +1,5 @@
+Repair the verified P0b.2 generator/formatter incompatibility in /Users/yingliangzhang/Projects/ananke-p0a-schema-codegen. Do not commit/push and do not change scope beyond P0b generator/evidence.
+
+Independent verification found: after `cargo fmt --manifest-path gui/src-tauri/Cargo.toml -- --check`, `npm --prefix gui run check:renderer-public` failed because generated `mod.rs` drifted. Root cause: generator expected module order bootstrap/run/event while rustfmt canonicalizes declarations to bootstrap/event/run. This makes the required formatter and generated-tree gates incompatible.
+
+Fix the generator’s expected `rustModuleSource` to exactly match rustfmt canonical output (or equivalently generate formatter-stable source). Regenerate artifacts. Then run BOTH generator check and cargo fmt check in sequence, and again cargo fmt check then generator check, to prove order independence. Rerun P0b.2 focused Event bridge test, all-target privacy/typecheck/web build, diff/scope guard. Correct ledger claims only with real output. Report commands/results and terminal verdict.

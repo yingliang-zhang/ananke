@@ -1,0 +1,6 @@
+Third and final GPT resume for this sealed-HOME slice. Continue exact session; do not re-read broadly. Production implementation, focused GREEN (`5.74s`), focused `-count=10` (`27.85s`), race `-count=3` (`22.88s`), and provider-free OMP 17.1.4 preflight (`4.44s`) passed. Full-package regressions remain in test/recovery cleanup because direct `os.RemoveAll` cannot traverse sealed `.omp`, plus timeout/finalizing owned-root fixtures did not yet complete. Finish root causes now:
+- use bounded test teardown helpers/authenticated cleanup rather than weakening production modes;
+- update synthetic/finalizing exact eight-root identities and parent modes correctly;
+- ensure recovery cleanup can descriptor-authentically make sealed state removable, preserve decoy fail-closed behavior, and reach completion;
+- finish any interrupted edits, focused regression tests, then full package/vet/gofmt/diff if time.
+No real canary, ledger/wrapper/commit/schema/artifact-allowlist changes, reset/clean/restore, or broad exploration. If time expires, return exact remaining failing test names and do not claim completion.

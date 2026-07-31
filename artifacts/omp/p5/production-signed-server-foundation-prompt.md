@@ -1,0 +1,12 @@
+Implement the production local trusted-supervisor SIGNED UNIX SERVER foundation, without OMP execution yet. Strict TDD; no commit/push.
+Use the accepted transport at HEAD 68d0df5. Add a separate production binary/package boundary (e.g. cmd/ananke-trusted-supervisor and server code under internal/trustedsupervisor or a dedicated package) that interoperates with the existing Client wire exactly.
+Requirements:
+- Listen only on operator-configured Unix socket under an operator-owned mode-0700 directory; publish socket mode-0600; verify connected client UID/PID as defense in depth.
+- Load Ed25519 private signing keys only from operator-supplied owner-only mode-0600 key bundle outside repo. Validate public halves/SPKI/root IDs exactly match the public trust bundle and active root lifecycle. Never generate keys automatically in production; never print/store private bytes in Ananke SQLite, server journal, protocol, error, or logs. Zero buffers where practical.
+- Parse existing canonical bounded frames; verify delivery authorization, predecessor pins, signatures, root lifecycle, channel binding, nonces, deadlines, full closed schemas before accepting.
+- Sign acceptance receipt, callback, and cancellation acknowledgement/message-possession records expected by Client. For now callback must explicitly represent audit_not_run / waiting_for_human; no inferred success.
+- Add a separate durable SQLite server journal with immutable request/replay rows. Exact request replay after server restart returns byte-identical signed response without re-signing; nonce/request/operation conflicts fail closed. fsync/transactions and schema migration validation.
+- Bounded deadlines/connections/frame sizes; graceful shutdown; no network TCP, subprocess, OMP, source/artifact access, Run/repair.
+- Production command flags for socket, public trust bundle, private key bundle, journal, expected client UID; no secret values in argv except file paths. Fail on symlink/non-regular/wrong owner/mode/replacement where possible.
+- Tests: deterministic key fixtures only in _test.go/temp files; real separate-process server + real client submit/restart/reconcile/cancel; wrong key, bundle mismatch, same-UID impostor, key symlink/mode, malformed/oversized frame, replay/conflict, crash/restart, private leakage scan, production build excludes test keys/fakes.
+Update runbook/ledger honestly. Run focused/full/race/vet/P3d-P4 contracts. No OMP/server launch outside tests.

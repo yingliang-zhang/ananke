@@ -1,0 +1,7 @@
+Urgent repair for incorrect blocker-2 implementation. Current exact `(remote tcp "127.0.0.1:port")` SBPL is invalid on Darwin (`sandbox-exec: host must be * or localhost`) and causes widespread wrapper exit 65. No provider/model, no commit.
+
+Use the review's allowed alternative: sandbox rule may use localhost only if the trusted gateway owns EVERY admitted localhost address. Refactor auditHTTPGateway to bind both 127.0.0.1 and ::1 on the same ephemeral port (IPv4 listener first, IPv6 listener exact same port), fail closed if either cannot be exclusively bound, accept/track/close connections from both listeners, and return IPv4 authority for models.yml. Ensure shutdown waits for all accept loops and closes all listeners without leaks/races. Restore valid SBPL `localhost:<port>`.
+
+Replace the prior competing-IPv6 test: prove an external process cannot bind ::1:<gateway-port> while gateway lives; prove sandboxed IPv4 and IPv6 connections both terminate at the same trusted gateway boundary; fake credential never reaches any uncontrolled listener. Keep strict gateway request validation. Add close/error rollback test when second listener cannot bind.
+
+Run Darwin sandbox/evidence/server focused tests count=10, race=3, full focused matrix count=1. Specifically prove prior wrapper_exit_nonzero cascades disappear. Do not touch blockers 4/5/6.

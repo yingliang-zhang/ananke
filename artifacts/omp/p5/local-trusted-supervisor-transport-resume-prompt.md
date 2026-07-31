@@ -1,0 +1,1 @@
+Resume exact P5 session. Do not expand scope or redesign. Finish only the already-written local trusted-supervisor transport slice, resolve any existing compile/test failures, run focused tests/vet/contracts, and synthesize exact changed files, security boundaries, gates, and remaining no-OMP/no-repair state. No commit/push.

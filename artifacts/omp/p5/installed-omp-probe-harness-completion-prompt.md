@@ -1,0 +1,7 @@
+Mechanical provider-free preflight harness completion only; production native/model implementation already focused-PASS. In runAuditInstalledOMPTransportProbe:
+- Build entry with HermesProvider custom:sudo, HermesModel gpt-5.6-sol, CredentialEnvironmentNames exactly [SUDO_API_KEY], OMPVersion 17.1.3, OMPExecutable/root, OMPNativeAddon fixture.
+- Reuse production auditModelsConfigBytes; do not hand-copy stale YAML.
+- Create isolated home and stage the pinned native addon at home/.omp/natives/17.1.3/pi_natives.darwin-arm64.node using the same validated parent copy/read helpers as production, mode 0400 and hash equality. Set HOME to isolated home, include addon exact read/file-map path and explicit write deny in probe sandbox. Never use /var/empty.
+- Preserve only exact localhost network allow; denied 11434/8080/1234/mDNS discovery is expected. Exact fake key only.
+- Require exactly one local POST /v1/responses; no secret output; verify native hash.
+Run with both explicit fixture env vars count=10. If SIGTRAP remains, capture log evidence and stop—do not broaden. Then full package. No real provider, no production change unless a shared helper is necessary without semantic change, no commit.

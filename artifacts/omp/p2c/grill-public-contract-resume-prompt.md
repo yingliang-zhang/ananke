@@ -1,0 +1,1 @@
+Do not call more tools or edit files. Synthesize completed P2c public Grill contract/codegen work into artifacts/omp/p2c/grill-public-contract-output.md: exact changed/created paths, fixture/verifier status, executed gates/outcomes, known incomplete work/risks, and whether it is ready for independent verification. No commit/push.

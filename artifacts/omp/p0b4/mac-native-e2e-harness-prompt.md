@@ -1,0 +1,3 @@
+Implement Mac-native E2E harness in /Users/yingliangzhang/Projects/ananke-p0a-schema-codegen under docs/experiments/mac-native-e2e-contract.md. Worktree has uncommitted P0b acceptance repair; preserve it and do not commit/push.
+
+Add stable accessibility ids to renderer controls required by bootstrap/refresh/launch/cancel/state. Create isolated Mac2 E2E tooling and scripts outside GUI production dependencies. Harness must use only caller-provided already-running WDA endpoint; no host Automation Mode changes, no permission dialogs. Include preflight and evidence-oriented test/docs. Run safe Node/Rust/typecheck/build checks. Do not try to launch Appium/XCTest if it could prompt authorization. Report changed paths and verified outcomes.

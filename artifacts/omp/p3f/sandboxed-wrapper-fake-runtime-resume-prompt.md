@@ -1,0 +1,1 @@
+Resume exact P3f session. Complete only current sandboxed fake-child runtime/tests and run focused/full/race/vet/contracts. No real OMP/wrapper/target/commit. Synthesize changed paths, platform sandbox result, gates, and remaining activation boundary.

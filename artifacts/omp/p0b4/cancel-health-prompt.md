@@ -1,0 +1,3 @@
+Implement P0b.4 in /Users/yingliangzhang/Projects/ananke-p0a-schema-codegen per docs/experiments/p0b4-cancel-health-contract.md. Build on committed P0b.0–P0b.3 plus untracked OMP artifacts. Do not commit/push.
+
+Add canonical public Cancel/Health schemas; extend existing GUI Quicktype generator to Rust/TS artifacts, all-target drift/privacy. Migrate ONLY daemon_health and cancel_run public Rust returns and main.ts types to generated models. Strict TDD real bridge wire tests, RED before generated integration then GREEN. Preserve public JSON `online`, `accepted`, `state`. Do not alter daemon transport/private/internal types or other commands. Verify focused tests, generator/formatter order, privacy, typecheck/web build/diff scope. Ledger real evidence only. Report verdict.

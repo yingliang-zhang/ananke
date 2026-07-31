@@ -1,0 +1,5 @@
+Mechanical repair ONLY server journal v3 migration regressions after durable cancellation.
+Failing tests:
+- TestServerJournalMigratesAcceptedV1SchemaToImmutableAuditV2: open/migrate v1 fails `create server journal v3 cancellation schema`.
+- TestServerJournalRejectsFutureAndGappedMigrationHistory/future inserts version 3, but 3 is now current, causing UNIQUE conflict.
+Trace exact SQL error in v1→v2→v3 migration. Fix migration so an accepted exact v1 journal migrates deterministically through v2 audit schema then v3 cancellation schema/objects/inventory in transactions, with exact canonical sqlite_master validation. Do not weaken schema pinning or accept altered objects. Update migration test name/expectations to v3 and future fixture to current+1; preserve gapped/altered rejection. Add v2→v3 direct migration and rollback-on-v3-failure tests if missing. Run migration/security tests count=10 and race count=3 plus cancellation focused. No other changes, no commit.

@@ -1,0 +1,1 @@
+Do not call more tools or edit files. Synthesize the current P3b fenced-store work into artifacts/omp/p3b/fenced-store-output.md: exact changed/created paths, implemented behaviors, RED/GREEN tests and commands actually completed, known incomplete work/risks, and whether it is ready for independent verification. No commit/push.

@@ -1,0 +1,3 @@
+Repair real Mac2 E2E state observation in /Users/yingliangzhang/Projects/ananke-p0a-schema-codegen. Do not commit/push. Real failure evidence: /var/folders/fh/7dlfvrsn5938lw_4z6_pg_th0000gn/T/ananke-mac2-e2e.hinXyh. WDA accessibility-id selectors now work via aria-label, but GET text for ananke-daemon-health returns static aria-label `ananke-daemon-health` rather than visible online state, so lifecycle assertion fails.
+
+Preserve stable nonvisual accessibility-id locators. Determine a WDA attribute/API or renderer structure that allows state observation without locating by visible copy. Use current WDA http://127.0.0.1:10100 safely; do not launch/cancel. Add regression mock/real proof and only then rerun preflight, not full e2e. Explain mapping.

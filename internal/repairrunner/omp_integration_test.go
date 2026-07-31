@@ -232,12 +232,7 @@ Write the function in main.go.
 		diff.StatusHash[:min(20, len(diff.StatusHash))])
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
+// (removed duplicate min — use builtin min from Go 1.21+)
 
 // TestOMPAdapterConfigValidation tests the OMP adapter config validation.
 func TestOMPAdapterConfigValidation(t *testing.T) {

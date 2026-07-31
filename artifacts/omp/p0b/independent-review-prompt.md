@@ -1,0 +1,5 @@
+Independently review the current uncommitted P0b bootstrap renderer-public vertical slice in /Users/yingliangzhang/Projects/ananke-p0a-schema-codegen. Do not edit or commit. Authority: docs/experiments/p0b-renderer-public-bootstrap-contract.md.
+
+Review actual diffs and run focused checks as needed. Verify: (1) only the real `bootstrap` Tauri command and TS consumer migrated; (2) frozen public JSON preserves `project.root` and `workstream.project_id`; (3) canonical JSON Schema deterministically generates committed Rust and TS artifacts, with true content-drift check; (4) privacy guard proves public generated fields do not expose `token` or raw daemon `error` without false security claims; (5) no daemon transport, Go private/internal types, JsonRun->RunDto, Run/Event/Cancel/Health behavior changed; (6) tests are meaningful TDD/integration rather than a generated-type-only tautology; (7) dependency/portability/scope concerns.
+
+Return exactly ACCEPT, CHANGES REQUESTED, or REJECTED. Cite file:line and actual commands. Do not select future P0 scope or suggest commits.

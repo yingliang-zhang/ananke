@@ -1,0 +1,6 @@
+Resume exact P5 trust-repair session for a bounded integration finish. Do not discover/redesign/add features. Current concrete compile blockers:
+- internal/store/external_supervisor_transport_auth_test.go expects new authenticated receipt/callback/cancellation persistence APIs, but Store still exposes old DeliverAndPersistExternalSupervisorReceipt(root, old authenticator, old receipt) and lacks ReconcileAndPersistExternalSupervisorCallback / CancelAndPersistExternalSupervisorCancellation.
+- lifecycle externalSupervisorHandoffTransport/authenticator seam still uses old receipt/callback/cancel signatures.
+- cmd main still references removed PeerIdentity/PinnedLocalAuthentication/ExpectedPeer and old runtime constructor.
+- lifecycle Unix transport interface assertions are old.
+Integrate the already-created authenticated envelope/receipt/callback/cancellation types across store -> lifecycle -> client -> cmd. Preserve old P3f tests through deliberate migration/adapters only if secure; do not reintroduce weak authentication. Make focused packages compile and pass, then run full/race/vet/contracts if time. Reserve time for final report. No server/OMP/repair/commit/push.

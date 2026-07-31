@@ -1,0 +1,7 @@
+Repair the remaining P0b.2 non-null Event payload contract defect in /Users/yingliangzhang/Projects/ananke-p0a-schema-codegen. Do not commit/push or widen scope.
+
+Independent review found current `renderer-public-event.schema.json` has payload with description only, so it accepts null; Quicktype emits Rust `Option<serde_json::Value>` and TS `unknown`. This violates P0b.2: payload must be present and non-null while allowing exactly object/array/string/number/boolean.
+
+Fix the canonical JSON Schema to explicitly admit those five JSON kinds and reject null. Regenerate. Ensure generated Rust Event.payload is non-optional (not Option) and demonstrate serialization rejects/does not represent missing/null payload. Ensure generated TypeScript Event.payload type excludes null/undefined if Quicktype supports it; if its generated output cannot express the contract, stop and report blocker rather than adding handwritten type aliases or weakening the contract.
+
+Add test-first evidence: a focused Rust regression must fail before repair for current nullable representation, then pass after; include positive five-kind fixture proof and negative null/missing deserialization/validation proof appropriate to the generated wire model. Keep formatter/generator order-independence gate. Rerun all P0b.2 gates and correct ledger only with real results. State exact schema/generator limitations and terminal verdict.

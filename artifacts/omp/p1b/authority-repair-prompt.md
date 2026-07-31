@@ -1,0 +1,7 @@
+Repair P1b blockers in /Users/yingliangzhang/Projects/ananke-p0a-schema-codegen on feat/task-proposal-core. Do not commit/push, no GUI/IPC/P2/P3 scope.
+
+Read artifacts/omp/p1b/independent-review-output.md. Strict TDD:
+1) Cross-Store handle/process concurrency must return P1a semantic outcomes, not SQLITE_BUSY. Same-key same-body create must durable-replay winner identity; same-base append/competing decision/append-vs-reject must retry/restart transaction then perform durable lookup/current-state evaluation to return appropriate replay/conflict/allowed result. Do not map SQLITE_BUSY directly to conflict. Add real two-Open-handle concurrent tests, verify zero partial writes.
+2) Strengthen v7 schema/db enforcement so RevisionLifecycle revision_hash and approval_id are bound to its own (proposal_id,revision) tuple; proposal pointers/activity/idempotency mutation response identities cannot cross-link other revision/approval. Use composite unique keys/FKs (deferred where transactional insertion needs), plus code validation. Add adversarial raw-SQL FK tests and PRAGMA foreign_key_check.
+3) Remove redundant v7 indexes noted by review unless needed.
+Run focused/full/race store tests, P1a verifier. Update ledger only with real evidence. Report RED/GREEN.

@@ -425,10 +425,3 @@ func gitRevParse(repo string, ref string) (string, error) {
 	}
 	return strings.TrimSpace(string(out)), nil
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

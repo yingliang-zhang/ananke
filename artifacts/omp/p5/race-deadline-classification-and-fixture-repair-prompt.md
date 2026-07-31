@@ -1,0 +1,7 @@
+Repair race-only deadline failures with one production classification fix plus test fixture budget. Strict TDD; no real provider; no commit.
+Production:
+- VerifyExternalSupervisorEnvelope and verifyReceipt currently combine `ctx.Err()!=nil` with authentication/schema guards, returning ErrAuthentication. Split: nil client/context remains protocol/auth as existing contract; non-nil expired/cancelled ctx returns wrapped ErrDeadline. Audit verifyCallback/verifyCancellation/verifyPeerMessage entry paths for same issue. Once exchange context expires before first hook, every later verify/hook stage must return ErrDeadline, never ErrAuthentication. Add deterministic test with already-expired context before verification and blocking hook boundary.
+Tests only:
+- Define one integration test exchange budget 8s (< production max 10s). Use it in signedTestConfig default Timeout, serverConfigForTest ConnectionTimeout, runningTestServer.stop wait, deterministic cancellation result waits, raw cancellation replay socket deadline, and other direct 2/3s waits in these affected integration tests. Keep TestUnixClientBoundsAuthenticationHooksByExchangeDeadline explicit 50ms override and elapsed<1s assertion.
+- Do not change production default/max timeout or operational semantics.
+Run the four previously failing tests count=20 and race count=10: CancelRunningFakeAudit, CancellationRequestedAtDeterministicPreStartGate, CancellationExactCompletedReplay, UnixClientBoundsAuthenticationHooks. Then full package race. Preserve native/provider-free tests.

@@ -1,0 +1,6 @@
+Resume exact session 019f9da0-5adf-7000-aa65-a9da1de77b62 and finish the releaseartifact fix already started. Do not add more RED tests or explore other packages. Current exact compile errors:
+- releaseartifact_test.go:184 undefined validateBuildEnvironment
+- line 279 undefined openPinnedDirectory
+- line 355 undefined renameNoReplace
+
+Implement the production primitives and complete the intended closed build/publish/verifier design. Re-read current tests and make them GREEN without weakening. Remember the reviewer probes: existing destination no replacement, reject every caller GOFLAGS including empty/overlay/toolexec/tags, pinned absolute Go executable independent of caller PATH, no `go tool nm`, same-FD buildinfo/hash/Mach-O verification, pinned output directory, descriptor-relative staging and Darwin atomic no-replace publication, final inode/hash binding, no destructive rollback. Keep scope only internal/releaseartifact and release CLI. Run focused package+CLI tests, count=10, race=3, vet, gofmt, diff-check. No docs/ledger/commit.

@@ -1,0 +1,1 @@
+Do not call more tools. Synthesize the already-completed P1c public protocol contract/codegen-only work, changed paths, validation evidence, deferred implementation boundary, and remaining risks into artifacts/omp/p1c/public-protocol-contract-output.md. Do not edit production code, commit, or push.

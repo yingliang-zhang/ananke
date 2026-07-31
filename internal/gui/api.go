@@ -304,10 +304,10 @@ func (a *API) runRepair(jobID string, req RepairSubmissionRequest) {
 	}
 	worktree.Diff = diff
 
-	// Save git diff to a temp file for download.
-	diffDir, _ := os.MkdirTemp("", "ananke-diff-")
-	defer os.RemoveAll(diffDir) // R1-05 fix: clean up diff temp dir
-	diffPath := filepath.Join(diffDir, "repair.patch")
+	// R2-02 fix: save diff to a persistent location (not temp dir that gets cleaned up).
+	diffDir := filepath.Join(os.TempDir(), "ananke-diffs")
+	os.MkdirAll(diffDir, 0o755)
+	diffPath := filepath.Join(diffDir, jobID+".patch")
 	// R1-02 fix: git add -N to include untracked files, then git diff HEAD.
 	exec.Command("git", "-C", slotPath, "add", "-N", ".").Run()
 	diffBytes, _ := exec.Command("git", "-C", slotPath, "diff", "HEAD").Output()

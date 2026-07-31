@@ -1,0 +1,5 @@
+Resume exact namespace-authority session 019f9d2f-349f-7000-9e62-e1659db21be1 and continue using tools/edits. Current build error: `internal/trustedsupervisor/namespace_authority.go:435:9 undefined: scrubAndRemoveAuditTreeAtIdentity`.
+
+Inspect the partial implementation and finish coherently. Implement descriptor-relative identity-checked recursive scrub/remove (not a pathname wrapper) and wire the central namespace authority into actual invocation creation, finalizing event owned-root identities, cleanup, callback validation and restart recovery. Remove or stop using legacy path-only cleanup for production. Ensure Server/policy close retained FDs. Production mutable/user-owned namespace fails before gateway/credential/child; compile-time test bypass remains build-tag-only.
+
+Run gofmt, namespace/owned-root focused count=10, race=3, finalizing regressions, full internal package and diff check. No provider/model, no blocker 1 changes, no commit. Report remaining phase-B gaps honestly.

@@ -100,7 +100,7 @@ func RunOMPAdapter(worktreePath string, uid, gid uint32, config OMPAdapterConfig
 
 	if err != nil {
 		result.Output = fmt.Sprintf("%s\n[OMP ERROR]: %v", ompOutput, err)
-		return result, fmt.Errorf("%w: OMP adapter failed: %v", ErrWorktreeMaterialization, err)
+		return result, fmt.Errorf("%w: OMP adapter failed: %v", ErrOMPAdapter, err)
 	}
 
 	_ = outputStr // available for debugging

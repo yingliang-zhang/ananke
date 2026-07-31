@@ -1,0 +1,28 @@
+- generic [ref=e2]:
+  - banner "ananke-bootstrap-state" [ref=e3]:
+    - generic [ref=e4]: ANANKE
+    - generic "ananke-daemon-health" [ref=e5]: ● daemon offline
+    - generic [ref=e6]: 0 active · 0 settled
+    - button "ananke-refresh" [ref=e7] [cursor=pointer]: Refresh
+  - main [ref=e8]:
+    - complementary [ref=e9]:
+      - text: PROJECTS
+      - strong [ref=e10]: Ananke
+      - generic [ref=e11]: ↳ main
+      - paragraph [ref=e12]: Durable Go lifecycle core
+    - region "ananke-run-list" [ref=e13]:
+      - generic [ref=e14]:
+        - generic [ref=e15]: RUNS
+        - button "ananke-launch-fixture" [ref=e16] [cursor=pointer]: Launch fixture
+      - generic [ref=e17]: No runs yet.Launch the real fixture.
+    - generic [ref=e18]:
+      - region "ananke-grill-review" [ref=e19]:
+        - generic [ref=e20]:
+          - generic [ref=e21]:
+            - text: DETERMINISTIC GRILL
+            - heading "Grill review" [level=2] [ref=e22]
+          - button "Refresh review" [disabled] [ref=e23]
+        - status [ref=e24]: Awaiting a current proposal revision.
+        - generic [ref=e25]: Grill review is guarded until a current revision is available.
+      - generic [ref=e26]: Select a run to inspect durable activity.
+  - generic [ref=e27]: "TypeError: Cannot read properties of undefined (reading 'invoke')"

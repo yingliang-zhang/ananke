@@ -1,0 +1,1 @@
+Do not call more tools. Synthesize P1c verifier repair work, exact tests already executed and their outcomes, changed files, unresolved risks, and readiness for independent verification into artifacts/omp/p1c/verifier-repair-output.md. Do not edit production code, commit, or push.

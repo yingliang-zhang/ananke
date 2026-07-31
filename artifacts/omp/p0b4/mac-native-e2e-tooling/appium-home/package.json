@@ -1,0 +1,5 @@
+{
+  "devDependencies": {
+    "appium-mac2-driver": "4.0.4"
+  }
+}

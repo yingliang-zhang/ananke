@@ -1,0 +1,3 @@
+Implement P0b.3 in /Users/yingliangzhang/Projects/ananke-p0a-schema-codegen. Obey docs/experiments/p0b3-generated-run-command-reuse-contract.md. Build on uncommitted accepted P0b/P0b.1/P0b.2. No commit/push.
+
+Migrate ONLY launch_fixture and get_run Tauri public results from RunDto to existing generated Run, reusing the existing JsonRun -> generated Run semantic adapter. Strict TDD: add focused real bridge launch/get exact nested diagnostics wire tests and observe RED before integration, then GREEN. Do not change schemas/generator, daemon transport, events/list-runs/bootstrap/cancel/health, private/internal types. Run Node22 generator checks/privacy, cargo fmt, focused tests, TS typecheck/web build, diff/scope guard; update ledger only with real evidence. Report verdict.

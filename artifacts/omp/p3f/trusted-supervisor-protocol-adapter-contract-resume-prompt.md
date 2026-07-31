@@ -1,0 +1,1 @@
+Resume exact session. Do not call more discovery tools or expand scope. Finish the already-written independent supervisor protocol-adapter design contract: validate fixtures/verifier/docs, run P3f/P3d chain checks, report concrete files/gates/remaining no-network boundary. No commit/push.

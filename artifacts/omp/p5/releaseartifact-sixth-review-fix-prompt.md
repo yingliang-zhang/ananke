@@ -1,0 +1,11 @@
+Fix sixth-review HIGH 1 in `/Users/yingliangzhang/Projects/ananke-p0a-schema-codegen`. Strict TDD. No commit, no docs/ledger, no edits outside `internal/releaseartifact/**` and `cmd/ananke-trusted-supervisor-release/**` unless a tiny platform helper in the same package is necessary.
+
+Read `artifacts/omp/p5/sixth-review-report.md` finding 1 and current code/tests. Close the class, not only probes:
+1. Existing destination must never be overwritten. On Darwin use descriptor-relative atomic no-replace publication; no success if destination exists. Preserve any existing file byte-for-byte.
+2. Never verify by reopening mutable pathnames or invoking mutable `go tool nm`. Open candidate once with O_NOFOLLOW, retain FD, derive hash/size/build metadata/package path/symbol/marker checks from the same descriptor/bytes using Go stdlib parsers where possible. After publication prove the published object is the same verified bytes/object via retained output directory descriptor and device/inode/hash. No path selected by caller may be swapped into a successful result.
+3. Pin and validate output directory via descriptor; all staging/publication operations relative to it. No destructive rollback of caller-owned/existing paths. Crash-safe fsync ordering.
+4. Build environment is a closed allowlist. Reject any caller `GOFLAGS`; especially `-overlay`, `-toolexec`, arbitrary tags. Reject GOTOOLCHAIN/GOENV/GOWORK/GOROOT and any source/toolchain-changing build variable unless code sets a fixed trusted value itself. Do not select `go` from untrusted PATH: require/pin an absolute executable identity or use a fixed validated executable. The actual production package must be exact.
+5. RED tests must reproduce: existing sentinel overwrite, GOFLAGS overlay inert main, tool/nm/path replacement, candidate pathname replacement between checks, output-dir rebind/symlink, wrong package/test tags/markers. Then GREEN. Tests must not require root.
+6. Preserve operator usability and exact final artifact verifier API where safe. Run focused count=10, race count=3, package+CLI tests, gofmt, vet, diff-check.
+
+Return changed files, exact commands/results, and any unresolved Darwin limitation. Do not weaken a test or claim atomicity without executable race coverage.

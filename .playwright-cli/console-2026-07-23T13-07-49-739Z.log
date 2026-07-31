@@ -1,0 +1,2 @@
+[      63ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:1420/favicon.ico:0
+[   34899ms] [LOG] [vite] server connection lost. Polling for restart... @ http://127.0.0.1:1420/@vite/client:864

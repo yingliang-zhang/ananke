@@ -1,0 +1,1 @@
+Resume exact P4 session. Do not call new discovery tools or expand scope. Complete only already-written durable evidence/fake verifier runtime, run focused/full/race/vet/contracts, and synthesize exact changed files/gates/remaining no-repair boundary. No commit/push.

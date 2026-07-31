@@ -1,0 +1,1 @@
+Do not call more tools. Synthesize the implementation, changed paths, and verification findings already collected for the Mac-native E2E harness. Write the final evidence-backed result to artifacts/omp/p0b4/mac-native-e2e-harness-output.md. State clearly whether implementation completed and any remaining user authorization prerequisites. Do not commit/push.

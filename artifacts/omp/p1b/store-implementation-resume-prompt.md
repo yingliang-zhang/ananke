@@ -1,0 +1,1 @@
+Do not call more tools. Synthesize the P1b implementation work, exact changed paths, TDD RED/GREEN evidence, test outcomes, remaining gaps/risks, and whether it is ready for independent review. Write the evidence-backed final report to artifacts/omp/p1b/store-implementation-output.md. Do not commit/push.

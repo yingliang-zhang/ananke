@@ -1,0 +1,5 @@
+Resume exact termination session 019f9b6d-bd17-7000-bdc2-3d397669e04e. Fix only three focused failures:
+1) REAL BUG TestProductionServerCloseKeepsResourcesUntilStuckExecutorJoins: Server.Close must not close journal/policies/signing material or zero private key if auditExecutor.Close returns deadline/not-joined. Return bounded error immediately with resources intact; a later Close after worker joins must finish cleanup/idempotently. Ensure lifecycle state permits retry and no new admissions.
+2) TestAuditExecutorServerContextKillFailurePersistsWaitingNotCancelled: bounded deadline from shutdown is expected in this injected kill-failure case; adjust test/server test helper to assert the exact error while still verifying waiting_for_human, no cancelled, resources retained/retry cleanup. Do not hide production error.
+3) Wrong PID restart now correctly persists waiting_for_human failure_class=process_identity_mismatch; update stale assertion only if central semantics explicitly use that class everywhere. Preserve no signal/cleanup of unrelated process.
+Run these exact tests count=10/race=3 plus termination/recovery suite. No other changes, no real OMP, no commit.

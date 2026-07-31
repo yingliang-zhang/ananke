@@ -1,0 +1,7 @@
+Repair the remaining P1a findings from artifacts/omp/p1a/focused-rereview-output.md. Work only in contract/fixtures/docs/ledger; no runtime storage/GUI/claims/workers/adapters/commit/push.
+
+Required:
+1. Define append-vs-reject concurrency semantics. Current expected revision/hash alone means rejection-first may permit later append; either freeze that two-commit outcome with an exact vector or add expected lifecycle version/state so exactly one commits. Make prose and acceptance matrix agree; include append-vs-reject vector and zero-partial-write assertions.
+2. Replace lexical timestamp validation with semantic RFC3339/RFC3339Nano UTC calendar/time validation. Add consistently rehashed invalid date/time probes (including 2026-99-99T99:99:99Z) to self-test.
+3. Cross-check canonical create/append/decision/withdraw request envelope bodies against the Proposal, immutable Revision, RevisionLifecycle and Approval fixtures: targets, proposal/revision IDs, hash identities, decisions/reasons. Add self-tests for tampered consistently rehashed create target and decision revision hash.
+Update canonical manifest/ledger only for actually executed RED/GREEN evidence. Run all verifier tests. Report exact results.
