@@ -5,9 +5,8 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
-	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -20,7 +19,6 @@ import (
 	"github.com/yingliang-zhang/ananke/internal/repairrunner"
 	"github.com/yingliang-zhang/ananke/internal/repairverifier"
 	"github.com/yingliang-zhang/ananke/internal/store"
-	"github.com/yingliang-zhang/ananke/internal/transportprimitives"
 )
 
 func main() {
@@ -68,7 +66,9 @@ Options for submit:
   --timeout      Adapter timeout in seconds (default: 120)`)
 }
 
-func cmdSubmit(args []string) {
+// runSubmit executes the full repair submit flow and returns an error.
+// It does NOT call os.Exit — defers run correctly on all paths.
+func runSubmit(args []string) error {
 	fs := flag.NewFlagSet("submit", flag.ExitOnError)
 	repo := fs.String("repo", "", "path to git repository (required)")
 	request := fs.String("request", "", "repair request text (required)")
@@ -82,43 +82,46 @@ func cmdSubmit(args []string) {
 	fs.Parse(args)
 
 	if *repo == "" || *request == "" {
-		fmt.Fprintln(os.Stderr, "ananke-repair submit: --repo and --request are required")
-		os.Exit(2)
+		return errors.New("submit: --repo and --request are required")
 	}
 	if *keyDir == "" {
 		home, _ := os.UserHomeDir()
 		*keyDir = filepath.Join(home, ".ananke", "keys")
 	}
 
-	ctx := context.Background()
+	// F5: absolutize repo path before passing to MaterializeWorktree.
+	absRepo, err := filepath.Abs(*repo)
+	if err != nil {
+		return fmt.Errorf("absolutize repo path: %v", err)
+	}
+
 	now := time.Now().UTC()
-	_ = ctx
 
 	// 1. Open store.
 	s, err := store.Open(*storePath)
 	if err != nil {
-		fatalf("open store: %v", err)
+		return fmt.Errorf("open store: %v", err)
 	}
 	defer s.Close()
 
 	// 2. Load or generate signing material.
 	material, err := loadOrGenerateMaterial(*keyDir, now)
 	if err != nil {
-		fatalf("signing material: %v", err)
+		return fmt.Errorf("signing material: %v", err)
 	}
 	defer material.Close()
 
 	// 3. Materialize worktree.
 	slotDir, err := os.MkdirTemp("", "ananke-repair-")
 	if err != nil {
-		fatalf("create slot dir: %v", err)
+		return fmt.Errorf("create slot dir: %v", err)
 	}
 	defer os.RemoveAll(slotDir)
 
 	slotPath := filepath.Join(slotDir, "worktree")
-	parentCommit := gitRevParse(*repo, "HEAD")
+	parentCommit := gitRevParse(absRepo, "HEAD")
 	desc := repairrunner.WorktreeDescriptor{
-		RepositoryRoot: *repo,
+		RepositoryRoot: absRepo,
 		ParentCommit:   parentCommit,
 		TargetRef:      "refs/heads/feat/ananke-repair",
 		SlotID:         "slot_repair_" + now.Format("20060102_150405"),
@@ -126,7 +129,7 @@ func cmdSubmit(args []string) {
 	}
 	worktree, err := repairrunner.MaterializeWorktree(desc)
 	if err != nil {
-		fatalf("materialize worktree: %v", err)
+		return fmt.Errorf("materialize worktree: %v", err)
 	}
 	defer repairrunner.RemoveWorktree(slotPath)
 	fmt.Fprintf(os.Stderr, "worktree materialized at %s (parent: %s)\n", slotPath, parentCommit[:min(12, len(parentCommit))])
@@ -139,15 +142,22 @@ func cmdSubmit(args []string) {
 	case "fake":
 		adapter, err = repairrunner.RunFakeAdapter(slotPath, uid, gid)
 		if err != nil {
-			fatalf("fake adapter: %v", err)
+			return fmt.Errorf("fake adapter: %v", err)
 		}
 	case "omp":
 		if *ompWrapper == "" || *ompProvider == "" || *ompModel == "" {
-			fatalf("OMP adapter requires --omp-wrapper, --omp-provider, --omp-model")
+			return errors.New("OMP adapter requires --omp-wrapper, --omp-provider, --omp-model")
 		}
-		promptDir, _ := os.MkdirTemp("", "ananke-omp-")
+		// F4: use defer for promptDir cleanup.
+		promptDir, err := os.MkdirTemp("", "ananke-omp-")
+		if err != nil {
+			return fmt.Errorf("create OMP prompt dir: %v", err)
+		}
+		defer os.RemoveAll(promptDir)
 		promptPath := filepath.Join(promptDir, "prompt.md")
-		os.WriteFile(promptPath, []byte(*request), 0o644)
+		if err := os.WriteFile(promptPath, []byte(*request), 0o644); err != nil {
+			return fmt.Errorf("write OMP prompt: %v", err)
+		}
 		outputPath := filepath.Join(promptDir, "output.md")
 		sessionDir := filepath.Join(promptDir, "session")
 		adapter, err = repairrunner.RunOMPAdapter(slotPath, uid, gid, repairrunner.OMPAdapterConfig{
@@ -165,18 +175,17 @@ func cmdSubmit(args []string) {
 			Workdir:     slotPath,
 		})
 		if err != nil {
-			fatalf("OMP adapter: %v", err)
+			return fmt.Errorf("OMP adapter: %v", err)
 		}
-		os.RemoveAll(promptDir)
 	default:
-		fatalf("unknown adapter type: %s", *adapterType)
+		return fmt.Errorf("unknown adapter type: %s", *adapterType)
 	}
 	fmt.Fprintf(os.Stderr, "adapter completed (UID=%d, terminal proof: %s)\n", adapter.UID, adapter.TerminalProofHash[:min(20, len(adapter.TerminalProofHash))])
 
 	// 5. Compute diff closure.
 	diff, err := repairrunner.ComputeDiffClosure(slotPath)
 	if err != nil {
-		fatalf("compute diff closure: %v", err)
+		return fmt.Errorf("compute diff closure: %v", err)
 	}
 	worktree.Diff = diff
 	fmt.Fprintf(os.Stderr, "diff closure computed (status hash: %s)\n", diff.StatusHash[:min(20, len(diff.StatusHash))])
@@ -211,8 +220,8 @@ func cmdSubmit(args []string) {
 		RequestNonceHash:                 repairrunner.HashString("nonce_req"),
 		ResponseNonceHash:                repairrunner.HashString("nonce_resp"),
 		ChannelHash:                      repairrunner.HashString("channel"),
-		RepositoryBindingHash:            repairrunner.HashString(*repo),
-		RepositoryIdentityHash:           repairrunner.HashString(filepath.Base(*repo)),
+		RepositoryBindingHash:            repairrunner.HashString(absRepo),
+		RepositoryIdentityHash:           repairrunner.HashString(filepath.Base(absRepo)),
 		CommonGitIdentityHash:            repairrunner.HashString("git_identity"),
 		GitExecutableIdentityHash:        repairrunner.HashString("git_exec"),
 		EffectTimeValidationTimestamp:    now.Format(time.RFC3339Nano),
@@ -225,9 +234,10 @@ func cmdSubmit(args []string) {
 		BootEpochID:                      "boot_epoch_repair_v1",
 		BootEpochHash:                    repairrunner.HashString("boot_epoch"),
 	}
+
 	row, err := repairrunner.ProduceSignedAttestation(repairCtx, worktree, adapter, testResult, material, s, now)
 	if err != nil {
-		fatalf("produce signed attestation: %v", err)
+		return fmt.Errorf("produce signed attestation: %v", err)
 	}
 
 	// 8. Output result.
@@ -245,6 +255,14 @@ func cmdSubmit(args []string) {
 	fmt.Println(string(encoded))
 	fmt.Fprintf(os.Stderr, "\nRepair submitted. Attestation hash: %s\n", row.AttestationHash)
 	fmt.Fprintf(os.Stderr, "Review with: ananke-repair review --store %s --hash %s --action accept\n", *storePath, row.AttestationHash)
+	return nil
+}
+
+func cmdSubmit(args []string) {
+	if err := runSubmit(args); err != nil {
+		fmt.Fprintf(os.Stderr, "ananke-repair: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func cmdStatus(args []string) {
@@ -323,22 +341,13 @@ func cmdGenKey(args []string) {
 	if err := os.MkdirAll(*keyDir, 0o700); err != nil {
 		fatalf("create key dir: %v", err)
 	}
-	pub, priv, err := ed25519.GenerateKey(nil)
+	spki, err := repairverifier.GenerateSigningMaterial(time.Now().UTC())
 	if err != nil {
 		fatalf("generate key: %v", err)
 	}
-	privPath := filepath.Join(*keyDir, "repair-private-key")
-	pubPath := filepath.Join(*keyDir, "repair-public-key")
-	privHex := "ed25519-private:" + hex.EncodeToString(priv)
-	pubHex := "ed25519-public:" + hex.EncodeToString(pub)
-	if err := os.WriteFile(privPath, []byte(privHex), 0o600); err != nil {
-		fatalf("write private key: %v", err)
-	}
-	if err := os.WriteFile(pubPath, []byte(pubHex), 0o644); err != nil {
-		fatalf("write public key: %v", err)
-	}
-	spki, _ := transportprimitives.SPKIHash(pub)
-	fmt.Printf("Ed25519 key pair generated:\n  Private: %s\n  Public:  %s\n  SPKI:   %s\n", privPath, pubPath, spki)
+	defer spki.Close()
+	fmt.Printf("Repair signing material generated (SPKI: %s)\n", spki.SignerSPKI())
+	fmt.Printf("Note: MVP keys are ephemeral per-run. Store --keydir for future use.\n")
 }
 
 // loadOrGenerateMaterial generates an Ed25519 key pair for repair signing.
