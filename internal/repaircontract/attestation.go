@@ -380,6 +380,43 @@ func AttestationSignatureCanonicalBytes(record RepairReviewAttestation) ([]byte,
 	return attestationSignatureCanonicalBytes(record)
 }
 
+// RuntimeSignatureCanonicalBytes returns the canonical bytes for runtime
+// Ed25519 signing/verification. Unlike AttestationSignatureCanonicalBytes
+// (which excludes only "signature"), this function excludes BOTH "signature"
+// and "attestation_hash" fields. This breaks the circular dependency between
+// the attestation hash (which covers the signature) and the signature (which
+// would otherwise cover the attestation hash).
+func RuntimeSignatureCanonicalBytes(record RepairReviewAttestation) ([]byte, error) {
+	return runtimeSignatureCanonicalBytes(record)
+}
+
+// runtimeSignatureCanonicalBytes computes canonical bytes excluding BOTH
+// signature and attestation_hash fields, with domain separation prepended.
+func runtimeSignatureCanonicalBytes(record RepairReviewAttestation) ([]byte, error) {
+	raw, err := json.Marshal(record)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	delete(m, "signature")
+	delete(m, "attestation_hash")
+	canonical, err := canonicalBytes(m)
+	if err != nil {
+		return nil, err
+	}
+	domainPrefix := []byte(SignatureDomain + "\x00")
+	return append(domainPrefix, canonical...), nil
+}
+
+// HashAttestationRecord computes the self-hash of the attestation, excluding
+// the attestation_hash field. Exported for runtime use.
+func HashAttestationRecord(record RepairReviewAttestation) (string, error) {
+	return hashAttestationRecord(record)
+}
+
 // --- Seal derivation ---
 
 type attestationVerificationSealSet struct {

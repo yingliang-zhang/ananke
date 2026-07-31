@@ -133,6 +133,16 @@ func (m *RepairSigningMaterial) SignerSPKI() string {
 	return m.signerSPKI
 }
 
+// PublicKey returns the provisioned public key for verification.
+func (m *RepairSigningMaterial) PublicKey() ed25519.PublicKey {
+	if m == nil || len(m.publicKey) == 0 {
+		return nil
+	}
+	key := make(ed25519.PublicKey, ed25519.PublicKeySize)
+	copy(key, m.publicKey)
+	return key
+}
+
 // RootID returns the trust root ID for the repair attestor.
 func (m *RepairSigningMaterial) RootID() string {
 	return m.rootID

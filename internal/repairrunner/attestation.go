@@ -3,15 +3,15 @@ package repairrunner
 import (
 	"context"
 	"crypto/ed25519"
-	"encoding/json"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/yingliang-zhang/ananke/internal/repaircontract"
 	"github.com/yingliang-zhang/ananke/internal/repairverifier"
 	"github.com/yingliang-zhang/ananke/internal/store"
-	"github.com/yingliang-zhang/ananke/internal/transportprimitives"
 )
 
 // ErrAttestationProduction is the sentinel for attestation production failures.
@@ -38,6 +38,16 @@ type RepairContext struct {
 	RepositoryIdentityHash        string
 	CommonGitIdentityHash         string
 	GitExecutableIdentityHash     string
+	// Phase claims (Slice 3) — required by validateAttestationRecord
+	EffectTimeValidationTimestamp    string
+	MaterializationClaimHash         string
+	AdapterClaimHash                 string
+	TestClaimHash                    string
+	PredecessorClaimHash             string
+	SupervisorJournalHeadHash        string
+	SupervisorJournalPredecessorHash string
+	BootEpochID                      string
+	BootEpochHash                    string
 }
 
 // ProduceSignedAttestation creates a signed repair-review attestation from
@@ -98,6 +108,16 @@ func ProduceSignedAttestation(
 		WorktreeSlotID:                    worktree.WorktreeSlotID,
 		WorktreeSlotPathHash:              worktree.WorktreeSlotPathHash,
 		InstalledWorktreeRootIdentityHash: worktree.InstalledWorktreeRootIdentityHash,
+		// Phase claims (Slice 3) — required by validateAttestationRecord
+		EffectTimeValidationTimestamp:    ctx.EffectTimeValidationTimestamp,
+		MaterializationClaimHash:         ctx.MaterializationClaimHash,
+		AdapterClaimHash:                 ctx.AdapterClaimHash,
+		TestClaimHash:                    ctx.TestClaimHash,
+		PredecessorClaimHash:             ctx.PredecessorClaimHash,
+		SupervisorJournalHeadHash:        ctx.SupervisorJournalHeadHash,
+		SupervisorJournalPredecessorHash: ctx.SupervisorJournalPredecessorHash,
+		BootEpochID:                      ctx.BootEpochID,
+		BootEpochHash:                    ctx.BootEpochHash,
 		// Adapter (Slice 5)
 		AdapterSeatbeltProfileHash: adapter.SeatbeltProfileHash,
 		AdapterSandboxHash:         adapter.SandboxHash,
@@ -135,7 +155,7 @@ func ProduceSignedAttestation(
 
 	// Sign the attestation. The signed bytes exclude BOTH signature and
 	// attestation_hash fields to break the circular dependency.
-	signedBytes, err := runtimeSignatureCanonicalBytes(record)
+	signedBytes, err := repaircontract.RuntimeSignatureCanonicalBytes(record)
 	if err != nil {
 		return store.RepairAttestationRow{}, fmt.Errorf("%w: canonical bytes: %v", ErrAttestationProduction, err)
 	}
@@ -145,18 +165,21 @@ func ProduceSignedAttestation(
 	}
 	record.Signature = signature
 
-	// Compute attestation hash (covers record including signature, excluding
-	// attestation_hash). Set attestation_hash to empty first.
-	record.AttestationHash = ""
-	attestationHash, err := transportprimitives.CanonicalHash(record)
+	// Compute attestation hash using the contract layer's hashRecord function
+	// (which deletes the attestation_hash key, not sets it to empty).
+	attestationHash, err := repaircontract.HashAttestationRecord(record)
 	if err != nil {
 		return store.RepairAttestationRow{}, fmt.Errorf("%w: hash: %v", ErrAttestationProduction, err)
 	}
 	record.AttestationHash = attestationHash
 
 	// Verify our own signature before persisting. The verification uses the
-	// same runtimeSignatureCanonicalBytes function that excludes both fields.
-	if err := material.VerifyAttestationBytes(signedBytes, signature); err != nil {
+	// same RuntimeSignatureCanonicalBytes function that excludes both fields.
+	verifyBytes, err := repaircontract.RuntimeSignatureCanonicalBytes(record)
+	if err != nil {
+		return store.RepairAttestationRow{}, fmt.Errorf("%w: verify bytes: %v", ErrAttestationProduction, err)
+	}
+	if err := material.VerifyAttestationBytes(verifyBytes, signature); err != nil {
 		return store.RepairAttestationRow{}, fmt.Errorf("%w: self-verify: %v", ErrAttestationProduction, err)
 	}
 
@@ -171,7 +194,9 @@ func ProduceSignedAttestation(
 
 // VerifyAttestationWithAnanke verifies a persisted attestation using the
 // repair verifier. This is what Ananke (holding only public keys) calls
-// to verify a supervisor-signed attestation.
+// to verify a supervisor-signed attestation. Uses RuntimeSignatureCanonicalBytes
+// (excludes both signature and attestation_hash) for verification, matching
+// the signing path.
 func VerifyAttestationWithAnanke(
 	row store.RepairAttestationRow,
 	verifier *repairverifier.RepairVerifier,
@@ -192,9 +217,23 @@ func VerifyAttestationWithAnanke(
 		return fmt.Errorf("%w: provision: %v", ErrAttestationProduction, err)
 	}
 
+	// Compute the signed bytes using RuntimeSignatureCanonicalBytes (excludes
+	// both signature and attestation_hash, matching the signing path).
+	signedBytes, err := repaircontract.RuntimeSignatureCanonicalBytes(record)
+	if err != nil {
+		return fmt.Errorf("%w: signed bytes: %v", ErrAttestationProduction, err)
+	}
+
+	// Parse the Ed25519 signature.
+	sigHex := strings.TrimPrefix(record.Signature, "ed25519:")
+	sigBytes, err := hex.DecodeString(sigHex)
+	if err != nil {
+		return fmt.Errorf("%w: signature decode: %v", ErrAttestationProduction, err)
+	}
+
 	// Verify the signature.
-	if err := verifier.VerifyAttestationSignature(record, verifier.ExpectedAttestorSPKI()); err != nil {
-		return fmt.Errorf("%w: verify: %v", ErrAttestationProduction, err)
+	if !ed25519.Verify(publicKey, signedBytes, sigBytes) {
+		return fmt.Errorf("%w: Ed25519 verification failed", ErrAttestationProduction)
 	}
 
 	return nil
@@ -203,39 +242,15 @@ func VerifyAttestationWithAnanke(
 // --- helpers ---
 
 func generateAttestationID(attemptHash string, now time.Time) string {
-	return "attestation_" + now.UTC().Format("20060102T150405Z") + "_" + attemptHash[len(attemptHash)-8:]
+	// closedIdentifierPattern = ^[a-z0-9]+(?:_[a-z0-9]+)*$ — lowercase only.
+	ts := now.UTC().Format("20060102_150405")
+	suffix := ""
+	if len(attemptHash) >= 8 {
+		suffix = attemptHash[len(attemptHash)-8:]
+	}
+	return "attestation_" + ts + "_" + suffix
 }
 
-func computeAttestationHash(record repaircontract.RepairReviewAttestation) (string, error) {
-	// The attestation hash is a self-hash: the canonical JSON of the entire
-	// record with the attestation_hash field set to empty, then hashed.
-	// This mirrors the contract layer's hashRecord approach.
-	record.AttestationHash = ""
-	return transportprimitives.CanonicalHash(record)
-}
-
-// runtimeSignatureCanonicalBytes computes the canonical bytes that the
-// Ed25519 signature covers in the runtime. Unlike the contract layer's
-// attestationSignatureCanonicalBytes (which only excludes "signature"),
-// this function excludes BOTH "signature" and "attestation_hash" fields.
-// This breaks the circular dependency between the attestation hash (which
-// covers the signature) and the signature (which would otherwise cover the
-// attestation hash). Domain separation is prepended.
-func runtimeSignatureCanonicalBytes(record repaircontract.RepairReviewAttestation) ([]byte, error) {
-	raw, err := json.Marshal(record)
-	if err != nil {
-		return nil, err
-	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, err
-	}
-	delete(m, "signature")
-	delete(m, "attestation_hash")
-	canonical, err := transportprimitives.MarshalCanonical(m)
-	if err != nil {
-		return nil, err
-	}
-	domainPrefix := []byte(repaircontract.SignatureDomain + "\x00")
-	return append(domainPrefix, canonical...), nil
-}
+// (computeAttestationHash and runtimeSignatureCanonicalBytes are now
+// provided by the contract layer as HashAttestationRecord and
+// RuntimeSignatureCanonicalBytes respectively.)

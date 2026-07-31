@@ -82,6 +82,16 @@ func TestProviderFreeE2E(t *testing.T) {
 		t.Error("terminal proof hash should not be empty")
 	}
 
+	// --- Step 5b: Compute diff closure after adapter execution (F7 fix) ---
+	diff, err := ComputeDiffClosure(slotPath)
+	if err != nil {
+		t.Fatalf("ComputeDiffClosure: %v", err)
+	}
+	worktree.Diff = diff
+	if diff.StatusHash == hashString("") {
+		t.Error("diff closure status hash should reflect adapter changes")
+	}
+
 	// --- Step 7: Run Go test profile ---
 	// Use a simple test command that doesn't actually run Go tests
 	// (the worktree has no Go module, so we skip the actual test run).
@@ -123,6 +133,16 @@ func TestProviderFreeE2E(t *testing.T) {
 		RepositoryIdentityHash:        "sha256:repo_identity",
 		CommonGitIdentityHash:         "sha256:git_identity",
 		GitExecutableIdentityHash:     "sha256:git_exec",
+		// Phase claims (Slice 3) — required by validateAttestationRecord
+		EffectTimeValidationTimestamp:    now.UTC().Format(time.RFC3339Nano),
+		MaterializationClaimHash:         "sha256:mat_claim",
+		AdapterClaimHash:                 "sha256:adapter_claim",
+		TestClaimHash:                    "sha256:test_claim",
+		PredecessorClaimHash:             "sha256:pred_claim",
+		SupervisorJournalHeadHash:        "sha256:journal_head",
+		SupervisorJournalPredecessorHash: "sha256:journal_pred",
+		BootEpochID:                      "boot_epoch_v1",
+		BootEpochHash:                    "sha256:boot_epoch",
 	}
 
 	row, err := ProduceSignedAttestation(repairCtx, worktree, adapter, testResult, material, s, now)
@@ -153,7 +173,13 @@ func TestProviderFreeE2E(t *testing.T) {
 		t.Errorf("retrieved state: got %s, want %s", retrieved.State, repaircontract.AttestationWaitingForReview)
 	}
 
-	t.Logf("E2E PASS: attestation %s in state %s", row.AttestationHash[:20], row.State)
+	// --- Verify: signature round-trip via VerifyAttestationWithAnanke (F6 fix) ---
+	verifier := material.Verifier()
+	if err := VerifyAttestationWithAnanke(retrieved, verifier, material.PublicKey()); err != nil {
+		t.Fatalf("VerifyAttestationWithAnanke: %v", err)
+	}
+
+	t.Logf("E2E PASS: attestation %s in state %s, signature verified", row.AttestationHash[:20], row.State)
 }
 
 func runGit(t *testing.T, dir string, args ...string) {
