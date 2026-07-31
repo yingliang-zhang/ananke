@@ -147,6 +147,7 @@ func TestAPIReviewAccept(t *testing.T) {
 	// Accept the repair.
 	body := `{"attestation_hash": "sha256:test-review-1", "action": "accept", "reviewer_name": "test"}`
 	req := httptest.NewRequest("POST", "/api/repair/review", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	api.server.Handler.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -194,6 +195,7 @@ func TestAPIReviewReject(t *testing.T) {
 	// Reject the repair.
 	body := `{"attestation_hash": "sha256:test-reject-1", "action": "reject", "reviewer_name": "test"}`
 	req := httptest.NewRequest("POST", "/api/repair/review", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	api.server.Handler.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -226,6 +228,7 @@ func TestAPIReviewInvalidAction(t *testing.T) {
 
 	body := `{"attestation_hash": "sha256:test", "action": "invalid"}`
 	req := httptest.NewRequest("POST", "/api/repair/review", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	api.server.Handler.ServeHTTP(w, req)
 	if w.Code != http.StatusBadRequest {

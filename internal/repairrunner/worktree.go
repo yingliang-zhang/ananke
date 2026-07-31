@@ -109,8 +109,11 @@ func MaterializeWorktree(desc WorktreeDescriptor) (*WorktreeResult, error) {
 		WorktreeSlotPathHash:              slotPathHash,
 		InstalledWorktreeRootIdentityHash: rootIdentityHash,
 		Diff:                              diff,
-		PatchHash:                         hashString(""),
-		PatchSize:                         0,
+		// PatchHash/PatchSize are computed by ComputeDiffClosure after
+		// the adapter has made changes. They are empty here because no
+		// patch exists yet at materialization time.
+		PatchHash: hashString(""),
+		PatchSize: 0,
 	}, nil
 }
 

@@ -119,7 +119,10 @@ func runSubmit(args []string) error {
 	defer os.RemoveAll(slotDir)
 
 	slotPath := filepath.Join(slotDir, "worktree")
-	parentCommit := gitRevParse(absRepo, "HEAD")
+	parentCommit, err := gitRevParse(absRepo, "HEAD")
+	if err != nil {
+		return err
+	}
 	desc := repairrunner.WorktreeDescriptor{
 		RepositoryRoot: absRepo,
 		ParentCommit:   parentCommit,
@@ -393,12 +396,12 @@ func skipTestResult(proofHash, msg string) *repairrunner.TestProfileResult {
 	}
 }
 
-func gitRevParse(repo string, ref string) string {
+func gitRevParse(repo string, ref string) (string, error) {
 	out, err := exec.Command("git", "-C", repo, "rev-parse", ref).Output()
 	if err != nil {
-		fatalf("git rev-parse %s: %v", ref, err)
+		return "", fmt.Errorf("git rev-parse %s: %v", ref, err)
 	}
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(string(out)), nil
 }
 
 func fatalf(format string, args ...any) {
