@@ -251,6 +251,10 @@ func generateAttestationID(attemptHash string, now time.Time) string {
 	return "attestation_" + ts + "_" + suffix
 }
 
-// (computeAttestationHash and runtimeSignatureCanonicalBytes are now
+// HashString computes a sha256: hash of a string. Exported for CLI use.
+func HashString(s string) string {
+	return hashString(s)
+}
+
 // provided by the contract layer as HashAttestationRecord and
 // RuntimeSignatureCanonicalBytes respectively.)
