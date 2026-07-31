@@ -47,16 +47,19 @@ path that produced a defect is the same reasoning path that fails to
 detect it. An author builds assumptions; a fresh reader questions them.
 
 Ananke's P6 contract was developed by one model (GLM-5.2) and audited
-by independent models (K3, GPT-5.6). The independent auditors found
-defects the implementer missed — including a cross-slice binding error
-where two fields with different semantics were compared as if identical.
-Tests passed. The implementer's self-review passed. Only an independent
-model reading the code from zero caught it.
+by an independent model (K3). In two rounds of audit-review-loop, K3
+found defects the implementer missed — including a cross-slice binding
+error where two fields with different semantics were compared as if
+identical. Tests passed. The implementer's contiguous self-review
+passed. Only a fresh-context independent reading of the code caught it.
+In R2, a fresh-context GLM-5.2 audit instance independently confirmed
+the first sub-finding — fresh context matters, not just model diversity.
 
-This is the same principle as P6's trust boundary: the adapter (executor)
-is untrusted; the supervisor (verifier) is separate; the human (decision
-maker) is separate. Execution, judgment, and verification are distinct
-roles with distinct trust boundaries.
+This is the same principle as P6's trust boundary: the adapter (code-writing
+agent) is untrusted; the supervisor (attestor/executor) signs what happened;
+Ananke's release-pinned verifier validates signatures; the human (decision
+maker) decides. Execution, attestation, verification, and decision are
+distinct roles with distinct trust boundaries.
 
 ### 3. Multi-model review with coverage-union aggregation (MoA)
 
@@ -114,9 +117,11 @@ worked, what was decided, and why. If a fact will be stale in a week,
 it does not belong in memory; if a procedure will be needed again, it
 belongs in a skill.
 
-See [memory-boundary-design](https://github.com/yingliang-zhang/ananke)
-and [ADR-0001](docs/adr/0001-use-go-for-core-and-bootstrap.md) for the
-full boundary definition and the rejection of external memory engines.
+See [ADR-0005](docs/adr/0005-multi-model-review-audit-moa.md) for the
+full design. The memory boundary decision (reject external memory
+engines, reuse Hermes four-layer context) is documented in this README
+§4 and was evaluated using the 8-dimension framework in the
+`memory-boundary-design` skill.
 
 ### 5. Machine-verifiable contracts before runtime
 
@@ -161,8 +166,9 @@ A single researcher depends on AI coding agents for all implementation.
 Go was selected over Rust (ADR-0001) because: smaller agent-edit surface
 (3,592 vs 4,204 LOC), faster build feedback (8.4s vs 15.2s), built-in
 race detector, fewer dependencies (2 vs 6), and all six mutation gates
-passed. SQLite provides local-first, zero-configuration, crash-durable
-storage with FULL/fullfsync journal mode — no external database server.
+passed. The main store uses WAL journal mode; the trusted supervisor
+journal and P6 phase-claim durability policy require `synchronous=FULL`
+with `fullfsync=ON` for crash-durable claims — no external database server.
 
 ### Why repository-rooted, not global
 

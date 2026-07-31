@@ -6,16 +6,18 @@ Draft — 2026-07-31
 
 ## Context
 
-Ananke's P6 controlled-repair contract (Slices 1–9) defines a single
-repair-attestor that signs canonical attestations, and a single
-release-pinned verifier in Ananke that validates signatures before
-presenting attested evidence to the human operator. This establishes
-*what happened* inside the repair sandbox — the factual record of
-adapter execution, test results, and worktree effects.
+Ananke's P6 controlled-repair contract (Slices 1–6 accepted; Slices 7–9
+planned) will define a single repair-attestor that signs canonical
+attestations, and a single release-pinned verifier in Ananke that
+validates signatures before presenting attested evidence to the human
+operator. This establishes *what happened* inside the repair sandbox —
+the factual record of adapter execution, test results, and worktree
+effects.
 
-It does not establish *whether the repair was correct*. That judgment
-is currently delegated to a single independent hard review (runtime
-implementation step 10) or to the human operator directly.
+It does not establish *whether the repair was correct*. Today that
+judgment is solely the human operator's. The P6a plan's post-ACCEPT
+step 10 (independent implementation hard review) reviews the P6 system
+implementation once, not each individual repair.
 
 ### Evidence from development
 
@@ -27,14 +29,16 @@ audit-review-loops were run with the following results:
 | R1 | GLM-5.2 | K3 | 2 × P3 (dead validator, unanchored slot ID) | K3 only |
 | R2 | GLM-5.2 | K3 + GLM-5.2 | 1 × P2 (WorktreeSlotPathHash bound to writablePathSetHash; InstalledWorktreeRootIdentityHash bound to candidateRootIdentityHash) | Both, but K3 found the second sub-finding GLM missed |
 
-The implementation model (GLM-5.2) never found defects in its own code.
-Independent models (K3) consistently found defects the implementer
-missed — including a cross-slice semantic binding error where
-`InstalledWorktreeRootIdentityHash` was compared against
-`candidateRootIdentityHash`, a quantity that Slice 4's anti-alias
-invariant explicitly requires to *differ*. The implementation model
-wrote this comparison, tests passed, and the model's own review did not
-flag it.
+The implementation model (GLM-5.2) never found defects through
+contiguous self-review. A fresh-context GLM-5.2 audit instance (R2)
+independently found the first sub-finding — fresh context matters,
+not just model diversity. Independent models (K3) consistently found
+defects the implementer missed — including a cross-slice semantic
+binding error where `InstalledWorktreeRootIdentityHash` was compared
+against `candidateRootIdentityHash`, a quantity that Slice 4's
+anti-alias invariant explicitly requires to *differ*. The implementation
+model wrote this comparison, tests passed, and the model's contiguous
+self-review did not flag it.
 
 ### First-principles analysis
 
@@ -110,7 +114,7 @@ attestation verification and human decision. The MoA layer:
 
 ### MVP scope
 
-The first implementation (runtime step 10) will:
+The first implementation will:
 
 - Run 2–3 models in parallel against verified attestation bytes
 - Use prompt templates for each review lens
@@ -151,16 +155,17 @@ regardless; review findings are additive information.
 
 ## Consequences
 
-- **P6 Slices 1–9 remain unchanged** — MoA is a runtime enhancement,
-  not a contract modification. The single-verifier attestation path is
-  the authority; MoA adds information on top.
+- **P6 Slices 1–6 (accepted) and 7–9 (planned) remain unchanged** — MoA
+  is a runtime enhancement, not a contract modification. The single-verifier
+  attestation path is the authority; MoA adds information on top.
 
 - **New runtime component** — Ananke gains a review-dispatch module that
   reads verified attestations and dispatches parallel model reviews.
 
 - **Prompt templates become versioned artifacts** — review prompts for
-  each lens (security, correctness, contract, regression) are frozen
-  and pinned like other P6 contract artifacts.
+  each lens (security, correctness, contract, regression) are frozen as
+  release-manifest-bound text artifacts with content SHA-256 pins, like
+  the P6 release-manifest entries.
 
 - **GUI must present review findings** — alongside attestation evidence,
   the GUI shows aggregated findings with severity, confidence, and
