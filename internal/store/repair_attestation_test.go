@@ -264,21 +264,21 @@ func TestPersistRepairAttestationRejectsEmptyFields(t *testing.T) {
 
 	// Empty attestation hash.
 	record := testAttestation("", "attestation_empty_hash")
-	if _, err := s.PersistRepairAttestation(ctx, record); err == nil {
-		t.Fatal("empty hash should be rejected")
+	if _, err := s.PersistRepairAttestation(ctx, record); !errors.Is(err, ErrAttestationInvalid) {
+		t.Fatalf("empty hash should return ErrAttestationInvalid, got: %v", err)
 	}
 
 	// Empty attestation ID.
 	record = testAttestation("sha256:empty-id", "")
-	if _, err := s.PersistRepairAttestation(ctx, record); err == nil {
-		t.Fatal("empty id should be rejected")
+	if _, err := s.PersistRepairAttestation(ctx, record); !errors.Is(err, ErrAttestationInvalid) {
+		t.Fatalf("empty id should return ErrAttestationInvalid, got: %v", err)
 	}
 
 	// Empty signature domain.
 	record = testAttestation("sha256:empty-domain", "attestation_empty_domain")
 	record.SignatureDomain = ""
-	if _, err := s.PersistRepairAttestation(ctx, record); err == nil {
-		t.Fatal("empty signature domain should be rejected")
+	if _, err := s.PersistRepairAttestation(ctx, record); !errors.Is(err, ErrAttestationInvalid) {
+		t.Fatalf("empty domain should return ErrAttestationInvalid, got: %v", err)
 	}
 }
 

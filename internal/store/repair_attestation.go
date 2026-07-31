@@ -16,26 +16,32 @@ import (
 var ErrAttestationNotFound = errors.New("repair attestation not found")
 
 // ErrAttestationConflict is returned when an attestation with the same hash
-// already exists but has different content.
+// already exists but has different content (a security-relevant collision).
 var ErrAttestationConflict = errors.New("repair attestation conflict")
+
+// ErrAttestationInvalid is returned when an attestation record fails input
+// validation (empty required fields, etc.). This is distinct from
+// ErrAttestationConflict to avoid false-positive collision signals.
+var ErrAttestationInvalid = errors.New("repair attestation invalid")
 
 // RepairAttestationRow is a stored repair-review attestation with its outbox
 // delivery status. The attestation_json field holds the canonical JSON of the
 // full RepairReviewAttestation record.
 type RepairAttestationRow struct {
-	AttestationHash   string
-	AttestationID     string
-	AuthorizationHash string
-	AttemptHash       string
-	AttemptNumber     int
-	SignatureDomain   string
-	SignatureHash     string
-	State             string
-	IssuedAt          string
-	AttestationJSON   string
-	OutboxDelivered   int // 0 pending, 1 delivered, -1 abandoned
-	CreatedAt         time.Time
-	DeliveredAt       time.Time // zero if not delivered
+	AttestationHash     string
+	AttestationID       string
+	AuthorizationHash   string
+	AttemptHash         string
+	AttemptNumber       int
+	SignatureDomain     string
+	SignatureHash       string
+	State               string
+	IssuedAt            string
+	AttestationJSON     string
+	OutboxDelivered     int    // 0 pending, 1 delivered, -1 abandoned
+	DeliveredDiagnostic string // empty unless abandoned
+	CreatedAt           time.Time
+	DeliveredAt         time.Time // zero if not delivered
 }
 
 // PersistRepairAttestation atomically stores a signed repair-review attestation
@@ -84,7 +90,7 @@ func (s *Store) persistRepairAttestationTx(ctx context.Context, tx *sql.Tx, reco
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.AttestationHash, record.AttestationID,
 		record.AuthorizationHash, record.AttemptHash, record.AttemptNumber,
-		record.SignatureDomain, hashOfSignature(record.Signature),
+		record.SignatureDomain, record.Signature,
 		string(record.State), record.IssuedAt,
 		attestationJSON, createdAt); err != nil {
 		return RepairAttestationRow{}, fmt.Errorf("insert repair attestation: %w", err)
@@ -107,7 +113,7 @@ func (s *Store) persistRepairAttestationTx(ctx context.Context, tx *sql.Tx, reco
 		AttemptHash:       record.AttemptHash,
 		AttemptNumber:     record.AttemptNumber,
 		SignatureDomain:   record.SignatureDomain,
-		SignatureHash:     hashOfSignature(record.Signature),
+		SignatureHash:     record.Signature,
 		State:             string(record.State),
 		IssuedAt:          record.IssuedAt,
 		AttestationJSON:   string(attestationJSON),
@@ -141,9 +147,9 @@ func (s *Store) AbandonRepairAttestationOutbox(ctx context.Context, attestationH
 		return errors.New("outbox abandonment diagnostic required")
 	}
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE repair_attestation_outbox SET delivered = -1, delivered_at = ?
+		`UPDATE repair_attestation_outbox SET delivered = -1, delivered_at = ?, delivered_diagnostic = ?
 		WHERE attestation_hash = ? AND delivered = 0`,
-		nowStamp(), attestationHash)
+		nowStamp(), reason, attestationHash)
 	if err != nil {
 		return err
 	}
@@ -172,7 +178,7 @@ func (s *Store) GetPendingRepairAttestationOutbox(ctx context.Context) ([]Repair
 		`SELECT a.attestation_hash, a.attestation_id, a.authorization_hash,
 			a.attempt_hash, a.attempt_number, a.signature_domain,
 			a.signature_hash, a.state, a.issued_at, a.attestation_json,
-			o.delivered, a.created_at, COALESCE(o.delivered_at, '')
+			o.delivered, a.created_at, COALESCE(o.delivered_at, ''), COALESCE(o.delivered_diagnostic, '')
 		FROM repair_review_attestations a
 		JOIN repair_attestation_outbox o ON a.attestation_hash = o.attestation_hash
 		WHERE o.delivered = 0
@@ -186,14 +192,16 @@ func (s *Store) GetPendingRepairAttestationOutbox(ctx context.Context) ([]Repair
 		var row RepairAttestationRow
 		var deliveredAt string
 		var createdAtStr string
+		var diagnostic string
 		if err := rows.Scan(
 			&row.AttestationHash, &row.AttestationID, &row.AuthorizationHash,
 			&row.AttemptHash, &row.AttemptNumber, &row.SignatureDomain,
 			&row.SignatureHash, &row.State, &row.IssuedAt, &row.AttestationJSON,
-			&row.OutboxDelivered, &createdAtStr, &deliveredAt); err != nil {
+			&row.OutboxDelivered, &createdAtStr, &deliveredAt, &diagnostic); err != nil {
 			return nil, err
 		}
 		row.CreatedAt = stampToTime(createdAtStr)
+		row.DeliveredDiagnostic = diagnostic
 		if deliveredAt != "" {
 			row.DeliveredAt = stampToTime(deliveredAt)
 		}
@@ -206,13 +214,13 @@ func (s *Store) GetPendingRepairAttestationOutbox(ctx context.Context) ([]Repair
 
 func validateRepairAttestationRecord(record repaircontract.RepairReviewAttestation) error {
 	if record.AttestationHash == "" {
-		return fmt.Errorf("%w: empty attestation hash", ErrAttestationConflict)
+		return fmt.Errorf("%w: empty attestation hash", ErrAttestationInvalid)
 	}
 	if record.AttestationID == "" {
-		return fmt.Errorf("%w: empty attestation id", ErrAttestationConflict)
+		return fmt.Errorf("%w: empty attestation id", ErrAttestationInvalid)
 	}
 	if record.SignatureDomain == "" {
-		return fmt.Errorf("%w: empty signature domain", ErrAttestationConflict)
+		return fmt.Errorf("%w: empty signature domain", ErrAttestationInvalid)
 	}
 	return nil
 }
@@ -224,38 +232,30 @@ func loadRepairAttestationByHash(ctx context.Context, queryer interface {
 		`SELECT a.attestation_hash, a.attestation_id, a.authorization_hash,
 			a.attempt_hash, a.attempt_number, a.signature_domain,
 			a.signature_hash, a.state, a.issued_at, a.attestation_json,
-			COALESCE(o.delivered, 0), a.created_at, COALESCE(o.delivered_at, '')
+			COALESCE(o.delivered, 0), a.created_at, COALESCE(o.delivered_at, ''), COALESCE(o.delivered_diagnostic, '')
 		FROM repair_review_attestations a
 		LEFT JOIN repair_attestation_outbox o ON a.attestation_hash = o.attestation_hash
 		WHERE a.attestation_hash = ?`, attestationHash)
 	var r RepairAttestationRow
 	var deliveredAt string
 	var createdAtStr string
+	var diagnostic string
 	if err := row.Scan(
 		&r.AttestationHash, &r.AttestationID, &r.AuthorizationHash,
 		&r.AttemptHash, &r.AttemptNumber, &r.SignatureDomain,
 		&r.SignatureHash, &r.State, &r.IssuedAt, &r.AttestationJSON,
-		&r.OutboxDelivered, &createdAtStr, &deliveredAt); err != nil {
+		&r.OutboxDelivered, &createdAtStr, &deliveredAt, &diagnostic); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return RepairAttestationRow{}, false, nil
 		}
 		return RepairAttestationRow{}, false, err
 	}
 	r.CreatedAt = stampToTime(createdAtStr)
+	r.DeliveredDiagnostic = diagnostic
 	if deliveredAt != "" {
 		r.DeliveredAt = stampToTime(deliveredAt)
 	}
 	return r, true, nil
-}
-
-// hashOfSignature returns a hash of the signature field for indexing.
-// The signature itself is stored in the attestation_json; this is a derived
-// hash for query convenience.
-func hashOfSignature(signature string) string {
-	if signature == "" {
-		return ""
-	}
-	return signature
 }
 
 // canonicalJSONString returns the canonical JSON string of a record.
@@ -309,6 +309,7 @@ func migrateV15(ctx context.Context, tx *sql.Tx) error {
 			delivered INTEGER NOT NULL DEFAULT 0 CHECK (delivered IN (0, 1, -1)),
 			created_at TEXT NOT NULL,
 			delivered_at TEXT,
+			delivered_diagnostic TEXT,
 			FOREIGN KEY (attestation_hash) REFERENCES repair_review_attestations(attestation_hash)
 				DEFERRABLE INITIALLY DEFERRED
 		)`,
