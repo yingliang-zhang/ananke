@@ -6,6 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/yingliang-zhang/ananke/internal/gui"
 	"github.com/yingliang-zhang/ananke/internal/store"
@@ -55,6 +57,8 @@ func main() {
 	fmt.Printf("Open http://%s in your browser to submit repairs.\n", *addr)
 	fmt.Printf("Press Ctrl+C to stop.\n")
 
-	// Block forever.
-	select {}
+	// Wait for SIGINT/SIGTERM.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
 }
