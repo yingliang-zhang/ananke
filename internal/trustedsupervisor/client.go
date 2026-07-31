@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/yingliang-zhang/ananke/internal/store"
+	"github.com/yingliang-zhang/ananke/internal/transportprimitives"
 )
 
 // Client performs mandatory Ed25519 verification from pinned public roots.
@@ -769,12 +770,7 @@ func deriveMessageChannelBinding(connectionHash, messageType, nonceHash, priorHa
 }
 
 func canonicalHash(value any) (string, error) {
-	canonical, err := marshalCanonical(value)
-	if err != nil {
-		return "", err
-	}
-	digest := sha256.Sum256(canonical)
-	return "sha256:" + hex.EncodeToString(digest[:]), nil
+	return transportprimitives.CanonicalHash(value)
 }
 
 func newNonceHash() (string, error) {

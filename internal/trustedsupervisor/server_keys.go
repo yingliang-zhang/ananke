@@ -5,16 +5,12 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
-	"strings"
-	"syscall"
 	"time"
 
 	"github.com/yingliang-zhang/ananke/internal/store"
-	"golang.org/x/sys/unix"
+	"github.com/yingliang-zhang/ananke/internal/transportprimitives"
 )
 
 const (
@@ -240,12 +236,12 @@ func (parser *privateSigningKeyBundleParser) parseCanonicalPublicString() (strin
 			if json.Unmarshal(raw, &value) != nil {
 				return "", ErrProtocol
 			}
-			var canonical bytes.Buffer
-			if appendCanonicalString(&canonical, value) != nil || !bytes.Equal(raw, canonical.Bytes()) {
-				zeroBytes(canonical.Bytes())
+			canonical, err := transportprimitives.MarshalCanonical(value)
+			if err != nil || !bytes.Equal(raw, canonical) {
+				zeroBytes(canonical)
 				return "", ErrProtocol
 			}
-			zeroBytes(canonical.Bytes())
+			zeroBytes(canonical)
 			return value, nil
 		case '\\':
 			parser.offset += 2
@@ -268,56 +264,16 @@ func (material *serverSigningMaterial) Close() {
 }
 
 func readOwnerOnlyRegularFile(path string, ownerUserID uint32, limit int64) ([]byte, error) {
-	if path == "" || !filepath.IsAbs(path) || strings.IndexByte(path, 0) >= 0 || limit <= 0 {
-		return nil, authenticationError("absolute operator file path required")
-	}
-	before, err := os.Lstat(path)
-	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() || before.Mode().Perm() != 0o600 {
-		return nil, authenticationError("operator file type or mode")
-	}
-	beforeStat, ok := before.Sys().(*syscall.Stat_t)
-	if !ok || beforeStat.Uid != ownerUserID {
-		return nil, authenticationError("operator file owner")
-	}
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	contents, err := transportprimitives.ReadOwnerOnlyRegularFile(path, ownerUserID, limit)
 	if err != nil {
-		return nil, authenticationError("open operator file")
-	}
-	file := os.NewFile(uintptr(fd), filepath.Base(path))
-	if file == nil {
-		_ = unix.Close(fd)
-		return nil, authenticationError("open operator file descriptor")
-	}
-	defer file.Close()
-	var opened unix.Stat_t
-	if err := unix.Fstat(fd, &opened); err != nil || opened.Mode&unix.S_IFMT != unix.S_IFREG || opened.Uid != ownerUserID || opened.Mode&0o777 != 0o600 ||
-		uint64(opened.Dev) != uint64(beforeStat.Dev) || opened.Ino != beforeStat.Ino {
-		return nil, authenticationError("operator file replaced")
-	}
-	contents, err := io.ReadAll(io.LimitReader(file, limit+1))
-	if err != nil {
-		zeroBytes(contents)
-		return nil, authenticationError("read operator file")
-	}
-	if len(contents) == 0 || int64(len(contents)) > limit {
-		zeroBytes(contents)
-		return nil, fmt.Errorf("%w: operator file size", ErrLimit)
-	}
-	after, err := os.Lstat(path)
-	if err != nil || after.Mode()&os.ModeSymlink != 0 {
-		zeroBytes(contents)
-		return nil, authenticationError("operator file replaced")
-	}
-	afterStat, ok := after.Sys().(*syscall.Stat_t)
-	if !ok || uint64(afterStat.Dev) != uint64(opened.Dev) || afterStat.Ino != opened.Ino || afterStat.Uid != ownerUserID || after.Mode().Perm() != 0o600 {
-		zeroBytes(contents)
-		return nil, authenticationError("operator file replaced")
+		if errors.Is(err, transportprimitives.ErrFileLimit) {
+			return nil, fmt.Errorf("%w: %v", ErrLimit, err)
+		}
+		return nil, fmt.Errorf("%w: %v", ErrAuthentication, err)
 	}
 	return contents, nil
 }
 
 func zeroBytes(value []byte) {
-	for index := range value {
-		value[index] = 0
-	}
+	transportprimitives.ZeroBytes(value)
 }

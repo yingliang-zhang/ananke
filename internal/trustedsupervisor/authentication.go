@@ -3,14 +3,11 @@ package trustedsupervisor
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/sha256"
-	"crypto/x509"
-	"encoding/hex"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/yingliang-zhang/ananke/internal/store"
+	"github.com/yingliang-zhang/ananke/internal/transportprimitives"
 )
 
 type ed25519Verifier struct {
@@ -251,36 +248,15 @@ func verifyDetachedSignature(publicKey ed25519.PublicKey, expectedSPKI string, v
 }
 
 func parsePublicKey(encoded, expectedSPKI string) (ed25519.PublicKey, error) {
-	keyBytes, err := decodePrefixedHex(encoded, "ed25519:", ed25519.PublicKeySize)
-	if err != nil {
-		return nil, err
-	}
-	key := ed25519.PublicKey(keyBytes)
-	actualSPKI, err := spkiHash(key)
-	if err != nil || actualSPKI != expectedSPKI {
-		return nil, fmt.Errorf("public key SPKI mismatch")
-	}
-	return key, nil
+	return transportprimitives.ParsePublicKey(encoded, expectedSPKI)
 }
 
 func decodePrefixedHex(value, prefix string, size int) ([]byte, error) {
-	if !strings.HasPrefix(value, prefix) {
-		return nil, fmt.Errorf("missing algorithm prefix")
-	}
-	decoded, err := hex.DecodeString(strings.TrimPrefix(value, prefix))
-	if err != nil || len(decoded) != size {
-		return nil, fmt.Errorf("invalid encoded value")
-	}
-	return decoded, nil
+	return transportprimitives.DecodePrefixedHex(value, prefix, size)
 }
 
 func spkiHash(publicKey ed25519.PublicKey) (string, error) {
-	encoded, err := x509.MarshalPKIXPublicKey(publicKey)
-	if err != nil {
-		return "", err
-	}
-	digest := sha256.Sum256(encoded)
-	return "sha256:" + hex.EncodeToString(digest[:]), nil
+	return transportprimitives.SPKIHash(publicKey)
 }
 
 func predecessorReleaseIdentityFromEnvelope(envelope store.ExternalSupervisorEnvelope) store.ExternalSupervisorPredecessorReleaseIdentity {
@@ -300,9 +276,7 @@ func validPredecessorReleaseIdentity(identity store.ExternalSupervisorPredecesso
 }
 
 func recordValidAt(issuedAtText, notAfterText string, at time.Time) bool {
-	issuedAt, issuedErr := time.Parse(time.RFC3339Nano, issuedAtText)
-	notAfter, expiryErr := time.Parse(time.RFC3339Nano, notAfterText)
-	return issuedErr == nil && expiryErr == nil && !at.Before(issuedAt) && at.Before(notAfter)
+	return transportprimitives.RecordValidAt(issuedAtText, notAfterText, at)
 }
 
 func authenticationError(reason string) error {
