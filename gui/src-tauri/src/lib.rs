@@ -1595,10 +1595,14 @@ fn submit_repair(
     let cfg = RepairConfig::default();
     let adapter = if adapter_type.is_empty() { "omp" } else { &adapter_type };
 
-    // Generate a unique job ID for tracking.
-    let job_id = format!("job_{}", chrono_now());
+    // R1-06 fix: add atomic counter to job ID to prevent same-ms collisions.
+    // R2-01 fix: finalize job_id BEFORE deriving store/diff paths.
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let now_ts = chrono_now();
+    let job_id = format!("job_{}_{}", now_ts, counter);
 
-    // Build the ananke-repair CLI args.
+    // Build the ananke-repair CLI args from the finalized job_id.
     let store_path = format!("/tmp/ananke-repair-{job_id}.sqlite");
     let diff_path = format!("/tmp/ananke-repair-{job_id}.patch");
 
@@ -1628,16 +1632,11 @@ fn submit_repair(
         .stderr(std::process::Stdio::null());
     let child = cmd.spawn().map_err(|e| format!("failed to spawn ananke-repair: {e}"))?;
 
-    // R1-06 fix: add atomic counter to job ID to prevent same-ms collisions.
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let job_id = format!("job_{}_{}", chrono_now(), counter);
-
     let job = PendingRepair {
         child: Some(child),
         store_path: store_path.clone(),
         diff_path: diff_path.clone(),
-        started_at: chrono_now(),
+        started_at: now_ts,
     };
     let mut jobs = pending_repairs().lock().unwrap();
     jobs.insert(job_id.clone(), job);
@@ -1694,14 +1693,18 @@ fn poll_repair_job(job_id: String) -> Result<RepairJobResponse, String> {
     let attestation_hash = read_attestation_hash(&store_path);
     let diff_exists = std::path::Path::new(&diff_path).exists();
 
-    // R1-11 fix: treat empty hash as failed, not completed.
-    let status = if !attestation_hash.is_empty() {
-        "completed".to_string()
-    } else if diff_exists {
-        "completed".to_string()
-    } else {
+    // R1-11/R2-02 fix: empty hash = failed, period (even if diff exists).
+    let status = if attestation_hash.is_empty() {
         "failed".to_string()
+    } else {
+        "completed".to_string()
     };
+
+    // R2-03 fix: remove completed/failed jobs from the map to prevent leak.
+    if status != "running" {
+        let mut jobs = pending_repairs().lock().unwrap();
+        jobs.remove(&job_id);
+    }
 
     Ok(RepairJobResponse {
         id: job_id,

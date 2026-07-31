@@ -115,17 +115,18 @@ async function pollRepair() {
         setTimeout(poll, 3000);
       } else if (job.status === "completed") {
         repairHash = job.attestation_hash; repairDiffPath = job.diff_path;
+        repairPolling = false; // R2-09 fix: only reset on terminal state
         if (el) el.innerHTML = `<table><tr><th>Job</th><td>${esc(job.id)}</td></tr><tr><th>Status</th><td><span class="badge s-settled">Completed</span></td></tr><tr><th>Attestation</th><td style="font-family:monospace;font-size:0.8em">${esc(job.attestation_hash)}</td></tr></table>
           <div style="margin-top:8px;display:flex;gap:8px"><button id="repair-view-diff" class="primary">View Diff</button><button id="repair-accept">Accept</button><button id="repair-reject" class="danger">Reject</button></div>
           <div id="repair-diff-view" style="margin-top:8px"></div>`;
         bindRepairActions();
       } else {
+        repairPolling = false; // R2-09 fix: only reset on terminal state
         if (el) el.innerHTML = `<span class="badge s-failed">Failed</span>: ${esc(job.error)}`;
       }
-    } catch { setTimeout(poll, 5000); }
+    } catch { repairPolling = false; /* R1-03 fix: stop on error */ }
   };
   poll();
-  repairPolling = false;
 }
 
 function bindRepairActions() {
