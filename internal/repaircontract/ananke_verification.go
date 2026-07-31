@@ -621,9 +621,14 @@ func EvaluateAnankeVerification(
 	}
 
 	// Verify the snapshot's record matches the attestation's binding hashes.
+	// Cross-bind release pins hash and verifier authority hash to the frozen
+	// values, not just form-validate them (K3 audit P4 fix, matching Slice 7
+	// attestationSnapshotMatchesAuthority cross-binding pattern).
 	record := snapshot.record
 	if record.AttestationHash != attestation.attestationHash ||
 		record.AuthorizationHash != attestation.authorizationHash ||
+		record.ReleasePinsHash != expectedPins.ReleasePinsHash ||
+		record.VerifierAuthorityHash != verifier.VerifierAuthorityHash ||
 		record.RepairAttestorCertificateHash != decoded.RepairAttestorCertificateHash ||
 		record.RepairAttestorRootID != decoded.RepairAttestorRootID ||
 		record.RepairAttestorLeafSPKI != decoded.RepairAttestorLeafSPKI ||
