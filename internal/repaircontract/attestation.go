@@ -371,6 +371,15 @@ func attestationSignatureCanonicalBytes(record RepairReviewAttestation) ([]byte,
 	return append(domainPrefix, canonical...), nil
 }
 
+// AttestationSignatureCanonicalBytes is the exported form of
+// attestationSignatureCanonicalBytes for use by the runtime repair verifier
+// and signing modules. It returns the exact bytes that the Ed25519 signature
+// covers: the entire attestation excluding only the signature field, with
+// domain separation prepended.
+func AttestationSignatureCanonicalBytes(record RepairReviewAttestation) ([]byte, error) {
+	return attestationSignatureCanonicalBytes(record)
+}
+
 // --- Seal derivation ---
 
 type attestationVerificationSealSet struct {

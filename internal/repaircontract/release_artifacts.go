@@ -311,6 +311,13 @@ func frozenRotation() TrustRotation {
 	return compiledRelease.rotation
 }
 
+// FrozenTrustRotation returns the rotation materialized in the embedded
+// release artifacts. Exported for runtime modules that need to verify the
+// full release trust boundary.
+func FrozenTrustRotation() TrustRotation {
+	return frozenRotation()
+}
+
 func verifyEmbeddedReleaseTrust(now time.Time) error {
 	if verifyCertificateTime(compiledRelease.root, compiledRelease.leaf, now) != nil ||
 		verifyCertificateTime(compiledRelease.rotationApproverRoot, compiledRelease.rotationApprover, now) != nil {
