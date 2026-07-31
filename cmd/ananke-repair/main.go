@@ -63,7 +63,8 @@ Options for submit:
   --omp-wrapper  Path to OMP wrapper script (for --adapter omp)
   --omp-provider OMP provider name
   --omp-model    OMP model name
-  --timeout      Adapter timeout in seconds (default: 120)`)
+  --timeout      Adapter timeout in seconds (default: 120)
+  --diff-out     Path to save git diff patch (for git apply after review)`)
 }
 
 // runSubmit executes the full repair submit flow and returns an error.
@@ -79,6 +80,7 @@ func runSubmit(args []string) error {
 	ompProvider := fs.String("omp-provider", "", "OMP provider name")
 	ompModel := fs.String("omp-model", "", "OMP model name")
 	timeoutSec := fs.Int("timeout", 120, "adapter timeout in seconds")
+	diffOutput := fs.String("diff-out", "", "path to save git diff patch (for git apply)")
 	fs.Parse(args)
 
 	if *repo == "" || *request == "" {
@@ -243,7 +245,22 @@ func runSubmit(args []string) error {
 		return fmt.Errorf("produce signed attestation: %v", err)
 	}
 
-	// 8. Output result.
+	// 8. Save diff patch before worktree cleanup.
+	var diffPath string
+	if *diffOutput != "" {
+		diffBytes, err := exec.Command("git", "-C", slotPath, "diff").Output()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: git diff capture failed: %v\n", err)
+		} else if len(diffBytes) > 0 {
+			if err := os.WriteFile(*diffOutput, diffBytes, 0o644); err != nil {
+				return fmt.Errorf("write diff output: %v", err)
+			}
+			diffPath, _ = filepath.Abs(*diffOutput)
+			fmt.Fprintf(os.Stderr, "diff patch saved to %s (%d bytes)\n", diffPath, len(diffBytes))
+		}
+	}
+
+	// 9. Output result.
 	result := map[string]any{
 		"attestation_hash": row.AttestationHash,
 		"attestation_id":   row.AttestationID,
@@ -251,6 +268,7 @@ func runSubmit(args []string) error {
 		"issued_at":        row.IssuedAt,
 		"attempt_number":   row.AttemptNumber,
 		"diff_status_hash": diff.StatusHash,
+		"diff_patch_path":  diffPath,
 		"test_pass":        testResult.Pass,
 		"adapter_type":     *adapterType,
 	}
