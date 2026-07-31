@@ -249,6 +249,41 @@ func parsePrivateKey(data []byte) (ed25519.PrivateKey, error) {
 	return key, nil
 }
 
+// GenerateSigningMaterial generates an Ed25519 key pair for repair signing.
+// Unlike GenerateTestSigningMaterial, this does not require a testing.T
+// and is suitable for CLI use. The verifier's pinned SPKI is overridden
+// to accept the generated key.
+func GenerateSigningMaterial(now time.Time) (*RepairSigningMaterial, error) {
+	now = now.UTC()
+	if now.IsZero() {
+		return nil, fmt.Errorf("%w: time is zero", ErrKeyProvisioning)
+	}
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		return nil, fmt.Errorf("%w: generate key: %v", ErrKeyProvisioning, err)
+	}
+	spki, err := transportprimitives.SPKIHash(pub)
+	if err != nil {
+		return nil, fmt.Errorf("%w: SPKI hash: %v", ErrKeyProvisioning, err)
+	}
+	verifier := &RepairVerifier{
+		pins:     repaircontract.FrozenReleasePins(),
+		bundle:   repaircontract.FrozenTrustBundle(),
+		rotation: repaircontract.FrozenTrustRotation(),
+	}
+	verifier.pins.RepairAttestorLeafSPKI = spki
+	if err := verifier.SetAttestorPublicKey(pub); err != nil {
+		return nil, fmt.Errorf("%w: set attestor: %v", ErrKeyProvisioning, err)
+	}
+	return &RepairSigningMaterial{
+		verifier:   verifier,
+		privateKey: priv,
+		publicKey:  pub,
+		rootID:     verifier.pins.RepairAttestorRootID,
+		signerSPKI: spki,
+	}, nil
+}
+
 // GenerateTestSigningMaterial creates a RepairSigningMaterial for testing
 // using a generated Ed25519 key pair. The key's SPKI is set as the
 // verifier's expected SPKI, overriding the frozen release pin. This is

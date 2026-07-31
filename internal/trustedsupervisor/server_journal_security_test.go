@@ -301,7 +301,7 @@ func TestServerJournalRejectsFutureAndGappedMigrationHistory(t *testing.T) {
 		name   string
 		mutate string
 	}{
-		{name: "future", mutate: fmt.Sprintf(`INSERT INTO trusted_supervisor_schema (version, migration_id, applied_at) VALUES (%d, 'ananke.local-trusted-supervisor.server-journal.v%d', '2026-07-31T00:00:00Z')`, serverJournalSchemaVersion+1, serverJournalSchemaVersion+1)},
+		{name: "future", mutate: fmt.Sprintf(`INSERT INTO trusted_supervisor_schema (version, migration_id, applied_at) VALUES (%d, 'ananke.local-trusted-supervisor.server-journal.v%d', '2026-07-25T00:00:00Z')`, serverJournalSchemaVersion+1, serverJournalSchemaVersion+1)},
 		{name: "gapped", mutate: `DELETE FROM trusted_supervisor_schema WHERE version = 1`},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {

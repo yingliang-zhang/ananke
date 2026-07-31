@@ -17,7 +17,7 @@ const (
 	externalSupervisorReleaseAttestationHash = "sha256:2ac3954f26baa6a33f87f455f6081beeb9ed27725ad4d56961be2fda86662475"
 	externalSupervisorReleaseApprovalHash    = "sha256:65509b813e0563c23b6f871e9005f4db76d5790cc325267e3963d3672cd60fe6"
 	externalSupervisorEvidenceContractHash   = "sha256:9309381f36076c263c60d6ef3db5e93b52694d645ffbbef25a4d87dce6459a05"
-	externalSupervisorDeadline               = "2031-07-31T12:00:00Z"
+	externalSupervisorDeadline               = "2026-07-30T12:00:00Z"
 	externalSupervisorAttemptCap             = 3
 	externalSupervisorEvidenceSchemaVersion  = "ananke.remote-supervisor-evidence.v1"
 	externalSupervisorOutputSchemaVersion    = "ananke.omp-production-output.v1"

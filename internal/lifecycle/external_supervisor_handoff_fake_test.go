@@ -196,19 +196,19 @@ func p3fTestAuthorization(envelope store.ExternalSupervisorEnvelope) store.Exter
 	attestation := mustP3FSealReleaseAttestation(store.ExternalSupervisorReleaseAttestation{
 		SchemaVersion:  store.ExternalSupervisorReleaseAttestationSchemaVersion,
 		ArtifactSHA256: envelope.SupervisorArtifactSHA256, AttestorKeySPKISHA256: p3fExternalSupervisorHash("attestor-spki"),
-		BuildIdentityHash: envelope.BuildIdentityHash, IssuedAt: "2026-07-31T00:00:00Z", NotAfter: envelope.Deadline,
+		BuildIdentityHash: envelope.BuildIdentityHash, IssuedAt: "2026-07-25T00:00:00Z", NotAfter: envelope.Deadline,
 		ReleaseRootID: "independent_supervisor_release_root_v1", RouteMappingHash: envelope.RouteMappingHash,
 	})
 	approval := mustP3FSealReleaseApproval(store.ExternalSupervisorReleaseApproval{
 		SchemaVersion: store.ExternalSupervisorReleaseApprovalSchemaVersion, ApprovalID: "independent_release_approval_p3f_001",
 		ApproverKeySPKISHA256: p3fExternalSupervisorHash("approver-spki"), ApproverRootID: "independent_supervisor_approval_root_v1",
-		AttestationHash: attestation.AttestationHash, Decision: "approved", IssuedAt: "2026-07-31T00:01:00Z",
+		AttestationHash: attestation.AttestationHash, Decision: "approved", IssuedAt: "2026-07-25T00:01:00Z",
 		NotAfter: envelope.Deadline, RouteMappingHash: envelope.RouteMappingHash,
 	})
 	grant := mustP3FSealMoAGrant(store.ExternalSupervisorMoARoleGrant{
 		SchemaVersion: store.ExternalSupervisorMoARoleGrantSchemaVersion, GrantID: "moa_remote_supervisor_runner_grant_p3f_001",
 		GranteeRole: "remote_supervisor_runner", GrantorKeySPKISHA256: p3fExternalSupervisorHash("grantor-spki"),
-		GrantorRootID: "moa_role_grant_root_v1", IssuedAt: "2026-07-31T00:02:00Z", NotAfter: envelope.Deadline,
+		GrantorRootID: "moa_role_grant_root_v1", IssuedAt: "2026-07-25T00:02:00Z", NotAfter: envelope.Deadline,
 		ReleaseApprovalHash: approval.ApprovalHash, ReleaseAttestationHash: attestation.AttestationHash, RouteMappingHash: envelope.RouteMappingHash,
 	})
 	return store.ExternalSupervisorAuthorizationChain{
@@ -223,11 +223,11 @@ func p3fTestAuthorization(envelope store.ExternalSupervisorEnvelope) store.Exter
 
 func p3fTestAuthenticatedReceipt(envelope store.ExternalSupervisorEnvelope, attempt int) store.ExternalSupervisorAuthenticatedReceipt {
 	chain := p3fTestAuthorization(envelope)
-	issued := fmt.Sprintf("2026-07-31T00:05:%02dZ", attempt)
+	issued := fmt.Sprintf("2026-07-25T00:05:%02dZ", attempt)
 	delivery := mustP3FSealDelivery(store.ExternalSupervisorSealedDelivery{
 		SchemaVersion: store.ExternalSupervisorSealedDeliverySchemaVersion, AttemptCap: envelope.AttemptCap, AttemptNumber: envelope.AttemptNumber,
 		ChannelBindingHash: p3fExternalSupervisorHash(fmt.Sprintf("delivery-channel-%d", attempt)), Deadline: envelope.Deadline,
-		DeliveryExpiresAt: "2026-07-31T00:10:00Z", DeliveryID: "sealed_delivery_p3f_001", IssuedAt: issued,
+		DeliveryExpiresAt: "2026-07-25T00:10:00Z", DeliveryID: "sealed_delivery_p3f_001", IssuedAt: issued,
 		MoARoleGrantHash: chain.MoARoleGrant.GrantHash, NonceHash: p3fExternalSupervisorHash(fmt.Sprintf("delivery-nonce-%d", attempt)),
 		PredecessorEnvelopeHash: envelope.EnvelopeHash, PredecessorIdempotencyKeyHash: envelope.IdempotencyKeyHash,
 		ReleaseApprovalHash: chain.ReleaseApproval.ApprovalHash, ReleaseAttestationHash: chain.ReleaseAttestation.AttestationHash,
@@ -236,7 +236,7 @@ func p3fTestAuthenticatedReceipt(envelope store.ExternalSupervisorEnvelope, atte
 	receipt := mustP3FSealProtocolReceipt(store.ExternalSupervisorProtocolReceipt{
 		SchemaVersion: store.ExternalSupervisorProtocolReceiptSchemaVersion, AttemptNumber: envelope.AttemptNumber,
 		ChannelBindingHash: p3fExternalSupervisorHash(fmt.Sprintf("receipt-channel-%d", attempt)), DeliveryHash: delivery.DeliveryHash,
-		EnvelopeHash: envelope.EnvelopeHash, IssuedAt: "2026-07-31T00:06:00Z", NonceHash: p3fExternalSupervisorHash(fmt.Sprintf("receipt-nonce-%d", attempt)),
+		EnvelopeHash: envelope.EnvelopeHash, IssuedAt: "2026-07-25T00:06:00Z", NonceHash: p3fExternalSupervisorHash(fmt.Sprintf("receipt-nonce-%d", attempt)),
 		ReceiptID: "acceptance_receipt_p3f_001", ReleaseApprovalHash: chain.ReleaseApproval.ApprovalHash, RouteMappingHash: envelope.RouteMappingHash,
 		SignerKeySPKISHA256: p3fExternalSupervisorHash("peer-spki"), TrustRootID: "independent_supervisor_release_root_v1",
 	})
@@ -252,7 +252,7 @@ func p3fTestAuthenticatedCallback(receipt store.ExternalSupervisorAuthenticatedR
 		SchemaVersion: store.ExternalSupervisorProtocolCallbackSchemaVersion, AttemptNumber: receipt.Receipt.AttemptNumber,
 		CallbackChannelBindingHash: p3fExternalSupervisorHash("callback-channel"), CallbackID: "completion_callback_p3f_001",
 		DeliveryHash: receipt.Delivery.DeliveryHash, EnvelopeHash: receipt.Receipt.EnvelopeHash, EvidenceHash: p3fExternalSupervisorHash("evidence"),
-		IssuedAt: "2026-07-31T00:07:00Z", NonceHash: p3fExternalSupervisorHash("callback-nonce"), ReceiptHash: receipt.Receipt.ReceiptHash,
+		IssuedAt: "2026-07-25T00:07:00Z", NonceHash: p3fExternalSupervisorHash("callback-nonce"), ReceiptHash: receipt.Receipt.ReceiptHash,
 		ResultSchemaVersion: "ananke.independent-supervisor-result.v1", RouteMappingHash: receipt.Receipt.RouteMappingHash,
 		SignerKeySPKISHA256: receipt.Receipt.SignerKeySPKISHA256, TerminalState: terminalState, TrustRootID: receipt.Receipt.TrustRootID,
 	})

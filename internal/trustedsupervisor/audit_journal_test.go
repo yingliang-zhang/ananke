@@ -246,7 +246,7 @@ func populateAcceptedV2AuditHistory(t *testing.T, path string, populateIntents, 
 		RouteMappingHash: testHash("legacy-v2-route"), RepositoryIdentityHash: testHash("legacy-v2-repository"),
 		GitCommit: "0123456789abcdef0123456789abcdef01234567", GitTree: "89abcdef0123456789abcdef0123456789abcdef",
 		SourceArchiveSHA256: testHash("legacy-v2-source"), WrapperSHA256: testHash("legacy-v2-wrapper"),
-		RunID: "audit_run_legacy_v2_001", CreatedAt: "2026-07-31T00:00:01Z",
+		RunID: "audit_run_legacy_v2_001", CreatedAt: "2026-07-25T00:00:01Z",
 	})
 	intentBytes, err := marshalCanonical(intent)
 	if err != nil {
@@ -264,7 +264,7 @@ func populateAcceptedV2AuditHistory(t *testing.T, path string, populateIntents, 
 	}
 	legacyEvent := map[string]any{
 		"attempt": 1, "command_descriptor_hash": testHash("legacy-v2-command"), "event_hash": "",
-		"event_id": "audit_event_legacy_v2_001", "intent_hash": intent.IntentHash, "occurred_at": "2026-07-31T00:00:02Z",
+		"event_id": "audit_event_legacy_v2_001", "intent_hash": intent.IntentHash, "occurred_at": "2026-07-25T00:00:02Z",
 		"output_path": "/private/legacy-v2/output.json", "prompt_path": "/private/legacy-v2/prompt.md",
 		"prompt_sha256": testHash("legacy-v2-prompt"), "resume_session_uuid": "", "schema_version": "ananke.local-trusted-supervisor-audit-event.v2",
 		"sequence": 1, "session_path": "/private/legacy-v2/session", "session_run_id": intent.RunID,
@@ -287,7 +287,7 @@ func populateAcceptedV2AuditHistory(t *testing.T, path string, populateIntents, 
 	}
 	if _, err := database.Exec(`INSERT INTO trusted_supervisor_audit_events
 		(intent_hash, sequence, state, event_bytes, event_bytes_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		intent.IntentHash, 1, auditStatePrepared, eventBytes, hashJournalBytes(eventBytes), "2026-07-31T00:00:02Z"); err != nil {
+		intent.IntentHash, 1, auditStatePrepared, eventBytes, hashJournalBytes(eventBytes), "2026-07-25T00:00:02Z"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -365,7 +365,7 @@ func createAcceptedServerJournalSchema(t *testing.T, path string, version int) {
 			_ = database.Close()
 			t.Fatalf("migration id for accepted v%d journal", migrationVersion)
 		}
-		if _, err := database.Exec(`INSERT INTO trusted_supervisor_schema (version, migration_id, applied_at) VALUES (?, ?, '2026-07-31T00:00:00Z')`, migrationVersion, migrationID); err != nil {
+		if _, err := database.Exec(`INSERT INTO trusted_supervisor_schema (version, migration_id, applied_at) VALUES (?, ?, '2026-07-25T00:00:00Z')`, migrationVersion, migrationID); err != nil {
 			_ = database.Close()
 			t.Fatal(err)
 		}

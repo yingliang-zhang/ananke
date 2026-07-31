@@ -56,7 +56,7 @@ func TestValidateAuditExecutionHistoryRejectsCanonicallyResealedCrossInvariantTa
 		{
 			name: "monotonic timestamp",
 			mutate: func(t *testing.T, _ *auditExecutionIntent, events []auditExecutionEvent) {
-				events[1].OccurredAt = "2026-07-31T23:59:59Z"
+				events[1].OccurredAt = "2026-07-25T23:59:59Z"
 				events[1] = resealAuditEventForHistoryTest(t, events[1])
 			},
 		},
@@ -165,7 +165,7 @@ func TestAuditJournalStartupRejectsIntegrityCleanCanonicallyRehashedHistoryTampe
 			event.OutputPath = "/private/output/other_attempt_1/audit-output.json"
 		}},
 		{name: "timestamp", sequence: 2, mutate: func(t *testing.T, event *auditExecutionEvent) {
-			event.OccurredAt = "2026-07-31T23:59:59Z"
+			event.OccurredAt = "2026-07-25T23:59:59Z"
 		}},
 		{name: "typed evidence", sequence: 3, mutate: func(t *testing.T, event *auditExecutionEvent) {
 			resealCompletedAuditEvidenceForHistoryTest(t, event, func(report *auditEvidenceReport) {
