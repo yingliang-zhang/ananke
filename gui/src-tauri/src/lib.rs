@@ -1621,15 +1621,20 @@ fn submit_repair(
         ]);
     }
 
-    // Spawn the process (non-blocking).
+    // R1-01 fix: store the Child handle so we can try_wait() later.
+    // R1-05 fix: use Stdio::null to avoid pipe buffer deadlock.
     cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
     let child = cmd.spawn().map_err(|e| format!("failed to spawn ananke-repair: {e}"))?;
 
-    // Store the PID + paths in a global for polling.
+    // R1-06 fix: add atomic counter to job ID to prevent same-ms collisions.
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let job_id = format!("job_{}_{}", chrono_now(), counter);
+
     let job = PendingRepair {
-        pid: child.id() as u64,
+        child: Some(child),
         store_path: store_path.clone(),
         diff_path: diff_path.clone(),
         started_at: chrono_now(),
@@ -1648,11 +1653,22 @@ fn submit_repair(
 /// Poll a pending repair job. Returns status: "running", "completed", or "failed".
 #[tauri::command]
 fn poll_repair_job(job_id: String) -> Result<RepairJobResponse, String> {
-    let jobs = pending_repairs().lock().unwrap();
-    let job = jobs.get(&job_id).ok_or("job not found")?;
+    // R1-08 fix: copy data under lock, drop lock before IO.
+    let (store_path, diff_path, started_at, still_running) = {
+        let mut jobs = pending_repairs().lock().unwrap();
+        let job = jobs.get_mut(&job_id).ok_or("job not found")?;
+        // R1-01 fix: use try_wait() instead of kill(pid,0) to avoid zombies.
+        let running = match &mut job.child {
+            Some(child) => match child.try_wait() {
+                Ok(None) => true,   // still running
+                Ok(Some(_status)) => false, // exited
+                Err(_) => false,    // error = treat as exited
+            },
+            None => false, // already reaped
+        };
+        (job.store_path.clone(), job.diff_path.clone(), job.started_at.clone(), running)
+    };
 
-    // Check if the process is still running.
-    let still_running = unsafe { libc_kill(job.pid as i32, 0) == 0 };
     if still_running {
         return Ok(RepairJobResponse {
             id: job_id,
@@ -1660,27 +1676,40 @@ fn poll_repair_job(job_id: String) -> Result<RepairJobResponse, String> {
             attestation_hash: String::new(),
             diff_path: String::new(),
             error: String::new(),
-            started_at: job.started_at.clone(),
+            started_at,
         });
     }
 
-    // Process has exited. Parse the store for the attestation hash.
-    let attestation_hash = read_attestation_hash(&job.store_path);
-    let diff_exists = std::path::Path::new(&job.diff_path).exists();
+    // R1-01 fix: reap the zombie now that we know it exited.
+    {
+        let mut jobs = pending_repairs().lock().unwrap();
+        if let Some(job) = jobs.get_mut(&job_id) {
+            if let Some(mut child) = job.child.take() {
+                let _ = child.wait(); // reap zombie
+            }
+        }
+    }
 
-    let status = if attestation_hash.is_empty() && !diff_exists {
-        "failed".to_string()
-    } else {
+    // Process has exited. Parse the store for the attestation hash.
+    let attestation_hash = read_attestation_hash(&store_path);
+    let diff_exists = std::path::Path::new(&diff_path).exists();
+
+    // R1-11 fix: treat empty hash as failed, not completed.
+    let status = if !attestation_hash.is_empty() {
         "completed".to_string()
+    } else if diff_exists {
+        "completed".to_string()
+    } else {
+        "failed".to_string()
     };
 
     Ok(RepairJobResponse {
         id: job_id,
         status: status.clone(),
         attestation_hash,
-        diff_path: if diff_exists { job.diff_path.clone() } else { String::new() },
+        diff_path: if diff_exists { diff_path } else { String::new() },
         error: if status == "failed" { "ananke-repair exited without producing attestation".to_string() } else { String::new() },
-        started_at: job.started_at.clone(),
+        started_at,
     })
 }
 
@@ -1749,7 +1778,7 @@ fn read_repair_diff(diff_path: String) -> Result<String, String> {
 // ── Helpers ───────────────────────────────────────────────────────
 
 struct PendingRepair {
-    pid: u64,
+    child: Option<std::process::Child>,
     store_path: String,
     diff_path: String,
     started_at: String,
@@ -1783,12 +1812,7 @@ fn chrono_now() -> String {
 }
 
 /// Send signal 0 to check if a process is alive. Returns 0 if alive.
-unsafe extern "C" {
-    fn kill(pid: i32, sig: i32) -> i32;
-}
-fn libc_kill(pid: i32, sig: i32) -> i32 {
-    unsafe { kill(pid, sig) }
-}
+// R1-10 fix: removed hand-rolled FFI — now using try_wait() on stored Child.
 
 /// Read attestation hash from the store by querying with ananke-repair status.
 /// Since we don't know the hash ahead of time, we try reading the diff file

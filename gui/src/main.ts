@@ -52,7 +52,7 @@ async function refresh(silent=false) {
   runs = await invokeDecoded("list_runs",json=>{ const result:unknown=JSON.parse(json); if(!Array.isArray(result)) throw new Error("Tauri command returned a non-array result"); return result.map(entry=>{ const entryJson=JSON.stringify(entry); if(entryJson===undefined) throw new Error("Tauri command returned no JSON"); return RunConvert.toRun(entryJson); }); });
   runs.sort((a,b)=>attention(a.state)-attention(b.state)); selected ||= runs[0]?.id ?? "";
   const run = selected ? await invokeDecoded("get_run",RunConvert.toRun,{runId:selected}) : undefined; events = run ? await invokeDecoded("list_events",json=>{ const result:unknown=JSON.parse(json); if(!Array.isArray(result)) throw new Error("Tauri command returned a non-array result"); return result.map(entry=>{ const entryJson=JSON.stringify(entry); if(entryJson===undefined) throw new Error("Tauri command returned no JSON"); return EventConvert.toEvent(entryJson); }); },{runId:run.id,afterSeq:0}) : []; await refreshGrill(); error="";
- } catch (e) { if(!silent) error=String(e); online=false; } render();
+ } catch (e) { if(!silent) error=String(e); online=false; } if(tab!="repair") render();
 }
 async function launch(){ if(!boot) return; const launched = await invokeDecoded("launch_fixture",RunConvert.toRun); selected = launched.id; await refresh(); }
 async function cancel(){ if(selected) { await invokeDecoded("cancel_run",CancelConvert.toCancel,{runId:selected}); await refresh(); } }
