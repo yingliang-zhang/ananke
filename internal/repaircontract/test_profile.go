@@ -945,6 +945,12 @@ func verifiedTestSandboxSnapshotIntact(value *VerifiedTestSandboxSnapshot, verif
 
 func testSandboxSnapshotMatchesAuthority(value *VerifiedTestSandboxSnapshot, expected SupervisorIntentAuthority, authorization *VerifiedAuthorization, claim *VerifiedSupervisorIntentClaim, adapterSandbox *VerifiedAdapterSandbox) bool {
 	observation := value.observation
+	// Anchor the worktree slot ID to the Slice 5 adapter sandbox's observed slot,
+	// mirroring Slice 5's matcher which pins the predecessor worktree slot.
+	adapterObservation, err := DecodeAdapterSandboxObservation(adapterSandbox.canonical)
+	if err != nil || adapterObservation.WorktreeSlotID != observation.WorktreeSlotID {
+		return false
+	}
 	return observation.AuthorizationHash == authorization.authorization.AuthorizationHash &&
 		observation.ApprovalHash == authorization.authorization.ApprovalHash &&
 		observation.RequestHash == expected.AcceptedDispatch.Request.RequestHash &&

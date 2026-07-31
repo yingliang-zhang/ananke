@@ -345,6 +345,23 @@ func adapterSandboxFrozenVerifierProbe(t *testing.T) error {
 			return errors.New("verifier authority contains invalid verification kind")
 		}
 	}
+	// Exercise validateAdapterUIDLease with the canonical fixture lease.
+	fixture := canonicalAdapterSandboxFixtureForTest(t)
+	if err := validateAdapterUIDLease(fixture.uidLease); err != nil {
+		return errors.New("canonical fixture UID lease failed validation")
+	}
+	// Negative: wrong UID should reject.
+	wrong := fixture.uidLease
+	wrong.UID = 99999
+	if err := validateAdapterUIDLease(wrong); !errors.Is(err, ErrInvalidAdapterSandbox) {
+		return errors.New("wrong UID lease was accepted")
+	}
+	// Negative: non-exclusive should reject.
+	wrongExclusive := fixture.uidLease
+	wrongExclusive.Exclusive = false
+	if err := validateAdapterUIDLease(wrongExclusive); !errors.Is(err, ErrInvalidAdapterSandbox) {
+		return errors.New("non-exclusive lease was accepted")
+	}
 	return nil
 }
 
