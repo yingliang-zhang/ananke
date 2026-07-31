@@ -265,23 +265,22 @@ func cmdSubmit(args []string) {
 	}
 }
 
-func cmdStatus(args []string) {
+func runStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	storePath := fs.String("store", "ananke-repair.sqlite", "path to SQLite store")
 	hash := fs.String("hash", "", "attestation hash (required)")
 	fs.Parse(args)
 	if *hash == "" {
-		fmt.Fprintln(os.Stderr, "ananke-repair status: --hash is required")
-		os.Exit(2)
+		return errors.New("status: --hash is required")
 	}
 	s, err := store.Open(*storePath)
 	if err != nil {
-		fatalf("open store: %v", err)
+		return fmt.Errorf("open store: %v", err)
 	}
 	defer s.Close()
 	row, err := s.GetRepairAttestation(context.Background(), *hash)
 	if err != nil {
-		fatalf("get attestation: %v", err)
+		return fmt.Errorf("get attestation: %v", err)
 	}
 	result := map[string]any{
 		"attestation_hash": row.AttestationHash,
@@ -295,59 +294,80 @@ func cmdStatus(args []string) {
 	}
 	encoded, _ := json.MarshalIndent(result, "", "  ")
 	fmt.Println(string(encoded))
+	return nil
 }
 
-func cmdReview(args []string) {
+func cmdStatus(args []string) {
+	if err := runStatus(args); err != nil {
+		fmt.Fprintf(os.Stderr, "ananke-repair: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runReview(args []string) error {
 	fs := flag.NewFlagSet("review", flag.ExitOnError)
 	storePath := fs.String("store", "ananke-repair.sqlite", "path to SQLite store")
 	hash := fs.String("hash", "", "attestation hash (required)")
 	action := fs.String("action", "", "accept or reject (required)")
 	fs.Parse(args)
 	if *hash == "" || *action == "" {
-		fmt.Fprintln(os.Stderr, "ananke-repair review: --hash and --action are required")
-		os.Exit(2)
+		return errors.New("review: --hash and --action are required")
 	}
 	if *action != "accept" && *action != "reject" {
-		fmt.Fprintln(os.Stderr, "ananke-repair review: --action must be accept or reject")
-		os.Exit(2)
+		return errors.New("review: --action must be accept or reject")
 	}
 	s, err := store.Open(*storePath)
 	if err != nil {
-		fatalf("open store: %v", err)
+		return fmt.Errorf("open store: %v", err)
 	}
 	defer s.Close()
 	switch *action {
 	case "accept":
 		if err := s.AcknowledgeRepairAttestationOutbox(context.Background(), *hash); err != nil {
-			fatalf("acknowledge: %v", err)
+			return fmt.Errorf("acknowledge: %v", err)
 		}
 		fmt.Printf("Repair accepted. Attestation %s outbox delivered.\n", *hash)
 	case "reject":
 		if err := s.AbandonRepairAttestationOutbox(context.Background(), *hash, "rejected by reviewer"); err != nil {
-			fatalf("abandon: %v", err)
+			return fmt.Errorf("abandon: %v", err)
 		}
 		fmt.Printf("Repair rejected. Attestation %s outbox abandoned.\n", *hash)
 	}
+	return nil
 }
 
-func cmdGenKey(args []string) {
+func cmdReview(args []string) {
+	if err := runReview(args); err != nil {
+		fmt.Fprintf(os.Stderr, "ananke-repair: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runGenKey(args []string) error {
 	fs := flag.NewFlagSet("genkey", flag.ExitOnError)
 	keyDir := fs.String("keydir", "", "path to key directory (required)")
 	fs.Parse(args)
 	if *keyDir == "" {
-		fmt.Fprintln(os.Stderr, "ananke-repair genkey: --keydir is required")
-		os.Exit(2)
+		return errors.New("genkey: --keydir is required")
 	}
 	if err := os.MkdirAll(*keyDir, 0o700); err != nil {
-		fatalf("create key dir: %v", err)
+		return fmt.Errorf("create key dir: %v", err)
 	}
-	spki, err := repairverifier.GenerateSigningMaterial(time.Now().UTC())
+	mat, err := repairverifier.GenerateSigningMaterial(time.Now().UTC())
 	if err != nil {
-		fatalf("generate key: %v", err)
+		return fmt.Errorf("generate key: %v", err)
 	}
-	defer spki.Close()
-	fmt.Printf("Repair signing material generated (SPKI: %s)\n", spki.SignerSPKI())
+	defer mat.Close()
+	fmt.Printf("Repair signing material generated (SPKI: %s)\n", mat.SignerSPKI())
 	fmt.Printf("Note: MVP keys are ephemeral per-run. Store --keydir for future use.\n")
+	return nil
+}
+
+func cmdGenKey(args []string) {
+	if err := runGenKey(args); err != nil {
+		fmt.Fprintf(os.Stderr, "ananke-repair: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 // loadOrGenerateMaterial generates an Ed25519 key pair for repair signing.

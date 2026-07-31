@@ -119,7 +119,7 @@ func (a *API) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req RepairSubmissionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
@@ -196,7 +196,7 @@ func (a *API) handleReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req ReviewActionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}

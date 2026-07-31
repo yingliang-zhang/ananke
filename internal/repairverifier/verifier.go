@@ -136,7 +136,7 @@ func (v *RepairVerifier) VerifyAttestationSignature(record repaircontract.Repair
 		return fmt.Errorf("%w: invalid signature encoding: %v", ErrVerification, err)
 	}
 	// Compute the canonical bytes that the signature covers.
-	signedBytes, err := repaircontract.AttestationSignatureCanonicalBytes(record)
+	signedBytes, err := repaircontract.RuntimeSignatureCanonicalBytes(record)
 	if err != nil {
 		return fmt.Errorf("%w: canonical bytes: %v", ErrVerification, err)
 	}

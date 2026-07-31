@@ -190,7 +190,7 @@ func (m *RepairSigningMaterial) SignAttestation(record repaircontract.RepairRevi
 	if m == nil || len(m.privateKey) == 0 {
 		return "", fmt.Errorf("%w: signing material not provisioned", ErrKeyProvisioning)
 	}
-	signedBytes, err := repaircontract.AttestationSignatureCanonicalBytes(record)
+	signedBytes, err := repaircontract.RuntimeSignatureCanonicalBytes(record)
 	if err != nil {
 		return "", fmt.Errorf("%w: canonical bytes: %v", ErrKeyProvisioning, err)
 	}
