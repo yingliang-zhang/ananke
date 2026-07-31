@@ -201,10 +201,10 @@ func runSubmit(args []string) error {
 		testResult, err = repairrunner.RunGoTestProfile(slotPath, uid, gid, []string{"go", "test", "./...", "-count=1", "-timeout", "60s"})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: go test profile failed: %v\n", err)
-			testResult = skipTestResult(adapter.TerminalProofHash, err.Error())
+			testResult = skipTestResult(adapter.TerminalProofHash, err.Error(), false)
 		}
 	} else {
-		testResult = skipTestResult(adapter.TerminalProofHash, "skipped: no go.mod")
+		testResult = skipTestResult(adapter.TerminalProofHash, "skipped: no go.mod", true)
 	}
 	fmt.Fprintf(os.Stderr, "test profile: pass=%v\n", testResult.Pass)
 
@@ -248,7 +248,9 @@ func runSubmit(args []string) error {
 	// 8. Save diff patch before worktree cleanup.
 	var diffPath string
 	if *diffOutput != "" {
-		diffBytes, err := exec.Command("git", "-C", slotPath, "diff").Output()
+		// R1-02 fix: git add -N to include untracked files, then git diff HEAD.
+		exec.Command("git", "-C", slotPath, "add", "-N", ".").Run()
+		diffBytes, err := exec.Command("git", "-C", slotPath, "diff", "HEAD").Output()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: git diff capture failed: %v\n", err)
 		} else if len(diffBytes) > 0 {
@@ -400,7 +402,9 @@ func loadOrGenerateMaterial(_ string, now time.Time) (*repairverifier.RepairSign
 	return repairverifier.GenerateSigningMaterial(now)
 }
 
-func skipTestResult(proofHash, msg string) *repairrunner.TestProfileResult {
+// skipTestResult creates a TestProfileResult for skipped/failed tests.
+// R1-06 fix: Pass=false on error, Pass=true only for "no go.mod" skip.
+func skipTestResult(proofHash, msg string, pass bool) *repairrunner.TestProfileResult {
 	return &repairrunner.TestProfileResult{
 		ToolchainManifestHash: repairrunner.HashString("go_test"),
 		TestProfileHash:       repairrunner.HashString("go test"),
@@ -409,7 +413,7 @@ func skipTestResult(proofHash, msg string) *repairrunner.TestProfileResult {
 		TestOutputHash:        repairrunner.HashString(msg),
 		TestCommandHash:       repairrunner.HashString("skip"),
 		TestCapabilityHash:    repairrunner.HashString("test_capability"),
-		Pass:                  true,
+		Pass:                  pass,
 		Output:                msg,
 	}
 }

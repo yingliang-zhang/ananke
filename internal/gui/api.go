@@ -148,6 +148,11 @@ func (a *API) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// R1-10 fix: CSRF protection on submit (same as review).
+	if r.Header.Get("Content-Type") != "application/json" {
+		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "Content-Type must be application/json"})
+		return
+	}
 	var req RepairSubmissionRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
@@ -161,8 +166,8 @@ func (a *API) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		req.AdapterType = "omp"
 	}
 
-	// Generate job ID and track it.
-	jobID := "job_" + time.Now().UTC().Format("20060102_150405")
+	// R1-11 fix: use nanosecond-resolution job ID to prevent same-second collisions.
+	jobID := "job_" + time.Now().UTC().Format("20060102_150405.000000000")
 	job := &RepairJob{
 		ID:        jobID,
 		Status:    "running",
@@ -301,8 +306,11 @@ func (a *API) runRepair(jobID string, req RepairSubmissionRequest) {
 
 	// Save git diff to a temp file for download.
 	diffDir, _ := os.MkdirTemp("", "ananke-diff-")
+	defer os.RemoveAll(diffDir) // R1-05 fix: clean up diff temp dir
 	diffPath := filepath.Join(diffDir, "repair.patch")
-	diffBytes, _ := exec.Command("git", "-C", slotPath, "diff").Output()
+	// R1-02 fix: git add -N to include untracked files, then git diff HEAD.
+	exec.Command("git", "-C", slotPath, "add", "-N", ".").Run()
+	diffBytes, _ := exec.Command("git", "-C", slotPath, "diff", "HEAD").Output()
 	if len(diffBytes) > 0 {
 		os.WriteFile(diffPath, diffBytes, 0o644)
 	}
@@ -312,10 +320,10 @@ func (a *API) runRepair(jobID string, req RepairSubmissionRequest) {
 	if _, err := os.Stat(filepath.Join(slotPath, "go.mod")); err == nil {
 		testResult, err = repairrunner.RunGoTestProfile(slotPath, uid, gid, []string{"go", "test", "./...", "-count=1", "-timeout", "60s"})
 		if err != nil {
-			testResult = skipTestResult(adapter.TerminalProofHash, err.Error())
+			testResult = skipTestResult(adapter.TerminalProofHash, err.Error(), false)
 		}
 	} else {
-		testResult = skipTestResult(adapter.TerminalProofHash, "skipped: no go.mod")
+		testResult = skipTestResult(adapter.TerminalProofHash, "skipped: no go.mod", true)
 	}
 
 	// 6. Produce signed attestation.
@@ -370,12 +378,17 @@ func (a *API) handleJob(w http.ResponseWriter, r *http.Request) {
 	}
 	a.mu.Lock()
 	job, ok := a.repairs[jobID]
+	// R1-11 fix: snapshot the struct under lock to avoid data race.
+	snapshot := RepairJob{}
+	if ok {
+		snapshot = *job
+	}
 	a.mu.Unlock()
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
 		return
 	}
-	writeJSON(w, http.StatusOK, job)
+	writeJSON(w, http.StatusOK, snapshot)
 }
 
 func (a *API) handleDiff(w http.ResponseWriter, r *http.Request) {
@@ -390,16 +403,20 @@ func (a *API) handleDiff(w http.ResponseWriter, r *http.Request) {
 	}
 	a.mu.Lock()
 	job, ok := a.repairs[jobID]
+	diffPath := ""
+	if ok {
+		diffPath = job.DiffPath
+	}
 	a.mu.Unlock()
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
 		return
 	}
-	if job.DiffPath == "" {
+	if diffPath == "" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no diff available"})
 		return
 	}
-	data, err := os.ReadFile(job.DiffPath)
+	data, err := os.ReadFile(diffPath)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("read diff: %v", err)})
 		return
@@ -409,7 +426,9 @@ func (a *API) handleDiff(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-func skipTestResult(proofHash, msg string) *repairrunner.TestProfileResult {
+// skipTestResult creates a TestProfileResult for skipped/failed tests.
+// R1-06 fix: Pass=false on error, Pass=true only for "no go.mod" skip.
+func skipTestResult(proofHash, msg string, pass bool) *repairrunner.TestProfileResult {
 	return &repairrunner.TestProfileResult{
 		ToolchainManifestHash: repairrunner.HashString("go_test"),
 		TestProfileHash:       repairrunner.HashString("go test"),
@@ -418,7 +437,7 @@ func skipTestResult(proofHash, msg string) *repairrunner.TestProfileResult {
 		TestOutputHash:        repairrunner.HashString(msg),
 		TestCommandHash:       repairrunner.HashString("skip"),
 		TestCapabilityHash:    repairrunner.HashString("test_capability"),
-		Pass:                  true,
+		Pass:                  pass,
 		Output:                msg,
 	}
 }
@@ -514,8 +533,13 @@ func (a *API) handleReview(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to acknowledge"})
 			return
 		}
+	} else {
+		// R1-02 fix: reject should abandon the outbox (matching CLI behavior).
+		if err := a.store.AbandonRepairAttestationOutbox(ctx, req.AttestationHash, "rejected by "+req.ReviewerName); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to abandon"})
+			return
+		}
 	}
-	// In the MVP, reject does not modify the attestation (it stays in waiting_for_review).
 	writeJSON(w, http.StatusOK, ReviewActionResponse{
 		Accepted: req.Action == "accept",
 		Message:  fmt.Sprintf("repair %s by %s", req.Action, req.ReviewerName),

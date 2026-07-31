@@ -61,6 +61,7 @@ func TestAPISubmitValidation(t *testing.T) {
 	// Missing project_path.
 	body := `{"request_text": "fix bug"}`
 	req := httptest.NewRequest("POST", "/api/repair/submit", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	api.server.Handler.ServeHTTP(w, req)
 	if w.Code != http.StatusBadRequest {
@@ -70,6 +71,7 @@ func TestAPISubmitValidation(t *testing.T) {
 	// Valid request.
 	body = `{"project_path": "/tmp/test", "request_text": "fix bug"}`
 	req = httptest.NewRequest("POST", "/api/repair/submit", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	api.server.Handler.ServeHTTP(w, req)
 	if w.Code != http.StatusAccepted {
@@ -214,13 +216,13 @@ func TestAPIReviewReject(t *testing.T) {
 		t.Error("should not be accepted")
 	}
 
-	// Verify outbox is still pending (reject doesn't acknowledge).
+	// Verify outbox is abandoned (reject sets outbox_delivered to -1).
 	row, err := s.GetRepairAttestation(context.Background(), "sha256:test-reject-1")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if row.OutboxDelivered != 0 {
-		t.Errorf("delivered: got %d, want 0 (pending)", row.OutboxDelivered)
+	if row.OutboxDelivered >= 0 {
+		t.Errorf("delivered: got %d, want negative (abandoned)", row.OutboxDelivered)
 	}
 }
 
