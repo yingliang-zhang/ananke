@@ -262,6 +262,12 @@ func GenerateSigningMaterial(now time.Time) (*RepairSigningMaterial, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: generate key: %v", ErrKeyProvisioning, err)
 	}
+	keepKey := false
+	defer func() {
+		if !keepKey {
+			transportprimitives.ZeroBytes(priv)
+		}
+	}()
 	spki, err := transportprimitives.SPKIHash(pub)
 	if err != nil {
 		return nil, fmt.Errorf("%w: SPKI hash: %v", ErrKeyProvisioning, err)
@@ -275,6 +281,7 @@ func GenerateSigningMaterial(now time.Time) (*RepairSigningMaterial, error) {
 	if err := verifier.SetAttestorPublicKey(pub); err != nil {
 		return nil, fmt.Errorf("%w: set attestor: %v", ErrKeyProvisioning, err)
 	}
+	keepKey = true
 	return &RepairSigningMaterial{
 		verifier:   verifier,
 		privateKey: priv,
