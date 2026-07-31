@@ -171,8 +171,41 @@ func (s *Store) GetRepairAttestation(ctx context.Context, attestationHash string
 	return row, nil
 }
 
+// GetLatestRepairAttestation returns the most recently created attestation.
+func (s *Store) GetLatestRepairAttestation(ctx context.Context) (RepairAttestationRow, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT a.attestation_hash, a.attestation_id, a.authorization_hash,
+			a.attempt_hash, a.attempt_number, a.signature_domain,
+			a.signature_hash, a.state, a.issued_at, a.attestation_json,
+			COALESCE(o.delivered, 0), a.created_at, COALESCE(o.delivered_at, ''), COALESCE(o.delivered_diagnostic, '')
+		FROM repair_review_attestations a
+		LEFT JOIN repair_attestation_outbox o ON a.attestation_hash = o.attestation_hash
+		ORDER BY a.created_at DESC LIMIT 1`)
+	if err != nil {
+		return RepairAttestationRow{}, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return RepairAttestationRow{}, ErrAttestationNotFound
+	}
+	var row RepairAttestationRow
+	var deliveredAt, createdAtStr, diagnostic string
+	if err := rows.Scan(
+		&row.AttestationHash, &row.AttestationID, &row.AuthorizationHash,
+		&row.AttemptHash, &row.AttemptNumber, &row.SignatureDomain,
+		&row.SignatureHash, &row.State, &row.IssuedAt, &row.AttestationJSON,
+		&row.OutboxDelivered, &createdAtStr, &deliveredAt, &diagnostic); err != nil {
+		return RepairAttestationRow{}, err
+	}
+	row.CreatedAt = stampToTime(createdAtStr)
+	row.DeliveredDiagnostic = diagnostic
+	if deliveredAt != "" {
+		row.DeliveredAt = stampToTime(deliveredAt)
+	}
+	return row, rows.Err()
+}
+
 // GetPendingRepairAttestationOutbox returns all pending (undelivered)
-// attestation outbox entries, ordered by creation time.
 func (s *Store) GetPendingRepairAttestationOutbox(ctx context.Context) ([]RepairAttestationRow, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT a.attestation_hash, a.attestation_id, a.authorization_hash,

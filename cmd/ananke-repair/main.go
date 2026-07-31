@@ -301,6 +301,26 @@ func runStatus(args []string) error {
 		return fmt.Errorf("open store: %v", err)
 	}
 	defer s.Close()
+
+	// "latest" shortcut: query the most recent attestation.
+	if *hash == "latest" {
+		row, err := s.GetLatestRepairAttestation(context.Background())
+		if err != nil {
+			return fmt.Errorf("get latest attestation: %v", err)
+		}
+		result := map[string]any{
+			"attestation_hash": row.AttestationHash,
+			"attestation_id":   row.AttestationID,
+			"state":            row.State,
+			"attempt_number":   row.AttemptNumber,
+			"issued_at":        row.IssuedAt,
+			"outbox_delivered": row.OutboxDelivered,
+			"created_at":       row.CreatedAt,
+		}
+		encoded, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Println(string(encoded))
+		return nil
+	}
 	row, err := s.GetRepairAttestation(context.Background(), *hash)
 	if err != nil {
 		return fmt.Errorf("get attestation: %v", err)
