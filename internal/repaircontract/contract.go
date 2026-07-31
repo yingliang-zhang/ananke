@@ -669,6 +669,24 @@ func validHash(value string) bool {
 	return true
 }
 
+// validSignature accepts either a sha256: hash placeholder (contract-layer
+// test fixtures) or an ed25519: detached signature (runtime production).
+// The ed25519 format is "ed25519:" + 128 hex characters (64 bytes).
+func validSignature(value string) bool {
+	if validHash(value) {
+		return true
+	}
+	if len(value) != len("ed25519:")+128 || !strings.HasPrefix(value, "ed25519:") {
+		return false
+	}
+	for _, character := range value[len("ed25519:"):] {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 func validClosedIdentifier(value string, maxBytes int) bool {
 	return len(value) > 0 && len(value) <= maxBytes && closedIdentifierPattern.MatchString(value)
 }

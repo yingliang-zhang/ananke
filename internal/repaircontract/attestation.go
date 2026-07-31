@@ -676,7 +676,7 @@ func validateAttestationRecord(value RepairReviewAttestation) error {
 		value.State != AttestationWaitingForReview ||
 		value.SignatureDomain != SignatureDomain ||
 		!validClosedIdentifier(value.AttestationID, maxAttestationIDBytes) ||
-		!validHash(value.AttestationHash) || !validHash(value.Signature) ||
+		!validHash(value.AttestationHash) || !validSignature(value.Signature) ||
 		!validHash(value.ReleasePinsHash) || !validHash(value.TrustBundleHash) ||
 		!validHash(value.RepairAttestorCertificateHash) ||
 		!validClosedIdentifier(value.RepairAttestorRootID, maxAttestationIDBytes) ||
