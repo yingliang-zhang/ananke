@@ -34,7 +34,7 @@ const (
 	processSourceSnapshotHash    = "sha256:1d19f39b6c1f3db6164580e9903d4ac129a4c387d4eea25d5baab1b0f1c2d3e4"
 	processSourceManifestHash    = "sha256:842188d5ce1e461839bf33fb50a4040a3bf9f2e44d94c31be640058f5765cc15"
 	processEvidenceContractHash  = "sha256:9309381f36076c263c60d6ef3db5e93b52694d645ffbbef25a4d87dce6459a05"
-	processExternalDeadline      = "2026-07-30T12:00:00Z"
+	processExternalDeadline      = "2031-07-31T12:00:00Z"
 	processRepositoryIdentity    = "github.com/yingliang-zhang/ananke"
 	processClosedLifecycleOutput = `{"events":[],"result":null,"schema_version":"ananke.omp-production-output.v1","state":"waiting_for_human","verification_state":"not_run"}`
 	processServerSocketName      = "supervisor.sock"
