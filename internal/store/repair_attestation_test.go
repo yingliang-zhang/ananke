@@ -196,6 +196,31 @@ func TestAbandonRepairAttestationOutboxRejectsEmptyReason(t *testing.T) {
 	}
 }
 
+func TestAbandonRepairAttestationOutboxPersistsDiagnostic(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	record := testAttestation("sha256:test-abandon-diag", "attestation_abandon_diag")
+	if _, err := s.PersistRepairAttestation(ctx, record); err != nil {
+		t.Fatalf("persist: %v", err)
+	}
+
+	if err := s.AbandonRepairAttestationOutbox(ctx, record.AttestationHash, "supervisor process died"); err != nil {
+		t.Fatalf("abandon: %v", err)
+	}
+
+	row, err := s.GetRepairAttestation(ctx, record.AttestationHash)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if row.OutboxDelivered != -1 {
+		t.Errorf("delivered should be -1 (abandoned), got %d", row.OutboxDelivered)
+	}
+	if row.DeliveredDiagnostic != "supervisor process died" {
+		t.Errorf("diagnostic: got %q, want %q", row.DeliveredDiagnostic, "supervisor process died")
+	}
+}
+
 func TestGetPendingRepairAttestationOutbox(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

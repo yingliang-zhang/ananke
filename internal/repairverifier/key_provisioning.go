@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/yingliang-zhang/ananke/internal/repaircontract"
@@ -135,6 +136,39 @@ func (m *RepairSigningMaterial) SignerSPKI() string {
 // RootID returns the trust root ID for the repair attestor.
 func (m *RepairSigningMaterial) RootID() string {
 	return m.rootID
+}
+
+// SignAttestationBytes signs raw canonical bytes using the provisioned
+// private key. The signature is returned as "ed25519:" + hex-encoded bytes.
+// This is used by the repair runner which computes the signed bytes itself
+// (excluding both signature and attestation_hash fields to break the
+// circular dependency).
+func (m *RepairSigningMaterial) SignAttestationBytes(signedBytes []byte) (string, error) {
+	if m == nil || len(m.privateKey) == 0 {
+		return "", fmt.Errorf("%w: signing material not provisioned", ErrKeyProvisioning)
+	}
+	signature := ed25519.Sign(m.privateKey, signedBytes)
+	return signaturePrefix + hex.EncodeToString(signature), nil
+}
+
+// VerifyAttestationBytes verifies a raw Ed25519 signature over the given
+// canonical bytes using the provisioned public key.
+func (m *RepairSigningMaterial) VerifyAttestationBytes(signedBytes []byte, signature string) error {
+	if m == nil || len(m.privateKey) == 0 {
+		return fmt.Errorf("%w: signing material not provisioned", ErrKeyProvisioning)
+	}
+	if !strings.HasPrefix(signature, signaturePrefix) {
+		return fmt.Errorf("%w: signature missing ed25519 prefix", ErrKeyProvisioning)
+	}
+	sigHex := strings.TrimPrefix(signature, signaturePrefix)
+	sigBytes, err := hex.DecodeString(sigHex)
+	if err != nil {
+		return fmt.Errorf("%w: invalid signature encoding: %v", ErrKeyProvisioning, err)
+	}
+	if !ed25519.Verify(m.publicKey, signedBytes, sigBytes) {
+		return fmt.Errorf("%w: Ed25519 signature verification failed", ErrKeyProvisioning)
+	}
+	return nil
 }
 
 // SignAttestation signs a repair-review attestation using the provisioned
