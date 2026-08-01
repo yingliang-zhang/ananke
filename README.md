@@ -146,6 +146,24 @@ deliberate trade-off: automatic resume requires exactly-once machinery
 complexity without clear benefit for a single-researcher workflow. If
 the MVP demonstrates a real need, it can be added later.
 
+### 7. Contract traceability — no surface without an ADR
+
+No component, IPC path, operator surface, or authority boundary ships
+without citing its locus in [ARCHITECTURE.md](ARCHITECTURE.md) or a
+design contract. Any new surface, authority, or IPC path requires an
+ADR **before** implementation.
+
+This principle was added after three direction divergences during
+development (a web GUI built when the architecture specified Tauri 2;
+a form-based repair panel when the user wanted conversational; Rust-layer
+process spawning when the architecture specified Go daemon IPC). All
+three would have been caught by one question: "where does this appear in
+the architecture doc?"
+
+The audit prompt for every future change must include: "Does this change
+introduce a new surface, authority, or IPC path? If so, cite the ADR or
+design contract that authorizes it."
+
 ## Architecture decisions
 
 | Number | Title | Status |
