@@ -1593,7 +1593,11 @@ fn submit_repair(
     adapter_type: String,
 ) -> Result<RepairSubmitResponse, String> {
     let cfg = RepairConfig::default();
-    let adapter = if adapter_type.is_empty() { "omp" } else { &adapter_type };
+    let adapter = if adapter_type.is_empty() {
+        "omp"
+    } else {
+        &adapter_type
+    };
 
     // R1-06 fix: add atomic counter to job ID to prevent same-ms collisions.
     // R2-01 fix: finalize job_id BEFORE deriving store/diff paths.
@@ -1609,19 +1613,28 @@ fn submit_repair(
     let mut cmd = std::process::Command::new("ananke-repair");
     cmd.args([
         "submit",
-        "--repo", &project_path,
-        "--request", &request_text,
-        "--store", &store_path,
-        "--adapter", adapter,
-        "--diff-out", &diff_path,
+        "--repo",
+        &project_path,
+        "--request",
+        &request_text,
+        "--store",
+        &store_path,
+        "--adapter",
+        adapter,
+        "--diff-out",
+        &diff_path,
     ]);
 
     if adapter == "omp" {
         cmd.args([
-            "--omp-wrapper", &cfg.wrapper,
-            "--omp-provider", &cfg.provider,
-            "--omp-model", &cfg.model,
-            "--timeout", &cfg.timeout.to_string(),
+            "--omp-wrapper",
+            &cfg.wrapper,
+            "--omp-provider",
+            &cfg.provider,
+            "--omp-model",
+            &cfg.model,
+            "--timeout",
+            &cfg.timeout.to_string(),
         ]);
     }
 
@@ -1630,7 +1643,9 @@ fn submit_repair(
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let child = cmd.spawn().map_err(|e| format!("failed to spawn ananke-repair: {e}"))?;
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to spawn ananke-repair: {e}"))?;
 
     let job = PendingRepair {
         child: Some(child),
@@ -1659,13 +1674,18 @@ fn poll_repair_job(job_id: String) -> Result<RepairJobResponse, String> {
         // R1-01 fix: use try_wait() instead of kill(pid,0) to avoid zombies.
         let running = match &mut job.child {
             Some(child) => match child.try_wait() {
-                Ok(None) => true,   // still running
+                Ok(None) => true,           // still running
                 Ok(Some(_status)) => false, // exited
-                Err(_) => false,    // error = treat as exited
+                Err(_) => false,            // error = treat as exited
             },
             None => false, // already reaped
         };
-        (job.store_path.clone(), job.diff_path.clone(), job.started_at.clone(), running)
+        (
+            job.store_path.clone(),
+            job.diff_path.clone(),
+            job.started_at.clone(),
+            running,
+        )
     };
 
     if still_running {
@@ -1710,15 +1730,26 @@ fn poll_repair_job(job_id: String) -> Result<RepairJobResponse, String> {
         id: job_id,
         status: status.clone(),
         attestation_hash,
-        diff_path: if diff_exists { diff_path } else { String::new() },
-        error: if status == "failed" { "ananke-repair exited without producing attestation".to_string() } else { String::new() },
+        diff_path: if diff_exists {
+            diff_path
+        } else {
+            String::new()
+        },
+        error: if status == "failed" {
+            "ananke-repair exited without producing attestation".to_string()
+        } else {
+            String::new()
+        },
         started_at,
     })
 }
 
 /// Get repair attestation status from the store.
 #[tauri::command]
-fn get_repair_status(store_path: String, attestation_hash: String) -> Result<RepairJobResponse, String> {
+fn get_repair_status(
+    store_path: String,
+    attestation_hash: String,
+) -> Result<RepairJobResponse, String> {
     let hash = attestation_hash.trim();
     if hash.is_empty() {
         return Err("attestation_hash is required".to_string());
@@ -1729,22 +1760,42 @@ fn get_repair_status(store_path: String, attestation_hash: String) -> Result<Rep
         .output()
         .map_err(|e| format!("ananke-repair status: {e}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value = serde_json::from_str(&stdout).map_err(|e| format!("parse status: {e}"))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).map_err(|e| format!("parse status: {e}"))?;
     Ok(RepairJobResponse {
         id: String::new(),
-        status: parsed.get("state").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+        status: parsed
+            .get("state")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
         attestation_hash: hash.to_string(),
         diff_path: String::new(),
         error: String::new(),
-        started_at: parsed.get("issued_at").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        started_at: parsed
+            .get("issued_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
     })
 }
 
 /// Accept a repair attestation.
 #[tauri::command]
-fn accept_repair(store_path: String, attestation_hash: String) -> Result<RepairReviewResponse, String> {
+fn accept_repair(
+    store_path: String,
+    attestation_hash: String,
+) -> Result<RepairReviewResponse, String> {
     let output = std::process::Command::new("ananke-repair")
-        .args(["review", "--store", &store_path, "--hash", &attestation_hash, "--action", "accept"])
+        .args([
+            "review",
+            "--store",
+            &store_path,
+            "--hash",
+            &attestation_hash,
+            "--action",
+            "accept",
+        ])
         .output()
         .map_err(|e| format!("ananke-repair review: {e}"))?;
     if !output.status.success() {
@@ -1758,9 +1809,20 @@ fn accept_repair(store_path: String, attestation_hash: String) -> Result<RepairR
 
 /// Reject a repair attestation.
 #[tauri::command]
-fn reject_repair(store_path: String, attestation_hash: String) -> Result<RepairReviewResponse, String> {
+fn reject_repair(
+    store_path: String,
+    attestation_hash: String,
+) -> Result<RepairReviewResponse, String> {
     let output = std::process::Command::new("ananke-repair")
-        .args(["review", "--store", &store_path, "--hash", &attestation_hash, "--action", "reject"])
+        .args([
+            "review",
+            "--store",
+            &store_path,
+            "--hash",
+            &attestation_hash,
+            "--action",
+            "reject",
+        ])
         .output()
         .map_err(|e| format!("ananke-repair review: {e}"))?;
     if !output.status.success() {
@@ -1787,10 +1849,12 @@ struct PendingRepair {
     started_at: String,
 }
 
-static PENDING_REPAIRS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, PendingRepair>>> =
-    std::sync::OnceLock::new();
+static PENDING_REPAIRS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, PendingRepair>>,
+> = std::sync::OnceLock::new();
 
-fn pending_repairs() -> &'static std::sync::Mutex<std::collections::HashMap<String, PendingRepair>> {
+fn pending_repairs() -> &'static std::sync::Mutex<std::collections::HashMap<String, PendingRepair>>
+{
     PENDING_REPAIRS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
