@@ -2,9 +2,12 @@
 
 ## Status
 
-Draft — 2026-08-01. This document supersedes the "repair" framing in
-`docs/gui-repair-interaction-design.md`. It is a first-principles redesign
-of Ananke's purpose, interaction model, and user-facing terminology.
+Accepted — 2026-08-01. This document supersedes the "repair" framing in
+`docs/gui-repair-interaction-design.md` and amends the primary information
+architecture in `docs/gui-v0.1-design.md` (the tab-based layout is replaced
+by a chat-first layout; the v0.1 lifecycle proof purpose is preserved as
+structured run events rendered within the conversation). Linked from
+`ARCHITECTURE.md` and `README.md` §4.
 
 ## The Problem
 
@@ -156,6 +159,34 @@ The user never explicitly "creates a Run." When they type a request and press
 Enter, the Go daemon auto-creates a Run bound to the current Project+Workstream.
 The Run appears in the left rail as a conversation entry (like Hermes sessions).
 
+**Auto-run-creation IPC specification:**
+
+The existing `repair-request` daemon command (in `internal/lifecycle/engine_repair.go`)
+already auto-creates a job ID and tracks it in `repairJobsMap`. For the chat-first
+model, this is extended:
+
+1. **Idempotency**: `repair-request` with the same `request_text` + `project_id`
+   within a 5-second window returns the existing job ID (deduplication). This
+   prevents accidental double-submit from rapid Enter presses.
+
+2. **Crash window**: if the daemon crashes between creating the Run and starting
+   the repair goroutine, the Run exists in the journal as `state=created` with no
+   events. On restart, the recovery loop marks it as `state=failed` with
+   `cleanup_required` (existing ADR-0003 pattern). No orphaned work.
+
+3. **Concurrency**: the `repairJobsMap` mutex + `repairPolling` guard in the
+   frontend prevent concurrent repairs in the same conversation. Multiple
+   conversations (different Project/Workstream) can run in parallel.
+
+4. **Journal event types**: the daemon appends these event types to the journal:
+   - `conversation.user_request` — user's message text
+   - `conversation.agent_reasoning` — agent's analysis (placeholder in MVP)
+   - `conversation.agent_evidence` — attestation hash + diff path
+   - `conversation.review_action` — accept/reject/ask_changes
+   These are stored as run events in the existing `events` table with typed
+   payloads, not as free-form text. Schema-first (Invariant 5): these event
+   types should be added to the `contracts/` schema source and codegen'd.
+
 ### Memory and context
 
 - **Ananke SQLite**: authoritative for runs, events, attestations (unchanged)
@@ -167,7 +198,29 @@ The Run appears in the left rail as a conversation entry (like Hermes sessions).
   summaries (like Hermes Desktop's progressive collapse). The journal retains
   the full record.
 
-## Implementation Impact
+## Terminology Sweep
+
+The following user-facing references to "repair" need updating. Internal
+package names and IPC commands are NOT changed (frozen hash contracts).
+
+| File | What changes | What stays |
+|------|-------------|------------|
+| `gui/src/main.ts` | "Repair" tab label → "Chat" tab; `renderRepairPanel` → `renderChatPanel`; `repairMessages` → `chatMessages`; `sendRepairMessage` → `sendChatMessage`; `repairJobId` → `activeJobId`; CSS classes `.repair-msg` → `.chat-msg` | `RepairJobDto`/`RepairMessageDto` interfaces (internal type names) |
+| `README.md` §6 | "repair flow" → "agent coding flow" | ADR-0005 title (immutable, supersede with new ADR) |
+| `docs/gui-v0.1-design.md` | Add amendment note linking to first-principles-redesign.md | Original text (historical record) |
+| `docs/gui-repair-interaction-design.md` | Add "SUPERSEDED" header pointing to first-principles-redesign.md | Original text (historical record) |
+| ADR-0005 | Add superseding ADR-0006 for "controlled coding" framing | ADR-0005 title and content (immutable history) |
+| `internal/lifecycle/engine_repair.go` | No user-facing changes | Internal file name, function names |
+| `internal/repairrunner/`, `internal/repaircontract/`, `internal/repairverifier/` | No changes — frozen hash contracts | Package names are implementation details |
+| IPC commands (`repair-request`, `repair-poll`, etc.) | No changes — internal daemon commands | Wire protocol names are implementation details |
+| `cmd/ananke-repair/` | **Deleted entirely** | N/A |
+
+### CLI deletion safety (F4 verification)
+
+- `grep -rn "ananke-repair" cmd/ananke/ cmd/ananke-supervisor/ internal/lifecycle/ internal/supervisor/ internal/trustedsupervisor/ .github/ scripts/` → **zero references** (verified 2026-08-01)
+- `cmd/ananke-repair` is not spawned by the supervisor, bootstrap, or any CI job
+- Headless execution is deferred — if needed later, add a `--headless` flag to the main `ananke` binary rather than a separate binary
+- Stale root binaries (`~/go/bin/ananke-repair`, `.ananke/bin/ananke-repair`) should be cleaned up after deletion
 
 ### Delete
 - `cmd/ananke-repair/` (CLI binary)
@@ -226,7 +279,7 @@ The Run appears in the left rail as a conversation entry (like Hermes sessions).
 | Feature | Ananke | Hermes | Orca | OpenCode |
 |---------|--------|--------|------|----------|
 | **Primary interaction** | Chat-first (type → Enter → agent works) | Chat-first | Worktree-centric IDE (⌘N → agent → paste) | Chat-first (TUI + desktop tabs) |
-| **Launch to working** | 2 steps (warm) / 4 (cold) | 0 clicks (type, Enter) | 2-5 steps | 1 command |
+| **Launch to working** | 2 steps (warm: type, Enter) / 4 (cold: select project, select workstream, type, Enter) | 2 steps (type, Enter) | 3-5 steps (⌘N, select agent, paste, Enter) | 2 steps (type, Enter) |
 | **Code change evidence** | Inline in conversation: diff + attestation hash + Accept/Reject/Ask-changes | Inline diff, progressive collapse, "Changed files" card | Dedicated diff viewer with j/k nav + inline comments | Side-by-side diff, git-backed /undo /redo |
 | **Parallel agents** | No (single agent per conversation) | Subagent delegation (inline, same stream) | Yes — core feature, N worktrees × N agents | Subagents (clickable threads) |
 | **Durable journal** | Yes — append-only SQLite, survives crashes/restarts | Session DB (compression, not append-only) | Git branches (not a journal) | SQLite sessions (not append-only) |

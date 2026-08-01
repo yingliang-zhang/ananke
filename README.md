@@ -92,11 +92,24 @@ Ananke uses a strict authority/context boundary:
 
 | Layer | Authority | Stores | Does not store |
 |---|---|---|---|
-| **Ananke SQLite** | Ananke (authority) | task proposal, approval, claim, run event, evidence, attestation | user preferences, agent knowledge, conversation history |
-| **Session DB** | Hermes (context) | conversation history, tool output, compressed summaries | task state, evidence |
+| **Ananke SQLite** | Ananke (authority) | task proposal, approval, claim, run event (incl. conversational messages as journaled events), evidence, attestation, diff patches | user preferences, agent knowledge, agent skill state |
+| **Session DB** | Hermes (context) | agent-internal conversation history, tool output, compressed summaries | task state, evidence |
 | **MEMORY/USER** | Hermes (context) | operational facts, user preferences (injected every turn) | task state, evidence |
 | **Hindsight** | Hermes (context) | episodic recall, delta-based retain/recall | task state, evidence |
 | **Basic Memory** | Hermes (context) | structured markdown notes, FTS5 + vector search | task state, evidence |
+
+Note: The redesign (`docs/first-principles-redesign.md`) reclassifies
+conversational messages as journaled run events stored in Ananke SQLite.
+This is an authority shift from the previous design (which listed
+"conversation history" under Ananke's "does not store"). The rationale:
+conversational messages in Ananke's GUI are not free-form chat — they are
+structured run events (user_request, agent_reasoning, agent_evidence,
+review_action) that participate in the durable journal, attestation flow,
+and recovery loop. Hermes Session DB may still hold agent-internal
+conversation history as context for the agent adapter, but Ananke's
+authoritative record is the journal. See
+[First-Principles Redesign](docs/first-principles-redesign.md) §Memory
+and context.
 
 Key principles:
 

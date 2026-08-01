@@ -81,3 +81,6 @@
 - Language spike evidence: `../rcos-agent-maintained-spike/`
 - Spike final decision: `../rcos-agent-maintained-spike/docs/language-decision-final.md`
 - Supervisor redesign contract: `docs/adr/` (to be written)
+- GUI design contract (v0.1): `docs/gui-v0.1-design.md`
+- First-principles redesign (chat-first): `docs/first-principles-redesign.md`
+- Repair interaction design (superseded by first-principles redesign): `docs/gui-repair-interaction-design.md`
