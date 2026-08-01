@@ -363,6 +363,21 @@ struct GoRequest<'a> {
     proposal: Option<GoProposalRequest<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     grill: Option<GoGrillRequest<'a>>,
+    // Repair IPC fields (Task 4: thin pass-through to Go daemon)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_text: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adapter_type: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attestation_hash: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operator_name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diff_path: Option<&'a str>,
 }
 
 impl<'a> GoRequest<'a> {
@@ -381,6 +396,13 @@ impl<'a> GoRequest<'a> {
             after_seq: None,
             proposal: None,
             grill: None,
+            request_text: None,
+            adapter_type: None,
+            attestation_hash: None,
+            action: None,
+            message: None,
+            operator_name: None,
+            diff_path: None,
         }
     }
 }
@@ -412,6 +434,43 @@ struct GoResponse {
     grill_evaluation: Option<serde_json::Value>,
     #[serde(default)]
     grill_record: Option<serde_json::Value>,
+    // Repair IPC response fields (Task 4)
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    repair_job: Option<RepairJobDto>,
+    #[serde(default)]
+    repair_messages: Option<Vec<RepairMessageDto>>,
+    #[serde(default)]
+    diff_content: Option<String>,
+}
+
+/// Repair job status DTO (deserialized from Go daemon response).
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct RepairJobDto {
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    attestation_hash: String,
+    #[serde(default)]
+    diff_path: String,
+    #[serde(default)]
+    error: String,
+    #[serde(default)]
+    started_at: String,
+}
+
+/// Repair conversation message DTO.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct RepairMessageDto {
+    #[serde(rename = "type")]
+    msg_type: String,
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    attestation_hash: String,
+    #[serde(default)]
+    diff_path: String,
 }
 // GoProposalRequest and its nested records are private bridge transport.
 // Generated renderer-public types are converted at the Tauri edge below.
@@ -1534,374 +1593,88 @@ fn record_grill_override(
     use_backend(state, |backend| backend.record_grill_override(input))
 }
 
-// ── Controlled-repair Tauri commands ──────────────────────────────
-// These shell out to the `ananke-repair` CLI binary, parsing JSON output.
+// ── Controlled-repair Tauri commands (thin IPC to Go daemon) ─────
+// Task 4: These are thin pass-throughs to the Go daemon's repair IPC
+// commands, matching the existing use_backend pattern. No process
+// spawning, no PENDING_REPAIRS, no state in the Rust layer.
 
-/// Default OMP configuration for controlled repairs.
-struct RepairConfig {
-    wrapper: String,
-    provider: String,
-    model: String,
-    timeout: u32,
-}
-
-impl Default for RepairConfig {
-    fn default() -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        Self {
-            wrapper: format!("{home}/.hermes/profiles/orchestrator/scripts/omp_with_timeout.sh"),
-            provider: "custom:sudo-kimi-k3".to_string(),
-            model: "t9s/kimi-k3".to_string(),
-            timeout: 300,
-        }
-    }
-}
-
-/// Response from submit_repair.
-#[derive(serde::Serialize)]
-struct RepairSubmitResponse {
-    job_id: String,
-    status: String,
-    attestation_hash: String,
-    message: String,
-}
-
-/// Response from poll_repair_job / get_repair_status.
-#[derive(serde::Serialize)]
-struct RepairJobResponse {
-    id: String,
-    status: String,
-    attestation_hash: String,
-    diff_path: String,
-    error: String,
-    started_at: String,
-}
-
-/// Response from accept_repair / reject_repair.
-#[derive(serde::Serialize)]
-struct RepairReviewResponse {
-    accepted: bool,
-    message: String,
-}
-
-/// Submit a controlled repair. Runs `ananke-repair submit` asynchronously.
-/// The frontend polls with poll_repair_job to track progress.
+/// Submit a repair request to the Go daemon.
 #[tauri::command]
 fn submit_repair(
+    state: State<'_, BridgeState>,
     project_path: String,
     request_text: String,
     adapter_type: String,
-) -> Result<RepairSubmitResponse, String> {
-    let cfg = RepairConfig::default();
-    let adapter = if adapter_type.is_empty() {
-        "omp"
-    } else {
-        &adapter_type
-    };
-
-    // R1-06 fix: add atomic counter to job ID to prevent same-ms collisions.
-    // R2-01 fix: finalize job_id BEFORE deriving store/diff paths.
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let now_ts = chrono_now();
-    let job_id = format!("job_{}_{}", now_ts, counter);
-
-    // Build the ananke-repair CLI args from the finalized job_id.
-    let store_path = format!("/tmp/ananke-repair-{job_id}.sqlite");
-    let diff_path = format!("/tmp/ananke-repair-{job_id}.patch");
-
-    let mut cmd = std::process::Command::new("ananke-repair");
-    cmd.args([
-        "submit",
-        "--repo",
-        &project_path,
-        "--request",
-        &request_text,
-        "--store",
-        &store_path,
-        "--adapter",
-        adapter,
-        "--diff-out",
-        &diff_path,
-    ]);
-
-    if adapter == "omp" {
-        cmd.args([
-            "--omp-wrapper",
-            &cfg.wrapper,
-            "--omp-provider",
-            &cfg.provider,
-            "--omp-model",
-            &cfg.model,
-            "--timeout",
-            &cfg.timeout.to_string(),
-        ]);
-    }
-
-    // R1-01 fix: store the Child handle so we can try_wait() later.
-    // R1-05 fix: use Stdio::null to avoid pipe buffer deadlock.
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to spawn ananke-repair: {e}"))?;
-
-    let job = PendingRepair {
-        child: Some(child),
-        store_path: store_path.clone(),
-        diff_path: diff_path.clone(),
-        started_at: now_ts,
-    };
-    let mut jobs = pending_repairs().lock().unwrap();
-    jobs.insert(job_id.clone(), job);
-
-    Ok(RepairSubmitResponse {
-        job_id,
-        status: "running".to_string(),
-        attestation_hash: String::new(),
-        message: format!("repair started with adapter={adapter} model={}", cfg.model),
+) -> Result<RepairJobDto, String> {
+    use_backend(state, |backend| {
+        let mut req = GoRequest::new("repair-request", &backend.token);
+        req.root = Some(&project_path);
+        req.request_text = Some(&request_text);
+        req.adapter_type = Some(&adapter_type);
+        let resp = backend.request(req)?;
+        resp.repair_job
+            .ok_or_else(|| BridgeError::DaemonRejected(resp.error.unwrap_or_default()))
     })
 }
 
-/// Poll a pending repair job. Returns status: "running", "completed", or "failed".
+/// Poll a repair job's status from the Go daemon.
 #[tauri::command]
-fn poll_repair_job(job_id: String) -> Result<RepairJobResponse, String> {
-    // R1-08 fix: copy data under lock, drop lock before IO.
-    let (store_path, diff_path, started_at, still_running) = {
-        let mut jobs = pending_repairs().lock().unwrap();
-        let job = jobs.get_mut(&job_id).ok_or("job not found")?;
-        // R1-01 fix: use try_wait() instead of kill(pid,0) to avoid zombies.
-        let running = match &mut job.child {
-            Some(child) => match child.try_wait() {
-                Ok(None) => true,           // still running
-                Ok(Some(_status)) => false, // exited
-                Err(_) => false,            // error = treat as exited
-            },
-            None => false, // already reaped
-        };
-        (
-            job.store_path.clone(),
-            job.diff_path.clone(),
-            job.started_at.clone(),
-            running,
-        )
-    };
+fn poll_repair_job(state: State<'_, BridgeState>, job_id: String) -> Result<RepairJobDto, String> {
+    use_backend(state, |backend| {
+        let mut req = GoRequest::new("repair-poll", &backend.token);
+        req.id = Some(&job_id);
+        let resp = backend.request(req)?;
+        resp.repair_job
+            .ok_or_else(|| BridgeError::DaemonRejected(resp.error.unwrap_or_default()))
+    })
+}
 
-    if still_running {
-        return Ok(RepairJobResponse {
-            id: job_id,
-            status: "running".to_string(),
-            attestation_hash: String::new(),
-            diff_path: String::new(),
-            error: String::new(),
-            started_at,
-        });
-    }
-
-    // R1-01 fix: reap the zombie now that we know it exited.
-    {
-        let mut jobs = pending_repairs().lock().unwrap();
-        if let Some(job) = jobs.get_mut(&job_id) {
-            if let Some(mut child) = job.child.take() {
-                let _ = child.wait(); // reap zombie
-            }
+/// Accept/reject/ask-changes a repair attestation via the Go daemon.
+#[tauri::command]
+fn review_repair(
+    state: State<'_, BridgeState>,
+    attestation_hash: String,
+    action: String,
+    message: Option<String>,
+) -> Result<bool, String> {
+    use_backend(state, |backend| {
+        let mut req = GoRequest::new("repair-review", &backend.token);
+        req.attestation_hash = Some(&attestation_hash);
+        req.action = Some(&action);
+        req.message = message.as_deref();
+        let resp = backend.request(req)?;
+        if !resp.ok {
+            return Err(BridgeError::DaemonRejected(resp.error.unwrap_or_default()));
         }
-    }
-
-    // Process has exited. Parse the store for the attestation hash.
-    let attestation_hash = read_attestation_hash(&store_path);
-    let diff_exists = std::path::Path::new(&diff_path).exists();
-
-    // R1-11/R2-02 fix: empty hash = failed, period (even if diff exists).
-    let status = if attestation_hash.is_empty() {
-        "failed".to_string()
-    } else {
-        "completed".to_string()
-    };
-
-    // R2-03 fix: remove completed/failed jobs from the map to prevent leak.
-    if status != "running" {
-        let mut jobs = pending_repairs().lock().unwrap();
-        jobs.remove(&job_id);
-    }
-
-    Ok(RepairJobResponse {
-        id: job_id,
-        status: status.clone(),
-        attestation_hash,
-        diff_path: if diff_exists {
-            diff_path
-        } else {
-            String::new()
-        },
-        error: if status == "failed" {
-            "ananke-repair exited without producing attestation".to_string()
-        } else {
-            String::new()
-        },
-        started_at,
+        Ok(resp.accepted)
     })
 }
 
-/// Get repair attestation status from the store.
+/// Get repair conversation messages from the Go daemon.
 #[tauri::command]
-fn get_repair_status(
-    store_path: String,
-    attestation_hash: String,
-) -> Result<RepairJobResponse, String> {
-    let hash = attestation_hash.trim();
-    if hash.is_empty() {
-        return Err("attestation_hash is required".to_string());
-    }
-    // Use ananke-repair status CLI to query.
-    let output = std::process::Command::new("ananke-repair")
-        .args(["status", "--store", &store_path, "--hash", hash])
-        .output()
-        .map_err(|e| format!("ananke-repair status: {e}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value =
-        serde_json::from_str(&stdout).map_err(|e| format!("parse status: {e}"))?;
-    Ok(RepairJobResponse {
-        id: String::new(),
-        status: parsed
-            .get("state")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string(),
-        attestation_hash: hash.to_string(),
-        diff_path: String::new(),
-        error: String::new(),
-        started_at: parsed
-            .get("issued_at")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+fn get_repair_messages(
+    state: State<'_, BridgeState>,
+    job_id: String,
+) -> Result<Vec<RepairMessageDto>, String> {
+    use_backend(state, |backend| {
+        let mut req = GoRequest::new("repair-messages", &backend.token);
+        req.id = Some(&job_id);
+        let resp = backend.request(req)?;
+        resp.repair_messages
+            .ok_or_else(|| BridgeError::DaemonRejected(resp.error.unwrap_or_default()))
     })
 }
 
-/// Accept a repair attestation.
+/// Read a repair diff patch file via the Go daemon (path-validated).
 #[tauri::command]
-fn accept_repair(
-    store_path: String,
-    attestation_hash: String,
-) -> Result<RepairReviewResponse, String> {
-    let output = std::process::Command::new("ananke-repair")
-        .args([
-            "review",
-            "--store",
-            &store_path,
-            "--hash",
-            &attestation_hash,
-            "--action",
-            "accept",
-        ])
-        .output()
-        .map_err(|e| format!("ananke-repair review: {e}"))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-    Ok(RepairReviewResponse {
-        accepted: true,
-        message: format!("repair accepted: {attestation_hash}"),
+fn read_repair_diff(state: State<'_, BridgeState>, diff_path: String) -> Result<String, String> {
+    use_backend(state, |backend| {
+        let mut req = GoRequest::new("repair-diff", &backend.token);
+        req.diff_path = Some(&diff_path);
+        let resp = backend.request(req)?;
+        resp.diff_content
+            .ok_or_else(|| BridgeError::DaemonRejected(resp.error.unwrap_or_default()))
     })
-}
-
-/// Reject a repair attestation.
-#[tauri::command]
-fn reject_repair(
-    store_path: String,
-    attestation_hash: String,
-) -> Result<RepairReviewResponse, String> {
-    let output = std::process::Command::new("ananke-repair")
-        .args([
-            "review",
-            "--store",
-            &store_path,
-            "--hash",
-            &attestation_hash,
-            "--action",
-            "reject",
-        ])
-        .output()
-        .map_err(|e| format!("ananke-repair review: {e}"))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-    Ok(RepairReviewResponse {
-        accepted: false,
-        message: format!("repair rejected: {attestation_hash}"),
-    })
-}
-
-/// Read the diff patch file content.
-#[tauri::command]
-fn read_repair_diff(diff_path: String) -> Result<String, String> {
-    std::fs::read_to_string(&diff_path).map_err(|e| format!("read diff: {e}"))
-}
-
-// ── Helpers ───────────────────────────────────────────────────────
-
-struct PendingRepair {
-    child: Option<std::process::Child>,
-    store_path: String,
-    diff_path: String,
-    started_at: String,
-}
-
-static PENDING_REPAIRS: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<String, PendingRepair>>,
-> = std::sync::OnceLock::new();
-
-fn pending_repairs() -> &'static std::sync::Mutex<std::collections::HashMap<String, PendingRepair>>
-{
-    PENDING_REPAIRS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
-/// Get current timestamp as YYYYMMDD_HHMMSS_NNN.
-fn chrono_now() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs();
-    let days = secs / 86400;
-    let time_of_day = secs % 86400;
-    let hour = time_of_day / 3600;
-    let min = (time_of_day % 3600) / 60;
-    let sec = time_of_day % 60;
-    let ms = now.subsec_millis();
-    // Simple date calculation (good enough for job IDs, not for calendar accuracy)
-    let year = 1970 + (days / 365);
-    let day_of_year = days % 365;
-    let month = (day_of_year / 30).min(11) + 1;
-    let day = (day_of_year % 30) + 1;
-    format!("{year:04}{month:02}{day:02}_{hour:02}{min:02}{sec:02}_{ms:03}")
-}
-
-/// Send signal 0 to check if a process is alive. Returns 0 if alive.
-// R1-10 fix: removed hand-rolled FFI — now using try_wait() on stored Child.
-
-/// Read attestation hash from the store by querying with ananke-repair status.
-/// Since we don't know the hash ahead of time, we try reading the diff file
-/// and if it exists, we consider the repair completed. The hash is parsed
-/// from the ananke-repair stdout (which was captured but lost since we spawned).
-/// Fallback: try to read from a sidecar file.
-fn read_attestation_hash(store_path: &str) -> String {
-    // The ananke-repair CLI prints JSON to stdout with attestation_hash.
-    // Since we spawned (not waited), we can't capture stdout.
-    // Instead, query the store for the most recent attestation.
-    let output = std::process::Command::new("ananke-repair")
-        .args(["status", "--store", store_path, "--hash", "latest"])
-        .output();
-    if let Ok(out) = output {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&stdout) {
-            if let Some(hash) = parsed.get("attestation_hash").and_then(|v| v.as_str()) {
-                return hash.to_string();
-            }
-        }
-    }
-    String::new()
 }
 
 pub fn run() {
@@ -1936,9 +1709,8 @@ pub fn run() {
             // Controlled-repair commands
             submit_repair,
             poll_repair_job,
-            get_repair_status,
-            accept_repair,
-            reject_repair,
+            review_repair,
+            get_repair_messages,
             read_repair_diff,
         ])
         .run(tauri::generate_context!())
