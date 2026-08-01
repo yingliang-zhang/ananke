@@ -449,6 +449,8 @@ struct GoResponse {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct RepairJobDto {
     #[serde(default)]
+    job_id: String,
+    #[serde(default)]
     status: String,
     #[serde(default)]
     attestation_hash: String,
@@ -1605,15 +1607,21 @@ fn submit_repair(
     project_path: String,
     request_text: String,
     adapter_type: String,
+    operator_name: Option<String>,
 ) -> Result<RepairJobDto, String> {
     use_backend(state, |backend| {
         let mut req = GoRequest::new("repair-request", &backend.token);
         req.root = Some(&project_path);
         req.request_text = Some(&request_text);
         req.adapter_type = Some(&adapter_type);
+        req.operator_name = operator_name.as_deref();
         let resp = backend.request(req)?;
-        resp.repair_job
-            .ok_or_else(|| BridgeError::DaemonRejected(resp.error.unwrap_or_default()))
+        let mut job = resp
+            .repair_job
+            .ok_or_else(|| BridgeError::DaemonRejected(resp.error.unwrap_or_default()))?;
+        // T4-1 fix: populate job_id from daemon response.
+        job.job_id = resp.id.unwrap_or_default();
+        Ok(job)
     })
 }
 
