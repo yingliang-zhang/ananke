@@ -59,6 +59,7 @@ type Engine struct {
 	cleanupDelivery  func(context.Context, string, string) (supCmdResponse, error)
 	running          bool
 	closing          bool
+	repairJobs       *repairJobsMap
 	closed           bool
 }
 
@@ -232,6 +233,9 @@ func (e *Engine) initRuntimeLocked() {
 	}
 	if e.connections == nil {
 		e.connections = make(map[net.Conn]struct{})
+	}
+	if e.repairJobs == nil {
+		e.repairJobs = newRepairJobsMap()
 	}
 }
 
@@ -1575,25 +1579,33 @@ func (e *Engine) tailTranscript(ctx context.Context, runID, path string) {
 // --- API server ---
 
 type apiRequest struct {
-	Cmd          string              `json:"cmd"`
-	Token        string              `json:"token"`
-	ID           string              `json:"id,omitempty"`
-	Name         string              `json:"name,omitempty"`
-	Root         string              `json:"root,omitempty"`
-	ProjectID    string              `json:"project_id,omitempty"`
-	WorkstreamID string              `json:"workstream_id,omitempty"`
-	WorkerPath   string              `json:"worker_path,omitempty"`
-	WorkerArgs   []string            `json:"worker_args,omitempty"`
-	WorkerEnv    []string            `json:"worker_env,omitempty"`
-	AfterSeq     int64               `json:"after_seq,omitempty"`
-	Proposal     *apiProposalRequest `json:"proposal,omitempty"`
-	Grill        json.RawMessage     `json:"grill,omitempty"`
+	Cmd             string              `json:"cmd"`
+	Token           string              `json:"token"`
+	ID              string              `json:"id,omitempty"`
+	Name            string              `json:"name,omitempty"`
+	Root            string              `json:"root,omitempty"`
+	ProjectID       string              `json:"project_id,omitempty"`
+	WorkstreamID    string              `json:"workstream_id,omitempty"`
+	WorkerPath      string              `json:"worker_path,omitempty"`
+	WorkerArgs      []string            `json:"worker_args,omitempty"`
+	WorkerEnv       []string            `json:"worker_env,omitempty"`
+	AfterSeq        int64               `json:"after_seq,omitempty"`
+	Proposal        *apiProposalRequest `json:"proposal,omitempty"`
+	Grill           json.RawMessage     `json:"grill,omitempty"`
+	RequestText     string              `json:"request_text,omitempty"`
+	AdapterType     string              `json:"adapter_type,omitempty"`
+	AttestationHash string              `json:"attestation_hash,omitempty"`
+	Action          string              `json:"action,omitempty"`
+	Message         string              `json:"message,omitempty"`
+	OperatorName    string              `json:"operator_name,omitempty"`
+	DiffPath        string              `json:"diff_path,omitempty"`
 }
 
 type apiResponse struct {
 	OK               bool                    `json:"ok"`
 	Error            string                  `json:"error,omitempty"`
 	State            string                  `json:"state,omitempty"`
+	ID               string                  `json:"id,omitempty"`
 	Run              *jsonRun                `json:"run,omitempty"`
 	Runs             []jsonRun               `json:"runs,omitempty"`
 	Events           []jsonEvent             `json:"events,omitempty"`
@@ -1604,6 +1616,9 @@ type apiResponse struct {
 	ProposalActivity *[]jsonProposalActivity `json:"proposal_activity,omitempty"`
 	GrillEvaluation  *jsonGrillEvaluation    `json:"grill_evaluation,omitempty"`
 	GrillRecord      *jsonGrillRecord        `json:"grill_record,omitempty"`
+	RepairJob        *jsonRepairJob          `json:"repair_job,omitempty"`
+	RepairMessages   *[]jsonRepairMessage    `json:"repair_messages,omitempty"`
+	DiffContent      string                  `json:"diff_content,omitempty"`
 }
 
 type jsonRun struct {
@@ -2006,6 +2021,18 @@ func (e *Engine) handleCmd(ctx context.Context, req *apiRequest) apiResponse {
 		return e.handleRecordGrillAnswer(ctx, req)
 	case "record-grill-override":
 		return e.handleRecordGrillOverride(ctx, req)
+	case "repair-request":
+		return e.handleRepairRequest(ctx, req)
+	case "repair-poll":
+		return e.handleRepairPoll(ctx, req)
+	case "repair-review":
+		return e.handleRepairReview(ctx, req)
+	case "repair-messages":
+		return e.handleRepairMessages(ctx, req)
+	case "repair-status":
+		return e.handleRepairStatus(ctx, req)
+	case "repair-diff":
+		return e.handleRepairDiff(ctx, req)
 	default:
 		return apiResponse{OK: false, Error: "unknown command: " + req.Cmd}
 	}
