@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -63,8 +65,10 @@ func (e *Engine) handleRepairRequest(ctx context.Context, req *apiRequest) apiRe
 	e.repairJobs.jobs[jobID] = handle
 	e.repairJobs.mu.Unlock()
 
-	// Run repair in background goroutine.
+	// Run repair in background goroutine with lifecycle management.
+	e.wg.Add(1)
 	go func() {
+		defer e.wg.Done()
 		cfg := gui.RepairConfig{
 			WrapperPath: defaultOMPWrapperPath(),
 			Provider:    defaultOMPProvider(),
@@ -114,16 +118,28 @@ func (e *Engine) handleRepairPoll(ctx context.Context, req *apiRequest) apiRespo
 	}
 
 	handle.mu.Lock()
-	defer handle.mu.Unlock()
+	status := handle.status
+	attHash := handle.attestationHash
+	diffP := handle.diffPath
+	errMsg := handle.errorMsg
+	started := handle.startedAt
+	handle.mu.Unlock()
+
+	// R-5/F4 fix: evict terminal jobs to prevent unbounded memory growth.
+	if status == "completed" || status == "failed" {
+		e.repairJobs.mu.Lock()
+		delete(e.repairJobs.jobs, req.ID)
+		e.repairJobs.mu.Unlock()
+	}
 
 	return apiResponse{
 		OK: true,
 		RepairJob: &jsonRepairJob{
-			Status:          handle.status,
-			AttestationHash: handle.attestationHash,
-			DiffPath:        handle.diffPath,
-			Error:           handle.errorMsg,
-			StartedAt:       handle.startedAt,
+			Status:          status,
+			AttestationHash: attHash,
+			DiffPath:        diffP,
+			Error:           errMsg,
+			StartedAt:       started,
 		},
 	}
 }
@@ -297,17 +313,18 @@ func isAllowedDiffPath(path string) bool {
 	if path == "" {
 		return false
 	}
-	// Must be under /tmp/ananke-diffs/ or /tmp/ananke-repair-*.patch
+	// Resolve symlinks before checking prefix (F1 fix: prevent symlink bypass).
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false // can't resolve → reject
+	}
 	allowedPrefixes := []string{
 		"/tmp/ananke-diffs/",
 		"/tmp/ananke-repair-",
 	}
 	for _, prefix := range allowedPrefixes {
-		if len(path) >= len(prefix) && path[:len(prefix)] == prefix {
-			// Reject path traversal.
-			if !containsDotDot(path) {
-				return true
-			}
+		if strings.HasPrefix(resolved, prefix) && !containsDotDot(resolved) {
+			return true
 		}
 	}
 	return false
