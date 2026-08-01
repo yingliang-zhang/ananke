@@ -65,87 +65,130 @@ function render(){ const run=runs.find(r=>r.id===selected); const counts=runs.re
  const grillPanel=document.createElement("section"); grillPanel.id="ananke-grill-review"; grillPanel.className="grill-review"; grillPanel.setAttribute(mac2SelectorContract.selectorAttribute,mac2SelectorContract.selectors.grillReview); grillPanel.innerHTML=renderGrillReview(grill.state); app.querySelector<HTMLElement>(".detail")?.prepend(grillPanel); app.querySelectorAll<HTMLElement>("[data-run]").forEach(x=>x.onclick=()=>{selected=x.dataset.run!;refresh(true)}); app.querySelectorAll<HTMLButtonElement>("[data-a]").forEach(x=>x.onclick=()=>{ if(x.dataset.a==="launch") void launch(); else if(x.dataset.a==="cancel") void cancel(); else void refresh(); }); app.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach(x=>x.onclick=()=>{tab=x.dataset.tab!;render()}); bindGrillReview(app,grill); if(tab=="repair") bindRepairPanel(); }
 setInterval(()=>refresh(true),1500); refresh();
 
-// ── Controlled Repair Panel ─────────────────────────────────────
-let repairJobId = "", repairPolling = false, repairStorePath = "", repairHash = "", repairDiffPath = "";
+// ── Controlled Repair — Conversational Panel ─────────────────────
+// Task 5: Chat-based repair interaction (per docs/gui-repair-interaction-design.md)
+let repairJobId = "", repairPolling = false;
+interface RepairMsg { role: "user"|"agent"|"system"; type: string; content: string; attestationHash?: string; diffPath?: string; }
+let repairMessages: RepairMsg[] = [];
 
 function renderRepairPanel(): string {
-  return `<div class="repair-panel">
-    <h3>Controlled Repair (K3)</h3>
-    <div class="form-group"><label>Project Path</label><input type="text" id="repair-project" placeholder="/path/to/project" value="${esc(boot?.project.root ?? "")}" /></div>
-    <div class="form-group"><label>Repair Request</label><textarea id="repair-request" placeholder="Describe the repair task..." rows="3"></textarea></div>
-    <div class="form-group"><label>Adapter</label>
-      <label style="display:inline;margin-left:8px"><input type="radio" name="repair-adapter" value="omp" checked> OMP (K3)</label>
-      <label style="display:inline;margin-left:8px"><input type="radio" name="repair-adapter" value="fake"> Fake</label>
+  const msgs = repairMessages.map(m => {
+    if (m.role === "user") return `<div class="repair-msg user"><b>You</b><p>${esc(m.content)}</p></div>`;
+    if (m.role === "system") return `<div class="repair-msg system"><span class="badge s-failed">${esc(m.content)}</span></div>`;
+    // agent message with optional evidence/diff
+    let actions = "";
+    if (m.attestationHash) {
+      actions = `<div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="repair-view-diff" data-diff="${esc(m.diffPath ?? "")}">View Diff</button>
+        <button class="repair-accept" data-hash="${esc(m.attestationHash)}">Accept</button>
+        <button class="repair-reject" data-hash="${esc(m.attestationHash)}">Reject</button>
+        <button class="repair-ask" data-hash="${esc(m.attestationHash)}">Ask for changes</button>
+      </div>`;
+    }
+    return `<div class="repair-msg agent"><b>Agent</b><p>${esc(m.content)}</p>${actions}</div>`;
+  }).join("");
+  return `<div class="repair-chat" style="display:flex;flex-direction:column;height:100%">
+    <div id="repair-thread" style="flex:1;overflow-y:auto;padding:8px;max-height:400px">${msgs || '<div class="empty">Request a repair to start a conversation.</div>'}</div>
+    <div id="repair-diff-view" style="margin-top:4px"></div>
+    <div style="display:flex;gap:8px;padding:8px 0">
+      <input type="text" id="repair-input" placeholder="Describe the repair task..." style="flex:1" />
+      <select id="repair-adapter" style="width:auto">
+        <option value="omp">OMP (K3)</option>
+        <option value="fake">Fake</option>
+      </select>
+      <button id="repair-send-btn" class="primary">Send</button>
     </div>
-    <button id="repair-submit-btn" class="primary">Submit Repair</button>
-    <div id="repair-result" style="margin-top:12px"></div>
   </div>`;
 }
 
 function bindRepairPanel() {
-  const btn = document.querySelector<HTMLButtonElement>("#repair-submit-btn");
-  if (btn) btn.onclick = () => void submitRepair();
+  const btn = document.querySelector<HTMLButtonElement>("#repair-send-btn");
+  const input = document.querySelector<HTMLInputElement>("#repair-input");
+  if (btn) btn.onclick = () => void sendRepairMessage();
+  if (input) input.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendRepairMessage(); } };
+  // Bind evidence action buttons
+  document.querySelectorAll<HTMLButtonElement>(".repair-view-diff").forEach(b => b.onclick = async () => {
+    const dp = b.dataset.diff; if (!dp) return;
+    const el = document.querySelector<HTMLElement>("#repair-diff-view");
+    if (!el) return;
+    try { const diff = await invoke<string>("read_repair_diff", { diffPath: dp }); el.innerHTML = `<pre style="background:#0d1117;padding:12px;border-radius:4px;font-size:0.75em;max-height:250px;overflow:auto;white-space:pre-wrap">${esc(diff)}</pre>`; }
+    catch (e: any) { el.innerHTML = `<span style="color:#ff5555">${esc(String(e))}</span>`; }
+  });
+  document.querySelectorAll<HTMLButtonElement>(".repair-accept").forEach(b => b.onclick = async () => {
+    try { await invoke("review_repair", { attestationHash: b.dataset.hash, action: "accept" }); repairMessages.push({role:"system",type:"info",content:"✓ Repair accepted. Outbox delivered."}); renderRepairTab(); }
+    catch (e: any) { alert(String(e)); }
+  });
+  document.querySelectorAll<HTMLButtonElement>(".repair-reject").forEach(b => b.onclick = async () => {
+    try { await invoke("review_repair", { attestationHash: b.dataset.hash, action: "reject" }); repairMessages.push({role:"system",type:"info",content:"✗ Repair rejected."}); renderRepairTab(); }
+    catch (e: any) { alert(String(e)); }
+  });
+  document.querySelectorAll<HTMLButtonElement>(".repair-ask").forEach(b => b.onclick = () => {
+    const input = document.querySelector<HTMLInputElement>("#repair-input");
+    if (input) { input.focus(); input.placeholder = "Describe what to change..."; }
+  });
 }
 
-async function submitRepair() {
-  const projectPath = (document.querySelector("#repair-project") as HTMLInputElement)?.value ?? "";
-  const requestText = (document.querySelector("#repair-request") as HTMLTextAreaElement)?.value ?? "";
-  const adapterType = (document.querySelector('input[name="repair-adapter"]:checked') as HTMLInputElement)?.value ?? "omp";
-  const el = document.querySelector<HTMLElement>("#repair-result");
-  if (!el) return;
-  if (!projectPath || !requestText) { el.innerHTML = '<span style="color:#ff5555">project path and request are required</span>'; return; }
-  el.innerHTML = '<p>Starting repair...</p>';
+function renderRepairTab() { const el = document.querySelector<HTMLElement>("#repair-thread"); if (el) el.innerHTML = repairMessages.map(m => {
+  if (m.role === "user") return `<div class="repair-msg user"><b>You</b><p>${esc(m.content)}</p></div>`;
+  if (m.role === "system") return `<div class="repair-msg system"><span class="badge ${m.content.includes("✓")?"s-settled":"s-failed"}">${esc(m.content)}</span></div>`;
+  let actions = "";
+  if (m.attestationHash) actions = `<div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap"><button class="repair-view-diff" data-diff="${esc(m.diffPath ?? "")}">View Diff</button><button class="repair-accept" data-hash="${esc(m.attestationHash)}">Accept</button><button class="repair-reject" data-hash="${esc(m.attestationHash)}">Reject</button><button class="repair-ask" data-hash="${esc(m.attestationHash)}">Ask for changes</button></div>`;
+  return `<div class="repair-msg agent"><b>Agent</b><p>${esc(m.content)}</p>${actions}</div>`;
+}).join(""); bindRepairPanel(); }
+
+async function sendRepairMessage() {
+  const input = document.querySelector<HTMLInputElement>("#repair-input");
+  const adapterSel = document.querySelector<HTMLSelectElement>("#repair-adapter");
+  if (!input) return;
+  const text = input.value.trim();
+  if (!text) return;
+  const adapterType = adapterSel?.value ?? "omp";
+  const projectPath = boot?.project.root ?? "";
+  if (!projectPath) { repairMessages.push({role:"system",type:"error",content:"No project root — select a project first."}); renderRepairTab(); return; }
+
+  // Add user message to conversation
+  repairMessages.push({role:"user",type:"user_request",content:text});
+  input.value = "";
+  repairMessages.push({role:"agent",type:"agent_reasoning",content:"Starting repair..."});
+  renderRepairTab();
+
   try {
-    const resp = await invoke<RepairSubmitResp>("submit_repair", { projectPath, requestText, adapterType });
-    repairJobId = resp.job_id; repairStorePath = `/tmp/ananke-repair-${resp.job_id}.sqlite`;
-    el.innerHTML = `<p>Repair running... (${esc(resp.message)})</p>`;
+    const job = await invoke<RepairJobDto>("submit_repair", { projectPath, requestText: text, adapterType });
+    repairJobId = job.job_id;
+    // Update the "starting" message
+    repairMessages[repairMessages.length-1].content = `Repair job ${esc(job.job_id)} started. Waiting for K3...`;
+    renderRepairTab();
     pollRepair();
-  } catch (e: any) { el.innerHTML = `<span style="color:#ff5555">${esc(String(e))}</span>`; }
+  } catch (e: any) {
+    repairMessages[repairMessages.length-1].content = `Error: ${esc(String(e))}`;
+    renderRepairTab();
+  }
 }
 
 async function pollRepair() {
   if (repairPolling || !repairJobId) return;
   repairPolling = true;
   const poll = async () => {
-    // R3-01 fix: re-query el per tick — don't capture a detached node.
-    const el = document.querySelector<HTMLElement>("#repair-result");
     try {
-      const job = await invoke<RepairJobResp>("poll_repair_job", { jobId: repairJobId });
+      const job = await invoke<RepairJobDto>("poll_repair_job", { jobId: repairJobId });
       if (job.status === "running") {
-        if (el) el.innerHTML = `<p>Repair running... (started: ${esc(job.started_at)})</p>`;
+        // Update last agent message
+        const last = repairMessages[repairMessages.length-1];
+        if (last && last.role === "agent") last.content = `Repair running... (started: ${esc(job.started_at)})`;
+        renderRepairTab();
         setTimeout(poll, 3000);
       } else if (job.status === "completed") {
-        repairHash = job.attestation_hash; repairDiffPath = job.diff_path;
-        repairPolling = false; // R2-09 fix: only reset on terminal state
-        if (el) el.innerHTML = `<table><tr><th>Job</th><td>${esc(job.id)}</td></tr><tr><th>Status</th><td><span class="badge s-settled">Completed</span></td></tr><tr><th>Attestation</th><td style="font-family:monospace;font-size:0.8em">${esc(job.attestation_hash)}</td></tr></table>
-          <div style="margin-top:8px;display:flex;gap:8px"><button id="repair-view-diff" class="primary">View Diff</button><button id="repair-accept">Accept</button><button id="repair-reject" class="danger">Reject</button></div>
-          <div id="repair-diff-view" style="margin-top:8px"></div>`;
-        bindRepairActions();
+        repairPolling = false;
+        repairMessages.push({role:"agent",type:"agent_evidence",content:`Repair completed. Attestation signed: ${esc(job.attestation_hash)}`,attestationHash:job.attestation_hash,diffPath:job.diff_path});
+        renderRepairTab();
       } else {
-        repairPolling = false; // R2-09 fix: only reset on terminal state
-        if (el) el.innerHTML = `<span class="badge s-failed">Failed</span>: ${esc(job.error)}`;
+        repairPolling = false;
+        repairMessages.push({role:"system",type:"error",content:`Failed: ${esc(job.error)}`});
+        renderRepairTab();
       }
-    } catch { repairPolling = false; /* R1-03 fix: stop on error */ }
+    } catch { repairPolling = false; }
   };
   poll();
 }
 
-function bindRepairActions() {
-  document.querySelector("#repair-view-diff")?.addEventListener("click", async () => {
-    const el = document.querySelector<HTMLElement>("#repair-diff-view");
-    if (!el || !repairDiffPath) return;
-    try { const diff = await invoke<string>("read_repair_diff", { diffPath: repairDiffPath }); el.innerHTML = `<pre style="background:#0d1117;padding:12px;border-radius:4px;font-size:0.75em;max-height:300px;overflow:auto;white-space:pre-wrap">${esc(diff)}</pre>`; }
-    catch (e: any) { el.innerHTML = `<span style="color:#ff5555">${esc(String(e))}</span>`; }
-  });
-  document.querySelector("#repair-accept")?.addEventListener("click", async () => {
-    try { await invoke("accept_repair", { storePath: repairStorePath, attestationHash: repairHash }); (document.querySelector("#repair-result") as HTMLElement).innerHTML += '<p><span class="badge s-settled">Accepted</span></p>'; }
-    catch (e: any) { alert(String(e)); }
-  });
-  document.querySelector("#repair-reject")?.addEventListener("click", async () => {
-    try { await invoke("reject_repair", { storePath: repairStorePath, attestationHash: repairHash }); (document.querySelector("#repair-result") as HTMLElement).innerHTML += '<p><span class="badge s-failed">Rejected</span></p>'; }
-    catch (e: any) { alert(String(e)); }
-  });
-}
-
-interface RepairSubmitResp { job_id: string; status: string; attestation_hash: string; message: string; }
-interface RepairJobResp { id: string; status: string; attestation_hash: string; diff_path: string; error: string; started_at: string; }
+interface RepairJobDto { job_id: string; status: string; attestation_hash: string; diff_path: string; error: string; started_at: string; }
