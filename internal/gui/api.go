@@ -5,7 +5,6 @@
 package gui
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -192,8 +191,6 @@ func RunRepair(req RepairRequest, cfg RepairConfig, s *store.Store) RepairResult
 	if err != nil {
 		return RepairResult{Error: fmt.Sprintf("produce attestation: %v", err)}
 	}
-
-	_ = context.Background() // used for store queries in future IPC
 
 	return RepairResult{
 		AttestationHash: row.AttestationHash,
