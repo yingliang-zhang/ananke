@@ -206,10 +206,10 @@ package names and IPC commands are NOT changed (frozen hash contracts).
 | File | What changes | What stays |
 |------|-------------|------------|
 | `gui/src/main.ts` | "Repair" tab label → "Chat" tab; `renderRepairPanel` → `renderChatPanel`; `repairMessages` → `chatMessages`; `sendRepairMessage` → `sendChatMessage`; `repairJobId` → `activeJobId`; CSS classes `.repair-msg` → `.chat-msg` | `RepairJobDto`/`RepairMessageDto` interfaces (internal type names) |
-| `README.md` §6 | "repair flow" → "agent coding flow" | ADR-0005 title (immutable, supersede with new ADR) |
+| `README.md` §6 | "repair flow" -> "agent coding flow" | ADR-0005 title (immutable; scope reframed by ADR-0006) |
 | `docs/gui-v0.1-design.md` | Add amendment note linking to first-principles-redesign.md | Original text (historical record) |
 | `docs/gui-repair-interaction-design.md` | Add "SUPERSEDED" header pointing to first-principles-redesign.md | Original text (historical record) |
-| ADR-0005 | Add superseding ADR-0006 for "controlled coding" framing | ADR-0005 title and content (immutable history) |
+| ADR-0005 | Add note: scope reframed by ADR-0006 (controlled coding); title and content immutable | ADR-0005 title and content (immutable history) |
 | `internal/lifecycle/engine_repair.go` | No user-facing changes | Internal file name, function names |
 | `internal/repairrunner/`, `internal/repaircontract/`, `internal/repairverifier/` | No changes — frozen hash contracts | Package names are implementation details |
 | IPC commands (`repair-request`, `repair-poll`, etc.) | No changes — internal daemon commands | Wire protocol names are implementation details |
@@ -244,7 +244,7 @@ package names and IPC commands are NOT changed (frozen hash contracts).
 - Auto-run-creation on first message in a new conversation
 - Progressive collapse of agent tool activity
 - `contracts/` schema source: `conversation.user_request`, `conversation.agent_reasoning`, `conversation.agent_evidence`, `conversation.review_action` event types (schema-first, codegen'd via ADR-0004 pipeline)
-- ADR-0006: "Controlled coding" framing (this document)
+- ADR-0006: "Controlled coding" framing (authorized by ADR-0006, separate file)
 
 ## Resolved Decisions
 

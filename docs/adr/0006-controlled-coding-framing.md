@@ -11,8 +11,9 @@ for managing AI agent repairs to code with cryptographic trust verification.
 During development, three direction divergences revealed that the "repair"
 framing is too narrow and misleading:
 
-1. A standalone `ananke-repair` CLI binary was built when the architecture
-   specified a single daemon + Tauri 2 GUI.
+1. A web GUI (`cmd/ananke-repair-gui`) was built when the architecture
+   specified Tauri 2 as the only operator surface. (This also produced a
+   standalone `ananke-repair` CLI binary as a side effect.)
 2. A form-based "Repair" tab was built inside the Run detail view when the
    user wanted a chat-first conversational interface.
 3. The Rust layer spawned CLI processes when the architecture specified

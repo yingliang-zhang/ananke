@@ -151,7 +151,7 @@ proves nothing.
 
 ### 6. At-most-once effects, never exactly-once
 
-Ananke's repair flow guarantees at-most-once automatic phase launch: any
+Ananke's agent coding flow guarantees at-most-once automatic phase launch: any
 crash after a claim may mean zero or partial effects and becomes signed
 `waiting_for_human`. It is never automatically resumed. This is a
 deliberate trade-off: automatic resume requires exactly-once machinery
