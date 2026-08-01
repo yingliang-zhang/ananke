@@ -217,10 +217,11 @@ package names and IPC commands are NOT changed (frozen hash contracts).
 
 ### CLI deletion safety (F4 verification)
 
-- `grep -rn "ananke-repair" cmd/ananke/ cmd/ananke-supervisor/ internal/lifecycle/ internal/supervisor/ internal/trustedsupervisor/ .github/ scripts/` → **zero references** (verified 2026-08-01)
+- `grep -rn "ananke-repair" cmd/ananke/ cmd/ananke-supervisor/ internal/lifecycle/ internal/supervisor/ internal/trustedsupervisor/ .github/ scripts/` → **zero spawn/import references** (verified 2026-08-01). Remaining matches of `ananke-repair` in `internal/lifecycle/engine_repair.go` and `internal/gui/api.go` are `os.MkdirTemp` path prefixes (`/tmp/ananke-repair-*`), not binary invocations.
 - `cmd/ananke-repair` is not spawned by the supervisor, bootstrap, or any CI job
 - Headless execution is deferred — if needed later, add a `--headless` flag to the main `ananke` binary rather than a separate binary
 - Stale root binaries (`~/go/bin/ananke-repair`, `.ananke/bin/ananke-repair`) should be cleaned up after deletion
+- **P6 hash-binding locus**: the frozen preimage strings in `RepairContext` (e.g., `"ananke-repair-auth"`, `"ananke-repair-dispatch"`, `"ananke-repair-approval"`) are the actual hash binding locus, not package paths. Deleting `cmd/ananke-repair/` does not alter any hash preimage — the preimage strings live in `internal/repairrunner/` and `internal/gui/api.go`, not in the deleted binary.
 
 ### Delete
 - `cmd/ananke-repair/` (CLI binary)
@@ -242,6 +243,8 @@ package names and IPC commands are NOT changed (frozen hash contracts).
 - Startup state restoration (restore last Project/Workstream/conversation)
 - Auto-run-creation on first message in a new conversation
 - Progressive collapse of agent tool activity
+- `contracts/` schema source: `conversation.user_request`, `conversation.agent_reasoning`, `conversation.agent_evidence`, `conversation.review_action` event types (schema-first, codegen'd via ADR-0004 pipeline)
+- ADR-0006: "Controlled coding" framing (this document)
 
 ## Resolved Decisions
 
