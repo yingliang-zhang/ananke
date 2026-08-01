@@ -106,6 +106,10 @@ function bindRepairPanel() {
   const input = document.querySelector<HTMLInputElement>("#repair-input");
   if (btn) btn.onclick = () => void sendRepairMessage();
   if (input) input.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendRepairMessage(); } };
+  // F2 fix: restore conversation from daemon on panel mount.
+  if (repairJobId && repairMessages.length === 0) {
+    void restoreRepairMessages();
+  }
   // Bind evidence action buttons
   document.querySelectorAll<HTMLButtonElement>(".repair-view-diff").forEach(b => b.onclick = async () => {
     const dp = b.dataset.diff; if (!dp) return;
@@ -122,7 +126,13 @@ function bindRepairPanel() {
     try { await invoke("review_repair", { attestationHash: b.dataset.hash, action: "reject" }); repairMessages.push({role:"system",type:"info",content:"✗ Repair rejected."}); renderRepairTab(); }
     catch (e: any) { alert(String(e)); }
   });
-  document.querySelectorAll<HTMLButtonElement>(".repair-ask").forEach(b => b.onclick = () => {
+  document.querySelectorAll<HTMLButtonElement>(".repair-ask").forEach(b => b.onclick = async () => {
+    // F1 fix: call review_repair with ask_changes action, then focus input for follow-up.
+    const hash = b.dataset.hash;
+    if (hash) {
+      try { await invoke("review_repair", { attestationHash: hash, action: "ask_changes" }); }
+      catch (e: any) { /* non-fatal: daemon treat ask_changes as no-op */ }
+    }
     const input = document.querySelector<HTMLInputElement>("#repair-input");
     if (input) { input.focus(); input.placeholder = "Describe what to change..."; }
   });
@@ -137,8 +147,11 @@ function renderRepairTab() { const el = document.querySelector<HTMLElement>("#re
 }).join(""); bindRepairPanel(); }
 
 async function sendRepairMessage() {
+  // F3 fix: disable Send while a repair is in flight.
+  if (repairPolling) return;
   const input = document.querySelector<HTMLInputElement>("#repair-input");
   const adapterSel = document.querySelector<HTMLSelectElement>("#repair-adapter");
+  const sendBtn = document.querySelector<HTMLButtonElement>("#repair-send-btn");
   if (!input) return;
   const text = input.value.trim();
   if (!text) return;
@@ -149,6 +162,7 @@ async function sendRepairMessage() {
   // Add user message to conversation
   repairMessages.push({role:"user",type:"user_request",content:text});
   input.value = "";
+  if (sendBtn) sendBtn.disabled = true;
   repairMessages.push({role:"agent",type:"agent_reasoning",content:"Starting repair..."});
   renderRepairTab();
 
@@ -179,16 +193,37 @@ async function pollRepair() {
         setTimeout(poll, 3000);
       } else if (job.status === "completed") {
         repairPolling = false;
+        const sendBtn = document.querySelector<HTMLButtonElement>("#repair-send-btn"); if (sendBtn) sendBtn.disabled = false;
         repairMessages.push({role:"agent",type:"agent_evidence",content:`Repair completed. Attestation signed: ${esc(job.attestation_hash)}`,attestationHash:job.attestation_hash,diffPath:job.diff_path});
         renderRepairTab();
       } else {
         repairPolling = false;
+        const sendBtn = document.querySelector<HTMLButtonElement>("#repair-send-btn"); if (sendBtn) sendBtn.disabled = false;
         repairMessages.push({role:"system",type:"error",content:`Failed: ${esc(job.error)}`});
         renderRepairTab();
       }
-    } catch { repairPolling = false; }
+    } catch { repairPolling = false; const sendBtn = document.querySelector<HTMLButtonElement>("#repair-send-btn"); if (sendBtn) sendBtn.disabled = false; repairMessages.push({role:"system",type:"error",content:"Polling error — connection lost."}); renderRepairTab(); }
   };
   poll();
 }
 
 interface RepairJobDto { job_id: string; status: string; attestation_hash: string; diff_path: string; error: string; started_at: string; }
+interface RepairMessageDto { type: string; content: string; attestation_hash: string; diff_path: string; }
+
+// F2 fix: restore conversation from daemon.
+async function restoreRepairMessages() {
+  if (!repairJobId) return;
+  try {
+    const msgs = await invoke<RepairMessageDto[]>("get_repair_messages", { jobId: repairJobId });
+    if (msgs && msgs.length > 0) {
+      repairMessages = msgs.map(m => ({
+        role: m.type === "error" ? "system" : "agent" as const,
+        type: m.type,
+        content: m.content,
+        attestationHash: m.attestation_hash || undefined,
+        diffPath: m.diff_path || undefined,
+      }));
+      renderRepairTab();
+    }
+  } catch { /* daemon may have evicted the job — silently ignore */ }
+}
