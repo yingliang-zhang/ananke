@@ -106,8 +106,9 @@ async function submitRepair() {
 async function pollRepair() {
   if (repairPolling || !repairJobId) return;
   repairPolling = true;
-  const el = document.querySelector<HTMLElement>("#repair-result");
   const poll = async () => {
+    // R3-01 fix: re-query el per tick — don't capture a detached node.
+    const el = document.querySelector<HTMLElement>("#repair-result");
     try {
       const job = await invoke<RepairJobResp>("poll_repair_job", { jobId: repairJobId });
       if (job.status === "running") {
