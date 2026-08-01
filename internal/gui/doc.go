@@ -1,9 +1,5 @@
-// Package gui implements the Ananke controlled-repair GUI wiring for the
-// Tauri 2 desktop shell. It provides Go-side types, interfaces, and a
-// simple HTTP API that the Tauri 2 frontend calls for repair submission,
-// status monitoring, evidence display, and accept/reject actions.
-//
-// The GUI is intentionally minimal: it provides the API surface and types
-// for the controlled-repair flow without the full Tauri 2 frontend. The
-// frontend (HTML/CSS/JS) will be added in a subsequent step.
+// Package gui provides the repair execution logic for the Go daemon.
+// The HTTP server and embedded HTML frontend have been removed (audit
+// divergence fix: the Tauri 2 native GUI is the only operator surface).
+// RunRepair is the salvaged entry point for the Go daemon's repair IPC.
 package gui
