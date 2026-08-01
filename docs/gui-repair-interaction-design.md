@@ -20,9 +20,12 @@ within the existing `Project → Workstream → Run` information architecture.
 
 ## Design Principles
 
-1. **Repair lives inside a Run, not as a separate tab.** A repair is a kind of
-   run activity. The user launches a repair from within a Run's detail view, and
-   the repair conversation appears alongside activity and transcript.
+1. **Repair lives inside a Run, not as a separate surface.** A repair is a kind of
+   run activity. The user starts a repair from within a Run's detail view via an
+   action button ("Request Repair"). The repair conversation appears in the same
+   detail pane, switching from the Activity/Transcript view to the Repair view.
+   In the nav, Repair is a view mode (like Activity/Transcript), not a detached
+   tab — it is bound to the selected Run and has no existence outside it.
 
 2. **The conversation is the primary interface.** The user types a natural-language
    request ("fix the deadlock in ananke-repair-gui") and the agent responds with
@@ -121,17 +124,34 @@ Tauri 2 TS frontend (chat messages update)
 
 ### Go daemon repair IPC
 
-The Go daemon gains these Unix-socket commands (matching existing pattern):
+The Go daemon gains these Unix-socket commands (matching existing pattern).
+**Schema-first (Invariant 5):** all IPC payload types must be defined in the
+schema source under `contracts/` and codegen'd via the ADR-0004 pipeline.
+No hand-synced TS interfaces. The current `RepairSubmitResp`/`RepairJobResp`
+hand-synced interfaces are a known divergence — this contract requires
+their replacement with codegen'd types.
 
 | Command | Direction | Description |
 |---------|-----------|-------------|
-| `repair_request` | TS → Go | Start a repair (runId, requestText, adapterType) |
-| `repair_poll` | TS → Go | Poll repair job state (runId) |
-| `repair_review` | TS → Go | Accept/reject repair attestation (runId, action) |
-| `repair_messages` | TS → Go | Get conversation messages for a run (runId) |
+| `repair_request` | TS → Go | Start a repair (runId, requestText, adapterType, optional message for "ask for changes") |
+| `repair_poll` | TS → Go | Poll repair job state (runId) — returns job status + new messages since last poll cursor |
+| `repair_review` | TS → Go | Accept/reject/ask-for-changes repair attestation (runId, action, optional message) |
+| `repair_messages` | TS → Go | Get conversation messages for a run (runId, optional sinceSeq cursor) |
 
-The Go daemon salvages `internal/gui/api.go`'s `runRepair` logic — it already
-correctly calls repairrunner in-process with proper attestation signing.
+**"Ask for changes"** is a `repair_review` with `action="ask_changes"` and a
+`message` field containing the user's feedback. The Go daemon starts a new
+repair attempt within the same Run, preserving conversation context.
+
+**Poll vs. messages boundary:** `repair_poll` returns job state (running/
+completed/failed) + a `messageCount` and `lastMessageSeq`. The frontend uses
+this to decide whether to call `repair_messages` (only when new messages
+exist, avoiding full-history re-render every 3s). `repair_messages` returns
+messages since the given cursor, not the full history.
+
+**Diff transport:** diffs are not inlined in poll responses (size). The
+`agent_diff` message type carries a `diffPath` field; the frontend calls a
+`read_repair_diff` IPC (constrained to the run's diff path by the Go daemon,
+not the frontend) to lazy-load the diff when the user clicks "View Diff."
 
 ### Tauri Rust layer
 
@@ -166,6 +186,21 @@ replace the lifecycle surface — it adds the repair interaction model that the
 original contract deferred. The v0.1 statement "is not a generic chat client"
 remains true: the lifecycle surface (runs, events, diagnostics) is structured.
 Only the repair interaction within a run is conversational.
+
+## Traceability (Principle 7)
+
+This contract introduces the following new surfaces and IPC paths. Each is
+mapped to the ARCHITECTURE.md invariant it satisfies:
+
+| Surface/Path | Invariant | Citation |
+|---|---|---|
+| `repair_request` IPC command | #1 (Go authority), #5 (schema-first) | This contract §Architecture; ADR-0004 codegen pipeline |
+| `repair_poll` IPC command | #1 (Go authority), #6 (append-only journal) | This contract §Architecture |
+| `repair_review` IPC command | #1 (Go authority), #4 (finalization outbox) | This contract §Architecture |
+| `repair_messages` IPC command | #1 (Go authority), #6 (append-only journal) | This contract §Architecture |
+| Conversational repair panel | Tauri 2 thin shell | This contract; `docs/gui-v0.1-design.md` addendum |
+| Repair conversation persistence | #6 (append-only SQLite journal) | This contract §Design Principles #5 |
+| `read_repair_diff` IPC (Go-owned) | #1 (Go authority) | This contract §Architecture §Diff transport |
 
 ## Non-Goals
 

@@ -150,8 +150,11 @@ the MVP demonstrates a real need, it can be added later.
 
 No component, IPC path, operator surface, or authority boundary ships
 without citing its locus in [ARCHITECTURE.md](ARCHITECTURE.md) or a
-design contract. Any new surface, authority, or IPC path requires an
-ADR **before** implementation.
+design contract (e.g., `docs/gui-*.md`). Any new surface, authority,
+or IPC path requires an ADR or design contract **before** implementation.
+A design contract (like `docs/gui-repair-interaction-design.md`)
+satisfies this gate; it does not need to be in the ADR table, but must
+be linked from ARCHITECTURE.md or the relevant design doc.
 
 This principle was added after three direction divergences during
 development (a web GUI built when the architecture specified Tauri 2;
